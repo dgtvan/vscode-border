@@ -1,0 +1,6 @@
+{
+    // Disable VS Code's built-in GitHub account picker for git operations in this
+    // repo; git push/pull falls back to the system credential manager, which
+    // uses the "dgtvan" username already configured via credential.username below.
+    "github.gitAuthentication": false
+}
