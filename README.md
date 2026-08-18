@@ -3,6 +3,8 @@
 Draws a colored border around every VS Code window so you can tell windows
 apart at a glance. Each window gets its own color, assigned automatically.
 
+![Four VS Code windows, each with a distinct colored border](assets/demo.png)
+
 ## How it works
 
 Each VS Code top-level window gets its own lightweight, click-through,
