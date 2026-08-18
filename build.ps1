@@ -16,8 +16,9 @@ if (-not (Test-Path $windres)) {
 }
 
 $root = $PSScriptRoot
-$src = Join-Path $root "src\vscode_border.cpp"
-$rc = Join-Path $root "src\resource.rc"
+$srcDir = Join-Path $root "src"
+$sources = Get-ChildItem -Path $srcDir -Filter "*.cpp" | ForEach-Object { $_.FullName }
+$rc = Join-Path $srcDir "resource.rc"
 $outDir = Join-Path $root "bin"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $outExe = Join-Path $outDir "vscode_border.exe"
@@ -29,7 +30,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $gxx -O2 -municode -mwindows -std=c++17 -static -static-libgcc -static-libstdc++ `
-    $src $resObj -o $outExe -ldwmapi -lshell32 -lpsapi -luser32 -lgdi32
+    @sources $resObj -o $outExe -ldwmapi -lshell32 -lpsapi -luser32 -lgdi32
 if ($LASTEXITCODE -ne 0) {
     throw "Build failed."
 }

@@ -60,10 +60,36 @@ first build):
 | `opacity` | 0 (invisible) - 255 (fully opaque). |
 | `rescan_interval_ms` | Safety-net rescan interval; new/closed windows are normally detected instantly. |
 | `colors` | Comma-separated `RRGGBB` hex colors, assigned round-robin to windows. |
+| `show_label` | Show the folder/repo name as a label chip inside the border's top-left corner (`true`/`false`). |
+| `label_height` | Label chip height in pixels. |
+| `label_font_size` | Label text font size in points. |
 
 After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
 next launch (windows already tracked keep the color they were assigned).
+
+### Getting the repo/branch label instead of just the folder name
+
+![Label chip showing repo/branch on one window and the folder name on another](assets/label.png)
+
+The label is scraped from the VS Code window's title -- there's no other
+way for an external app to ask VS Code what folder a window has open. By
+default VS Code's title only contains the folder name, so to show the git
+repo + branch instead, add this to VS Code's `settings.json`:
+
+```json
+"window.title": "${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName}"
+```
+
+With this set, the label shows `repo - branch` when the window is inside a
+git repo, and falls back to just the folder name otherwise (e.g. a plain
+folder with no `.git`, or an empty window). If you use git worktrees, VS
+Code's `${activeRepositoryName}` shows the *worktree's* folder name rather
+than the main repo's -- this app corrects that automatically as long as
+your worktrees follow the `<mainRepo>.worktrees\<worktreeName>` layout, by
+reading VS Code's own recently-opened-folder records. That mapping is
+built once and cached in memory; use **Reload Config** from the tray icon
+to pick up worktrees created after the app started.
 
 ## Known limitations
 
@@ -76,7 +102,14 @@ next launch (windows already tracked keep the color they were assigned).
 
 ## Project layout
 
-- `src/vscode_border.cpp` -- the app.
+- `src/vscode_border.cpp` -- tray icon and app lifecycle (`wWinMain`).
+- `src/logger.*` -- file logging.
+- `src/config.*` -- `config.ini` loading.
+- `src/window_title.*` -- VS Code window title parsing (repo/branch/folder).
+- `src/worktree_resolver.*` -- maps a git worktree's folder name back to its main repo name.
+- `src/window_discovery.*` -- finding/filtering VS Code top-level windows.
+- `src/overlay.*` -- layered overlay window creation/painting.
+- `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, sync.
 - `src/resource.rc`, `assets/app.ico`, `assets/square-dashed.png` -- tray icon resource (`app.ico` is generated from the PNG; see [Credits](#credits)).
 - `config.ini` -- default config template (copied to `bin\` on first build).
 - `build.ps1` -- build script.
