@@ -71,6 +71,7 @@ events can trigger a (re-)check, each catching a case the others miss:
 | `EVENT_OBJECT_NAMECHANGE` | A new window is often shown *before* its title is set. Without this, a window whose title was empty at SHOW-time would sit untracked until the next safety-net rescan. |
 | `EVENT_OBJECT_DESTROY` | Removes the overlay and frees the window's color slot. |
 | `EVENT_OBJECT_LOCATIONCHANGE` | Move/resize/Z-order/visibility changes -- keeps the overlay glued to its target. |
+| `EVENT_SYSTEM_FOREGROUND` | Bringing a window to the front (e.g. alt-tab) is a pure z-order change with no move/resize, which `LOCATIONCHANGE` isn't reliably fired for. Without this, the overlay only restacks itself on the next safety-net rescan -- a noticeable lag when switching back to a VS Code window. |
 
 ## Why there's still a periodic rescan, and what else was considered
 
@@ -115,3 +116,54 @@ numbers. In summary, three choices matter most:
    returns a freshly committed buffer, which Windows guarantees is already
    zero-filled. An explicit `ZeroMemory` over the whole buffer would be a
    second full-buffer pass for no benefit.
+
+## Label text: scraped from the window title, no other source exists
+
+`window_title.cpp` derives the border label entirely from `GetWindowTextW`
+-- there is no VS Code API or IPC an external Win32 process can use to ask
+"what folder/repo is this window showing". This was confirmed by probing
+`SHGetPropertyStoreForWindow` on live VS Code windows: it returns zero
+properties (unlike, say, Chrome, which populates
+`AppUserModel_RelaunchCommand`). Title scraping plus
+`EVENT_OBJECT_NAMECHANGE` (see the window-detection table above) is the
+only zero-cost option, so `ParseVSCodeTitle`'s parsing is tuned to this
+repo's actual `window.title` setting:
+
+```
+${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName}
+```
+
+Outside a git repo the first two placeholders collapse to a literal `"-"`
+each (see the comment on `ParseVSCodeTitle` for the exact title shapes this
+produces), and the default un-customized VS Code title (`"file - folder"`
+or just `"folder"`) is also handled as a fallback. If this setting changes,
+`ParseVSCodeTitle` needs a matching update.
+
+Because `${activeRepositoryName}` shows a git worktree's own folder name
+rather than the main repo's, `worktree_resolver.cpp` separately maps that
+back to the main repo name -- see the comments there for how.
+
+## Known issue: label can occasionally blink
+
+The label chip sits just inside the border, overlapping the target
+window's own top-left corner (where VS Code renders its own title bar/tab
+area). VS Code repaints that area on every focus change; our overlay
+repaints its own layered surface independently via `UpdateLayeredWindow`.
+Since these are two separate top-level windows compositing over the same
+pixels, there's no Windows API to guarantee DWM always composites ours
+*after* VS Code's -- occasionally it doesn't, and VS Code's real title
+flashes through for a single frame before our label re-covers it.
+
+Confirmed via `verbose_logging`: during a reproduction, the log showed only
+repeated `EVENT_SYSTEM_FOREGROUND` events with no `REPAINT`/`HIDE` from our
+own code, ruling out a bug in our repaint logic -- this is a genuine DWM
+compositing-order race between two independent windows, not something we
+control.
+
+The only real fix is to never share pixels with the target's own content
+in the first place (e.g. drawing the label entirely above the border,
+outside the window's bounds, in space this app exclusively owns -- this
+was prototyped and confirmed to eliminate the blink). That was reverted by
+request in favor of keeping the label inset into the border's corner
+(cosmetic preference), accepting the occasional blink as a known,
+extremely minor trade-off.
