@@ -519,7 +519,8 @@ static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
 
 static const UINT WM_APP_TRAYICON = WM_APP + 1;
 static const UINT ID_TRAY_RELOAD = 1;
-static const UINT ID_TRAY_EXIT = 2;
+static const UINT ID_TRAY_OPEN_CONFIG = 2;
+static const UINT ID_TRAY_EXIT = 3;
 static const UINT_PTR TIMER_RESCAN = 1;
 
 static NOTIFYICONDATAW g_nid = {};
@@ -559,6 +560,7 @@ static void ShowTrayMenu(HWND hwnd) {
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload Config");
+    AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_CONFIG, L"Open Config");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Exit");
     SetForegroundWindow(hwnd); // required so the menu dismisses correctly
@@ -575,6 +577,14 @@ static void ReloadConfig() {
     }
     KillTimer(g_nid.hWnd, TIMER_RESCAN);
     SetTimer(g_nid.hWnd, TIMER_RESCAN, g_config.rescanIntervalMs, nullptr);
+}
+
+static void OpenConfigInDefaultEditor() {
+    std::wstring configPath = GetConfigPath();
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", configPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if ((INT_PTR)result <= 32) {
+        Log(L"ShellExecuteW(open config) failed for %ls, code=%Id", configPath.c_str(), (INT_PTR)result);
+    }
 }
 
 static void CleanupAndQuit(HWND hwnd) {
@@ -602,6 +612,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 CleanupAndQuit(hwnd);
             } else if (LOWORD(wParam) == ID_TRAY_RELOAD) {
                 ReloadConfig();
+            } else if (LOWORD(wParam) == ID_TRAY_OPEN_CONFIG) {
+                OpenConfigInDefaultEditor();
             }
             return 0;
         case WM_TIMER:
