@@ -63,6 +63,7 @@ first build):
 | `show_label` | Show the folder/repo name as a label chip inside the border's top-left corner (`true`/`false`). |
 | `label_height` | Label chip height in pixels. |
 | `label_font_size` | Label text font size in points. |
+| `label_text_color` | Label text color: a hex `RRGGBB` color, or `auto` to pick black/white based on contrast against the border color. Default `000000` (black). |
 
 After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the

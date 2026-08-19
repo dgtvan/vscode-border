@@ -12,6 +12,8 @@ struct Config {
     bool showLabel = true;
     int labelHeight = 22;
     int labelFontSize = 13;
+    bool labelTextColorAuto = false; // true = auto black/white contrast against the border color
+    COLORREF labelTextColor = RGB(0, 0, 0); // used when labelTextColorAuto is false
     bool verboseLogging = false; // logs every WinEvent + overlay sync decision for tracked windows
     std::vector<COLORREF> palette;
 };
