@@ -1,5 +1,6 @@
 #include "worktree_resolver.h"
 
+#include "config.h"
 #include "logger.h"
 
 #include <windows.h>
@@ -88,7 +89,10 @@ static void ProcessWorkspaceJson(const std::wstring& jsonPath) {
 
     std::wstring path = FileUriToPath(uri);
     while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
-    if (path.empty()) return;
+    if (path.empty()) {
+        Log(L"worktree resolver: %ls -> unparseable uri [%hs]", jsonPath.c_str(), uri.c_str());
+        return;
+    }
 
     size_t slash = path.find_last_of(L"\\/");
     if (slash == std::wstring::npos) return;
@@ -99,11 +103,21 @@ static void ProcessWorkspaceJson(const std::wstring& jsonPath) {
     std::wstring parentName = (parentSlash == std::wstring::npos) ? parent : parent.substr(parentSlash + 1);
 
     size_t suffixLen = wcslen(kWorktreesSuffix);
-    if (parentName.size() <= suffixLen) return;
+    if (parentName.size() <= suffixLen) {
+        Log(L"worktree resolver: path=[%ls] parent=[%ls] -- not a worktree layout (parent too short)", path.c_str(),
+            parentName.c_str());
+        return;
+    }
     std::wstring parentTail = ToLowerCopy(parentName.substr(parentName.size() - suffixLen));
-    if (parentTail != kWorktreesSuffix) return;
+    if (parentTail != kWorktreesSuffix) {
+        Log(L"worktree resolver: path=[%ls] parent=[%ls] -- not a worktree layout (no .worktrees suffix)",
+            path.c_str(), parentName.c_str());
+        return;
+    }
 
     std::wstring mainRepoName = parentName.substr(0, parentName.size() - suffixLen);
+    Log(L"worktree resolver: leaf=[%ls] -> mainRepo=[%ls] (from path=[%ls])", leaf.c_str(), mainRepoName.c_str(),
+        path.c_str());
     g_cache[ToLowerCopy(leaf)] = mainRepoName;
 }
 
@@ -111,13 +125,19 @@ static void ScanUserDataDir(const std::wstring& userDir) {
     std::wstring pattern = userDir + L"\\workspaceStorage\\*";
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) {
+        Log(L"worktree resolver: no workspaceStorage under [%ls] (lastError=%lu)", userDir.c_str(), GetLastError());
+        return;
+    }
+    int entryCount = 0;
     do {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        entryCount++;
         ProcessWorkspaceJson(userDir + L"\\workspaceStorage\\" + fd.cFileName + L"\\workspace.json");
     } while (FindNextFileW(h, &fd));
     FindClose(h);
+    Log(L"worktree resolver: scanned %d workspaceStorage entries under [%ls]", entryCount, userDir.c_str());
 }
 
 static void BuildCache() {
@@ -137,16 +157,49 @@ static void BuildCache() {
     Log(L"worktree resolver: cache built, %zu worktree(s) mapped", g_cache.size());
 }
 
+static ULONGLONG g_lastRebuildTick = 0;
+static const ULONGLONG kRebuildCooldownMs = 15000;
+
 std::wstring ResolveMainRepoName(const std::wstring& repoName) {
     if (!g_cacheBuilt) {
         BuildCache();
         g_cacheBuilt = true;
+        g_lastRebuildTick = GetTickCount64();
     }
-    auto it = g_cache.find(ToLowerCopy(repoName));
-    return it != g_cache.end() ? it->second : L"";
+
+    std::wstring key = ToLowerCopy(repoName);
+    auto it = g_cache.find(key);
+
+    // A miss might just mean this worktree didn't exist yet when the cache
+    // was last built (e.g. it was created/opened after the app started or
+    // after the last rebuild) -- rebuild once and retry before giving up,
+    // so this self-corrects without needing a manual Reload Config.
+    // Rate-limited so a genuinely-not-a-worktree repo (the common case)
+    // doesn't trigger a rescan on every single lookup.
+    if (it == g_cache.end()) {
+        ULONGLONG now = GetTickCount64();
+        if (now - g_lastRebuildTick >= kRebuildCooldownMs) {
+            BuildCache();
+            g_lastRebuildTick = now;
+            it = g_cache.find(key);
+        }
+    }
+
+    if (it == g_cache.end()) {
+        if (g_config.verboseLogging) {
+            Log(L"worktree resolver: no mapping for repo=[%ls] (cache has %zu entries)", repoName.c_str(),
+                g_cache.size());
+        }
+        return L"";
+    }
+    if (g_config.verboseLogging) {
+        Log(L"worktree resolver: resolved repo=[%ls] -> mainRepo=[%ls]", repoName.c_str(), it->second.c_str());
+    }
+    return it->second;
 }
 
 void RefreshWorktreeCache() {
     BuildCache();
     g_cacheBuilt = true;
+    g_lastRebuildTick = GetTickCount64();
 }
