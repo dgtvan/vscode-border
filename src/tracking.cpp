@@ -23,6 +23,10 @@ static std::wstring BuildLabelForTitle(const std::wstring& title) {
 }
 
 static HINSTANCE g_hInstance = nullptr;
+static HWND g_ownerWnd = nullptr;
+
+const UINT_PTR kForegroundPollTimerId = 2;
+static const UINT kForegroundPollIntervalMs = 50;
 
 struct TrackedWindow {
     HWND overlay = nullptr;
@@ -206,6 +210,22 @@ static void ScheduleLabelUpdate(HWND target) {
     }
 }
 
+static HWND g_lastForeground = nullptr;
+
+// Starts the poll timer the moment something is worth polling for, stops it
+// the moment nothing is -- so a desktop with no VS Code window open never
+// pays for it, and a laptop isn't kept out of deeper idle/sleep states by a
+// 20Hz timer running for no reason.
+static void UpdateForegroundPollTimer() {
+    if (!g_ownerWnd) return;
+    if (!g_tracked.empty()) {
+        SetTimer(g_ownerWnd, kForegroundPollTimerId, kForegroundPollIntervalMs, nullptr);
+    } else {
+        KillTimer(g_ownerWnd, kForegroundPollTimerId);
+        g_lastForeground = nullptr; // don't skip the next tracked window's first sync
+    }
+}
+
 static void TrackWindow(HWND hwnd) {
     if (g_tracked.find(hwnd) != g_tracked.end()) return;
 
@@ -232,6 +252,7 @@ static void TrackWindow(HWND hwnd) {
     g_tracked[hwnd] = tw;
     SyncOverlay(hwnd, g_tracked[hwnd]);
     AddPidHooks(pid);
+    UpdateForegroundPollTimer();
 
     Log(L"tracked hwnd=%p colorIndex=%d overlay=%p pid=%lu title=[%ls] label=[%ls]",
         hwnd, tw.colorIndex, tw.overlay, pid, title, tw.label.c_str());
@@ -244,6 +265,7 @@ static void UntrackWindow(HWND hwnd) {
     ReleasePidHooks(it->second.pid);
     DestroyWindow(it->second.overlay);
     g_tracked.erase(it);
+    UpdateForegroundPollTimer();
 
     auto debounce = g_labelDebounceByHwnd.find(hwnd);
     if (debounce != g_labelDebounceByHwnd.end()) {
@@ -258,8 +280,9 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM) {
     return TRUE;
 }
 
-void TrackingInit(HINSTANCE hInstance) {
+void TrackingInit(HINSTANCE hInstance, HWND ownerWnd) {
     g_hInstance = hInstance;
+    g_ownerWnd = ownerWnd;
 }
 
 void RescanAllWindows() {
@@ -284,6 +307,15 @@ void ForceRepaintAllTracked() {
     }
 }
 
+void PollForegroundChange() {
+    HWND fg = GetForegroundWindow();
+    if (fg == g_lastForeground) return;
+    g_lastForeground = fg;
+
+    auto it = g_tracked.find(fg);
+    if (it != g_tracked.end()) SyncOverlay(fg, it->second);
+}
+
 void RefreshAllLabels() {
     for (auto& kv : g_tracked) {
         wchar_t title[512] = {};
@@ -297,6 +329,7 @@ void CleanupAllTracked() {
     for (auto& kv : g_tracked) DestroyWindow(kv.second.overlay);
     g_tracked.clear();
     ReleaseAllPidHooks();
+    UpdateForegroundPollTimer();
 }
 
 size_t TrackedWindowCount() {
