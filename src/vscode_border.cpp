@@ -43,6 +43,7 @@ static const UINT ID_TRAY_RELOAD = 1;
 static const UINT ID_TRAY_OPEN_CONFIG = 2;
 static const UINT ID_TRAY_EXIT = 3;
 static const UINT_PTR TIMER_RESCAN = 1;
+// TIMER id 2 is kForegroundPollTimerId (tracking.cpp), started/stopped there.
 
 static NOTIFYICONDATAW g_nid = {};
 // Global (idProcess=0) hooks: only for the low-frequency events needed to
@@ -142,6 +143,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == TIMER_RESCAN) {
                 RescanAllWindows();
                 FlushLogBuffer(); // periodic, off the hot event path -- see LogFast
+            } else if (wParam == kForegroundPollTimerId) {
+                PollForegroundChange();
             }
             return 0;
         case WM_DESTROY:
@@ -161,7 +164,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
 
     g_hInstance = hInstance;
     g_config = LoadConfig(GetConfigPath());
-    TrackingInit(hInstance);
 
     const wchar_t* kClassName = L"VSCodeBorderAppWndClass";
     WNDCLASSW wc = {};
@@ -184,6 +186,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         return 1;
     }
 
+    TrackingInit(hInstance, hwnd);
+
     Log(L"=== startup ===");
     AddTrayIcon(hwnd);
     RescanAllWindows();
@@ -199,6 +203,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
                                         nullptr, WinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT);
 
     SetTimer(hwnd, TIMER_RESCAN, g_config.rescanIntervalMs, nullptr);
+    // Foreground-poll timer (id kForegroundPollTimerId) is started by
+    // TrackingInit/RescanAllWindows above, the moment a window is tracked.
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
