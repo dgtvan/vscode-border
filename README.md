@@ -76,11 +76,29 @@ next launch (windows already tracked keep the color they were assigned).
 The label is scraped from the VS Code window's title -- there's no other
 way for an external app to ask VS Code what folder a window has open. By
 default VS Code's title only contains the folder name, so to show the git
-repo + branch instead, add this to VS Code's `settings.json`:
+repo + branch instead, VS Code's `window.title` setting needs to be:
 
 ```json
 "window.title": "${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName}"
 ```
+
+**This is applied automatically -- no manual settings.json editing
+needed.** Whenever `show_label=true` (the default), this app writes that
+`window.title` value into VS Code's global `settings.json` for you (both
+stable and Insiders, whichever are installed), the moment it starts or
+Reload Config runs. If `window.title` already had some other value, the
+original is remembered (in `window_title_state.ini` next to `config.ini`)
+and restored automatically the next time you set `show_label=false` and
+reload. If `window.title` wasn't set at all, it's removed again on
+disable, leaving the file exactly as it was found.
+
+If `window.title` already happened to have exactly that same value before
+this app ever touched it (e.g. you'd set it manually per an older version
+of this doc), it's left alone and not tracked for restoration -- turning
+the label off later won't remove it. If you edit `window.title` yourself
+while the label is on, that edit is respected: this app notices the value
+no longer matches what it wrote and stops managing it rather than
+overwriting your change.
 
 With this set, the label shows `repo - branch` when the window is inside a
 git repo, and falls back to just the folder name otherwise (e.g. a plain
@@ -100,6 +118,11 @@ to pick up worktrees created after the app started.
 - Border thickness/color is drawn by this app, not by Windows -- closing the
   app removes all borders immediately (nothing persists in the registry or
   window state).
+- Deleting/uninstalling this app while `show_label=true` leaves the
+  `window.title` edit it made in VS Code's `settings.json` in place --
+  there's no uninstall hook to restore it. Set `show_label=false` and let
+  it reload (or start it once more) before removing the app if you want
+  that reverted first.
 
 ## Project layout
 
@@ -108,6 +131,7 @@ to pick up worktrees created after the app started.
 - `src/config.*` -- `config.ini` loading.
 - `src/window_title.*` -- VS Code window title parsing (repo/branch/folder).
 - `src/worktree_resolver.*` -- maps a git worktree's folder name back to its main repo name.
+- `src/vscode_settings.*` -- auto-manages VS Code's `window.title` setting to match `show_label` (see [Getting the repo/branch label](#getting-the-repobranch-label-instead-of-just-the-folder-name)).
 - `src/window_discovery.*` -- finding/filtering VS Code top-level windows.
 - `src/overlay.*` -- layered overlay window creation/painting.
 - `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, sync.

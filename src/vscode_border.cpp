@@ -27,6 +27,7 @@
 #include "overlay.h"
 #include "tracking.h"
 #include "worktree_resolver.h"
+#include "vscode_settings.h"
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
@@ -95,6 +96,7 @@ static void ShowTrayMenu(HWND hwnd) {
 
 static void ReloadConfig() {
     g_config = LoadConfig(GetConfigPath());
+    SyncWindowTitleSetting(g_config.showLabel);
     RefreshWorktreeCache();
     RefreshAllLabels();
     ForceRepaintAllTracked();
@@ -164,6 +166,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
 
     g_hInstance = hInstance;
     g_config = LoadConfig(GetConfigPath());
+    SyncWindowTitleSetting(g_config.showLabel);
 
     const wchar_t* kClassName = L"VSCodeBorderAppWndClass";
     WNDCLASSW wc = {};
