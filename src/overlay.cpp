@@ -21,7 +21,8 @@ static COLORREF ContrastTextColor(COLORREF bg) {
 // Only the border bands (and label rect) are touched (not the whole
 // width*height area) so resizing a large window stays cheap.
 void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thickness, int opacity,
-                   const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize) {
+                   const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,
+                   bool labelTextColorAuto, COLORREF labelTextColor) {
     if (width <= 0 || height <= 0) return;
     int t = std::min(thickness, std::min(width, height) / 2);
     if (t < 1) t = 1;
@@ -89,7 +90,7 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
             int lw = std::min(width - 2 * t, (int)textSz.cx + paddingX * 2);
             if (lw > 4) {
                 int lx = t, ly = t;
-                COLORREF textColor = ContrastTextColor(color);
+                COLORREF textColor = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
                 BYTE bgR = GetRValue(color), bgG = GetGValue(color), bgB = GetBValue(color);
                 BYTE txR = GetRValue(textColor), txG = GetGValue(textColor), txB = GetBValue(textColor);
                 UINT32 lpx = (UINT32(255) << 24) | (UINT32(bgR) << 16) | (UINT32(bgG) << 8) | UINT32(bgB);

@@ -103,6 +103,13 @@ Config LoadConfig(const std::wstring& path) {
             cfg.labelFontSize = std::max(6, atoi(val.c_str()));
         } else if (key == "verbose_logging") {
             cfg.verboseLogging = (val == "1" || _stricmp(val.c_str(), "true") == 0);
+        } else if (key == "label_text_color") {
+            if (_stricmp(val.c_str(), "auto") == 0) {
+                cfg.labelTextColorAuto = true;
+            } else {
+                cfg.labelTextColorAuto = false;
+                cfg.labelTextColor = ParseHexColor(val);
+            }
         } else if (key == "colors") {
             std::vector<COLORREF> palette;
             for (const std::string& item : SplitChar(val, ',')) {
@@ -113,8 +120,9 @@ Config LoadConfig(const std::wstring& path) {
         }
     }
 
-    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d label_height=%d label_font_size=%d verbose_logging=%d colors=%zu",
+    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X verbose_logging=%d colors=%zu",
         cfg.thickness, cfg.opacity, cfg.rescanIntervalMs, cfg.showLabel, cfg.labelHeight, cfg.labelFontSize,
+        cfg.labelTextColorAuto, (unsigned)((GetRValue(cfg.labelTextColor) << 16) | (GetGValue(cfg.labelTextColor) << 8) | GetBValue(cfg.labelTextColor)),
         cfg.verboseLogging, cfg.palette.size());
     return cfg;
 }

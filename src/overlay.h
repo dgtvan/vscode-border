@@ -14,5 +14,10 @@ HWND CreateOverlay(HINSTANCE hInstance);
 // top-left corner (overlapping the target's own top-left corner -- see
 // docs/ARCHITECTURE.md's "Known issue: label can occasionally blink" for
 // why, and why it's accepted rather than fixed).
+//
+// Label text color is either fixed (`labelTextColor`, used when
+// `labelTextColorAuto` is false) or auto-picked for contrast against `color`
+// (when `labelTextColorAuto` is true).
 void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thickness, int opacity,
-                   const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize);
+                   const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,
+                   bool labelTextColorAuto, COLORREF labelTextColor);
