@@ -1,4 +1,5 @@
 #include "window_title.h"
+#include "logger.h"
 
 #include <vector>
 
@@ -35,7 +36,12 @@ VSCodeTitleParts ParseVSCodeTitle(const std::wstring& title) {
     std::vector<std::wstring> segments = SplitDashSeparated(t);
     if (segments.size() == 3) {
         if (segments[0] == L"-" && segments[1] == L"-") {
-            parts.folder = segments[2]; // placeholder guard, not normally reachable
+            // Not normally reachable -- the no-repo case collapses to 2
+            // segments (see below), not 3 with literal "-" placeholders.
+            // Seeing this shape suggests window.title isn't the template
+            // this parser expects, e.g. a workspace-level override.
+            LogWarn(L"window_title: unexpected 3-segment placeholder shape, title=[%ls]", title.c_str());
+            parts.folder = segments[2];
         } else {
             parts.repo = segments[0];
             parts.branch = segments[1];
@@ -49,6 +55,15 @@ VSCodeTitleParts ParseVSCodeTitle(const std::wstring& title) {
     } else if (segments.size() == 1) {
         if (segments[0] != L"- -") parts.folder = segments[0]; // "- -" = no repo, no folder open
     } else {
+        // More than 3 " - "-separated segments doesn't match this app's
+        // template or VS Code's un-customized default at all -- most
+        // likely a workspace-level window.title override (see README.md)
+        // is taking priority over the global setting this app manages, so
+        // the label below will just show the raw title instead of
+        // repo/branch.
+        LogWarn(L"window_title: title doesn't match any recognized shape (%zu segments), title=[%ls] -- "
+                L"possibly a workspace-level window.title override",
+                segments.size(), title.c_str());
         parts.folder = t;
     }
     return parts;

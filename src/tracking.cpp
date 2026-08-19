@@ -114,9 +114,7 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     if (!IsWindow(target) || !tw.overlay) return;
 
     if (IsIconic(target) || !IsWindowVisible(target)) {
-        if (g_config.verboseLogging) {
-            LogFast(L"sync hwnd=%p HIDE iconic=%d visible=%d", target, IsIconic(target), IsWindowVisible(target));
-        }
+        LogFastDiag(L"sync hwnd=%p HIDE iconic=%d visible=%d", target, IsIconic(target), IsWindowVisible(target));
         ShowWindow(tw.overlay, SW_HIDE);
         return;
     }
@@ -132,10 +130,8 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     if (ow <= 0 || oh <= 0) return;
 
     if (ow != tw.lastWidth || oh != tw.lastHeight || tw.label != tw.lastLabel) {
-        if (g_config.verboseLogging) {
-            LogFast(L"sync hwnd=%p REPAINT ow=%d oh=%d (was %dx%d) label=[%ls] (was [%ls])", target, ow, oh,
+        LogFastDiag(L"sync hwnd=%p REPAINT ow=%d oh=%d (was %dx%d) label=[%ls] (was [%ls])", target, ow, oh,
                     tw.lastWidth, tw.lastHeight, tw.label.c_str(), tw.lastLabel.c_str());
-        }
         COLORREF color = g_config.palette[tw.colorIndex % g_config.palette.size()];
         PaintOverlay(tw.overlay, ow, oh, color, t, g_config.opacity,
                      tw.label, g_config.showLabel, g_config.labelHeight, g_config.labelFontSize,
@@ -192,9 +188,7 @@ static void CALLBACK LabelDebounceTimerProc(HWND, UINT, UINT_PTR idEvent, DWORD)
     wchar_t title[512] = {};
     GetWindowTextW(target, title, 512);
     tracked->second.label = BuildLabelForTitle(title);
-    if (g_config.verboseLogging) {
-        LogFast(L"namechange(settled) hwnd=%p title=[%ls] label=[%ls]", target, title, tracked->second.label.c_str());
-    }
+    LogFastDiag(L"namechange(settled) hwnd=%p title=[%ls] label=[%ls]", target, title, tracked->second.label.c_str());
     SyncOverlay(target, tracked->second);
 }
 

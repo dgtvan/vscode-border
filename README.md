@@ -46,8 +46,18 @@ Start-Process bin\vscode_border.exe
 ```
 
 It runs in the background with a tray icon (right-click for **Reload
-Config** / **Exit**). To launch it automatically at login, see
-[docs/AUTOSTART.md](docs/AUTOSTART.md).
+Config** / **Open Config** / **Open Log Folder** / **Exit**). To launch it
+automatically at login, see [docs/AUTOSTART.md](docs/AUTOSTART.md).
+
+If something unexpected happens during a run (e.g. a VS Code window's
+title doesn't match any recognized shape -- see [Getting the repo/branch
+label](#getting-the-repobranch-label-instead-of-just-the-folder-name)), the
+tray icon gets a small red asterisk badge and its tooltip changes to say
+so. **Open Log Folder** jumps straight to `bin\vscode_border.log` (same
+folder as `config.ini`; set `verbose_logging=true` in `config.ini` for full
+per-event tracing on top of that). The log starts fresh on every launch,
+so the badge only ever reflects the current run -- restarting the app is
+what clears it.
 
 ## Configuration
 

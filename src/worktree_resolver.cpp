@@ -186,15 +186,11 @@ std::wstring ResolveMainRepoName(const std::wstring& repoName) {
     }
 
     if (it == g_cache.end()) {
-        if (g_config.verboseLogging) {
-            Log(L"worktree resolver: no mapping for repo=[%ls] (cache has %zu entries)", repoName.c_str(),
+        LogDiag(L"worktree resolver: no mapping for repo=[%ls] (cache has %zu entries)", repoName.c_str(),
                 g_cache.size());
-        }
         return L"";
     }
-    if (g_config.verboseLogging) {
-        Log(L"worktree resolver: resolved repo=[%ls] -> mainRepo=[%ls]", repoName.c_str(), it->second.c_str());
-    }
+    LogDiag(L"worktree resolver: resolved repo=[%ls] -> mainRepo=[%ls]", repoName.c_str(), it->second.c_str());
     return it->second;
 }
 
