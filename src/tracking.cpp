@@ -68,6 +68,7 @@ static void SyncProjectListHud() {
     }
 
     ProjectListHudStyle style;
+    style.horizontal = g_config.projectListHorizontal;
     style.rowHeight = g_config.labelHeight;
     style.fontSize = g_config.labelFontSize;
     style.labelTextColorAuto = g_config.labelTextColorAuto;
