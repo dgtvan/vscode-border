@@ -1,5 +1,6 @@
 #include "logger.h"
 #include "config.h"
+#include "file_util.h"
 
 #include <windows.h>
 
@@ -13,17 +14,6 @@
 static FILE* g_logFile = nullptr;
 static std::wstring g_logPath;
 static bool g_hasWarnings = false;
-
-// Same folder as config.ini and window_title_state.ini (see config.cpp,
-// vscode_settings.cpp) -- one place to look, and that folder is already
-// known to be writable since window_title_state.ini lives there too.
-static std::wstring GetExeDir() {
-    wchar_t path[MAX_PATH];
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring s(path);
-    size_t slash = s.find_last_of(L"\\/");
-    return (slash == std::wstring::npos) ? L"." : s.substr(0, slash);
-}
 
 static void OpenLogFile() {
     if (g_logPath.empty()) {

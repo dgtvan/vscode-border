@@ -8,7 +8,6 @@
 #include "window_title.h"
 #include "worktree_resolver.h"
 
-#include <algorithm>
 #include <unordered_map>
 #include <vector>
 
@@ -47,71 +46,36 @@ static std::vector<bool> g_colorInUse;
 static void SyncProjectListHud() {
     if (!g_projectListHud) return;
     if (!g_config.showProjectList || g_tracked.empty()) {
-        ShowWindow(g_projectListHud, SW_HIDE);
+        HideProjectListHud(g_projectListHud);
         return;
     }
 
-    struct Item {
-        HWND hwnd = nullptr;
-        RECT rect = {};
-        ProjectListHudEntry entry;
-    };
-    std::vector<Item> items;
+    std::vector<ProjectListHudEntry> entries;
     for (auto& kv : g_tracked) {
         if (!IsWindow(kv.first) || IsIconic(kv.first) || !IsWindowVisible(kv.first) || kv.second.label.empty()) continue;
         RECT rect;
         if (!GetVisibleWindowRect(kv.first, rect)) continue;
-        Item item;
-        item.hwnd = kv.first;
-        item.rect = rect;
-        item.entry.target = kv.first;
-        item.entry.label = kv.second.label;
-        item.entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
-        items.push_back(item);
+        ProjectListHudEntry entry;
+        entry.target = kv.first;
+        entry.windowRect = rect;
+        entry.label = kv.second.label;
+        entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
+        entries.push_back(entry);
     }
-    if (items.empty()) {
-        ShowWindow(g_projectListHud, SW_HIDE);
+    if (entries.empty()) {
+        HideProjectListHud(g_projectListHud);
         return;
     }
 
-    std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
-        if (a.rect.left != b.rect.left) return a.rect.left < b.rect.left;
-        if (a.rect.top != b.rect.top) return a.rect.top < b.rect.top;
-        return a.hwnd < b.hwnd;
-    });
-
-    HDC screenDC = GetDC(nullptr);
-    HFONT font = CreateFontW(-g_config.labelFontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                              DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HFONT oldFont = (HFONT)SelectObject(screenDC, font);
-    int width = 0;
-    for (const Item& item : items) {
-        SIZE textSz = {0, 0};
-        GetTextExtentPoint32W(screenDC, item.entry.label.c_str(), (int)item.entry.label.size(), &textSz);
-        width = std::max(width, (int)textSz.cx + 32);
-    }
-    SelectObject(screenDC, oldFont);
-    DeleteObject(font);
-    ReleaseDC(nullptr, screenDC);
-
-    const int rowHeight = std::max(18, g_config.labelHeight);
-    const int gap = 6;
-    width = std::max(130, std::min(width, 360));
-    int height = (int)items.size() * rowHeight + ((int)items.size() - 1) * gap;
-
-    RECT workArea = {};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
-    const int bottomMargin = 24;
-    int x = workArea.right - width;
-    int y = workArea.bottom - height - bottomMargin;
-
-    std::vector<ProjectListHudEntry> entries;
-    for (const Item& item : items) entries.push_back(item.entry);
-    UpdateProjectListHud(g_projectListHud, x, y, width, height, entries, rowHeight, g_config.labelFontSize,
-                         g_config.labelTextColorAuto, g_config.labelTextColor,
-                         g_config.projectListOpacityNormal, g_config.projectListOpacityHover,
-                         g_config.projectListActivateOnHover);
+    ProjectListHudStyle style;
+    style.rowHeight = g_config.labelHeight;
+    style.fontSize = g_config.labelFontSize;
+    style.labelTextColorAuto = g_config.labelTextColorAuto;
+    style.labelTextColor = g_config.labelTextColor;
+    style.normalOpacity = g_config.projectListOpacityNormal;
+    style.hoverOpacity = g_config.projectListOpacityHover;
+    style.activateOnHover = g_config.projectListActivateOnHover;
+    UpdateProjectListHud(g_projectListHud, entries, style);
 }
 
 // EVENT_OBJECT_LOCATIONCHANGE fires for every move/resize/visibility/Z-order

@@ -10,7 +10,16 @@ static const wchar_t* kProjectListHudClassName = L"VSCodeBorderProjectListHudWnd
 static const int kProjectListGap = 6;
 static const int kProjectListEdgeGrip = 8;
 static const int kProjectListMinWidth = 130;
-static const int kProjectListMaxWidth = 900;
+static const int kProjectListMaxWidth = 900;   // manual (drag-resize) upper bound
+static const int kProjectListAutoMaxWidth = 360; // auto-measured upper bound -- narrower so a single long
+                                                  // label can't blow up the HUD when the user hasn't sized it by hand
+static const int kProjectListMeasurePaddingX = 32;
+static const int kProjectListBottomMargin = 24;
+
+static HFONT CreateHudFont(int fontSize, int weight) {
+    return CreateFontW(-fontSize, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+}
 
 struct ProjectListHudState {
     std::vector<ProjectListHudEntry> entries;
@@ -273,12 +282,8 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
     UINT32* pixels = (UINT32*)bits;
     for (int i = 0; i < width * height; i++) pixels[i] = 0x01000000u;
 
-    HFONT font = CreateFontW(-state->fontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                              DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HFONT hoverFont = CreateFontW(-state->fontSize, 0, 0, 0, FW_BLACK, FALSE, FALSE, FALSE,
-                                   DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                   ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    HFONT font = CreateHudFont(state->fontSize, FW_SEMIBOLD);
+    HFONT hoverFont = CreateHudFont(state->fontSize, FW_BLACK);
 
     const int paddingX = 12;
     for (size_t i = 0; i < state->entries.size(); i++) {
@@ -334,35 +339,69 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
     ReleaseDC(nullptr, screenDC);
 }
 
-void UpdateProjectListHud(HWND hud, int x, int y, int width, int height,
-                          const std::vector<ProjectListHudEntry>& entries,
-                          int rowHeight, int fontSize,
-                          bool labelTextColorAuto, COLORREF labelTextColor,
-                          int normalOpacity, int hoverOpacity, bool activateOnHover) {
-    if (width <= 0 || height <= 0 || entries.empty()) return;
+void HideProjectListHud(HWND hud) {
+    if (hud) ShowWindow(hud, SW_HIDE);
+}
+
+// Widest label (padded, clamped) across `entries`, using the same font
+// RenderProjectListHud paints normal (non-hover) rows with -- so the HUD is
+// sized to fit what it's about to draw.
+static int MeasureRequiredWidth(const std::vector<ProjectListHudEntry>& entries, int fontSize) {
+    HDC screenDC = GetDC(nullptr);
+    HFONT font = CreateHudFont(fontSize, FW_SEMIBOLD);
+    HFONT oldFont = (HFONT)SelectObject(screenDC, font);
+    int width = 0;
+    for (const ProjectListHudEntry& entry : entries) {
+        SIZE textSz = {0, 0};
+        GetTextExtentPoint32W(screenDC, entry.label.c_str(), (int)entry.label.size(), &textSz);
+        width = std::max(width, (int)textSz.cx + kProjectListMeasurePaddingX);
+    }
+    SelectObject(screenDC, oldFont);
+    DeleteObject(font);
+    ReleaseDC(nullptr, screenDC);
+    return ClampInt(width, kProjectListMinWidth, kProjectListAutoMaxWidth);
+}
+
+void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entries,
+                          const ProjectListHudStyle& style) {
+    if (entries.empty()) return;
 
     ProjectListHudState* state = (ProjectListHudState*)GetWindowLongPtrW(hud, GWLP_USERDATA);
     if (!state) return;
+
+    std::vector<ProjectListHudEntry> sorted = entries;
+    std::sort(sorted.begin(), sorted.end(), [](const ProjectListHudEntry& a, const ProjectListHudEntry& b) {
+        if (a.windowRect.left != b.windowRect.left) return a.windowRect.left < b.windowRect.left;
+        if (a.windowRect.top != b.windowRect.top) return a.windowRect.top < b.windowRect.top;
+        return a.target < b.target;
+    });
+
+    int rowHeight = std::max(18, style.rowHeight);
+    int height = (int)sorted.size() * rowHeight + ((int)sorted.size() - 1) * kProjectListGap;
+
     if (!state->manualWidth) {
-        state->width = width;
+        state->width = MeasureRequiredWidth(sorted, style.fontSize);
     } else {
         state->width = ClampInt(state->width, kProjectListMinWidth, kProjectListMaxWidth);
     }
     if (!state->manualPosition) {
-        state->x = x + width - state->width;
-        state->y = y;
+        RECT workArea = {};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+        state->x = workArea.right - state->width;
+        state->y = workArea.bottom - height - kProjectListBottomMargin;
     }
-    state->entries = entries;
+
+    state->entries = sorted;
     state->height = height;
     state->rowHeight = rowHeight;
-    state->fontSize = fontSize;
-    state->labelTextColorAuto = labelTextColorAuto;
-    state->labelTextColor = labelTextColor;
-    state->normalOpacity = ClampInt(normalOpacity, 0, 255);
-    state->hoverOpacity = ClampInt(hoverOpacity, 0, 255);
-    state->activateOnHover = activateOnHover;
+    state->fontSize = style.fontSize;
+    state->labelTextColorAuto = style.labelTextColorAuto;
+    state->labelTextColor = style.labelTextColor;
+    state->normalOpacity = ClampInt(style.normalOpacity, 0, 255);
+    state->hoverOpacity = ClampInt(style.hoverOpacity, 0, 255);
+    state->activateOnHover = style.activateOnHover;
     if (!state->activateOnHover) EndProjectListHoverFocus(state, true);
-    if (state->hoverIndex >= (int)entries.size()) state->hoverIndex = -1;
+    if (state->hoverIndex >= (int)sorted.size()) state->hoverIndex = -1;
     RenderProjectListHud(hud, state);
     PositionProjectListHud(hud, state);
 }
