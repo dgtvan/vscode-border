@@ -52,7 +52,7 @@ automatically at login, see [docs/AUTOSTART.md](docs/AUTOSTART.md).
 If something unexpected happens during a run (e.g. a VS Code window's
 title doesn't match any recognized shape -- see [Getting the repo/branch
 label](#getting-the-repobranch-label-instead-of-just-the-folder-name)), the
-tray icon gets a small red asterisk badge and its tooltip changes to say
+tray icon gets a small yellow "!" badge and its tooltip changes to say
 so. **Open Log Folder** jumps straight to `bin\vscode_border.log` (same
 folder as `config.ini`; set `verbose_logging=true` in `config.ini` for full
 per-event tracing on top of that). The log starts fresh on every launch,
@@ -141,6 +141,7 @@ to pick up worktrees created after the app started.
 ## Project layout
 
 - `src/vscode_border.cpp` -- tray icon and app lifecycle (`wWinMain`).
+- `src/file_util.*` -- shared exe-relative path / file-read helpers.
 - `src/logger.*` -- file logging.
 - `src/config.*` -- `config.ini` loading.
 - `src/window_title.*` -- VS Code window title parsing (repo/branch/folder).
@@ -148,9 +149,10 @@ to pick up worktrees created after the app started.
 - `src/vscode_settings.*` -- auto-manages VS Code's `window.title` setting to match `show_label` (see [Getting the repo/branch label](#getting-the-repobranch-label-instead-of-just-the-folder-name)).
 - `src/window_discovery.*` -- finding/filtering VS Code top-level windows.
 - `src/overlay.*` -- passive per-window border overlay creation/painting.
-- `src/project_list_hud.*` -- interactive desktop project-list HUD rendering, hover focus, click, move, and resize behavior.
+- `src/project_list_hud.*` -- interactive desktop project-list HUD: sorts/sizes/positions itself from the entries it's given, plus hover focus, click, move, and resize behavior.
 - `src/layered_rendering.*` -- shared alpha-blended text helpers for layered windows.
-- `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, border sync, and HUD data feed.
+- `src/tray_icon.*` -- tray icon warning-badge compositing.
+- `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, border sync, and feeding the HUD its entries.
 - `src/resource.rc`, `assets/app.ico`, `assets/square-dashed.png` -- tray icon resource (`app.ico` is generated from the PNG; see [Credits](#credits)).
 - `config.ini` -- default config template (copied to `bin\` on first build).
 - `build.ps1` -- build script.
