@@ -71,6 +71,10 @@ first build):
 | `rescan_interval_ms` | Safety-net rescan interval; new/closed windows are normally detected instantly. |
 | `colors` | Comma-separated `RRGGBB` hex colors, assigned round-robin to windows. |
 | `show_label` | Show the folder/repo name as a label chip inside the border's top-left corner (`true`/`false`). |
+| `show_project_list` | Show an interactive project list HUD at the bottom-right of the desktop, using the same labels/colors and sorted by window left edge (`true`/`false`). |
+| `project_list_opacity_normal` | Project list HUD opacity when no item is hovered: 0 (invisible) - 255 (fully opaque). |
+| `project_list_opacity_hover` | Project list HUD opacity for the currently hovered item: 0 (invisible) - 255 (fully opaque). |
+| `project_list_activate_on_hover` | Temporarily activate the matching VS Code window when hovering a project-list item (`true`/`false`, default `false`). |
 | `label_height` | Label chip height in pixels. |
 | `label_font_size` | Label text font size in points. |
 | `label_text_color` | Label text color: a hex `RRGGBB` color, or `auto` to pick black/white based on contrast against the border color. Default `000000` (black). |
@@ -143,8 +147,10 @@ to pick up worktrees created after the app started.
 - `src/worktree_resolver.*` -- maps a git worktree's folder name back to its main repo name.
 - `src/vscode_settings.*` -- auto-manages VS Code's `window.title` setting to match `show_label` (see [Getting the repo/branch label](#getting-the-repobranch-label-instead-of-just-the-folder-name)).
 - `src/window_discovery.*` -- finding/filtering VS Code top-level windows.
-- `src/overlay.*` -- layered overlay window creation/painting.
-- `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, sync.
+- `src/overlay.*` -- passive per-window border overlay creation/painting.
+- `src/project_list_hud.*` -- interactive desktop project-list HUD rendering, hover focus, click, move, and resize behavior.
+- `src/layered_rendering.*` -- shared alpha-blended text helpers for layered windows.
+- `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, border sync, and HUD data feed.
 - `src/resource.rc`, `assets/app.ico`, `assets/square-dashed.png` -- tray icon resource (`app.ico` is generated from the PNG; see [Credits](#credits)).
 - `config.ini` -- default config template (copied to `bin\` on first build).
 - `build.ps1` -- build script.
