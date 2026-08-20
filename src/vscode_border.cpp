@@ -11,7 +11,7 @@
 // A tray icon is the only UI: right-click -> Reload Config / Exit.
 //
 // Implementation is split across:
-//   file_util.*         - shared exe-relative path / file-read helpers
+//   file_util.*         - shared exe-relative path / file-read / file-write helpers
 //   logger.*            - file logging
 //   config.*            - config.ini loading
 //   window_title.*      - VS Code window title -> folder/repo label parsing
@@ -20,6 +20,7 @@
 //   vscode_settings.*   - syncs VS Code's window.title setting
 //   layered_rendering.* - shared per-pixel text-blend helpers for layered windows
 //   overlay.*           - layered overlay window creation/painting
+//   monitor_scenario.*  - identifies the active-monitor set, persists/recalls HUD placement per one
 //   project_list_hud.*  - the draggable/resizable project-list HUD window
 //   tray_icon.*         - tray icon warning-badge compositing
 //   tracking.*          - tracked-window bookkeeping, WinEvent hooks, sync

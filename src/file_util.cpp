@@ -1,4 +1,5 @@
 #include "file_util.h"
+#include "logger.h"
 
 std::wstring GetExeDir() {
     wchar_t path[MAX_PATH];
@@ -23,4 +24,21 @@ std::string ReadFileBytes(const std::wstring& path) {
     }
     CloseHandle(h);
     return buf;
+}
+
+bool WriteFileBytes(const std::wstring& path, const std::string& content) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        Log(L"file_util: failed to open %ls for write, lastError=%lu", path.c_str(), GetLastError());
+        return false;
+    }
+    DWORD written = 0;
+    BOOL ok = WriteFile(h, content.data(), (DWORD)content.size(), &written, nullptr);
+    CloseHandle(h);
+    if (!ok || written != content.size()) {
+        Log(L"file_util: failed to write %ls, lastError=%lu", path.c_str(), GetLastError());
+        return false;
+    }
+    return true;
 }

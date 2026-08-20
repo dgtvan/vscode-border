@@ -38,6 +38,9 @@ struct TrackedWindow {
     DWORD pid = 0;
     std::wstring label;     // folder name derived from the target's title
     std::wstring lastLabel; // label last painted, to detect changes
+    RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized -- lets a minimized
+                              // window's project-list HUD entry keep sorting where it normally sits
+                              // instead of jumping around (see SyncProjectListHud)
 };
 
 static std::unordered_map<HWND, TrackedWindow> g_tracked; // target hwnd -> info
@@ -52,9 +55,24 @@ static void SyncProjectListHud() {
 
     std::vector<ProjectListHudEntry> entries;
     for (auto& kv : g_tracked) {
-        if (!IsWindow(kv.first) || IsIconic(kv.first) || !IsWindowVisible(kv.first) || kv.second.label.empty()) continue;
+        if (!IsWindow(kv.first) || !IsWindowVisible(kv.first) || kv.second.label.empty()) continue;
+
+        // Minimized windows are still WS_VISIBLE (that's a separate style
+        // bit from iconic/minimized state) -- keep showing them in the HUD
+        // rather than dropping them, since restoring a minimized window is
+        // exactly the kind of thing this list is for. There's no meaningful
+        // *current* on-screen rect to sort by while minimized, so fall back
+        // to wherever it was last seen (zero-rect if never seen, e.g.
+        // tracked while already minimized).
         RECT rect;
-        if (!GetVisibleWindowRect(kv.first, rect)) continue;
+        if (IsIconic(kv.first)) {
+            rect = kv.second.lastKnownRect;
+        } else if (GetVisibleWindowRect(kv.first, rect)) {
+            kv.second.lastKnownRect = rect;
+        } else {
+            continue;
+        }
+
         ProjectListHudEntry entry;
         entry.target = kv.first;
         entry.windowRect = rect;

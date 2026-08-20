@@ -1,6 +1,7 @@
 #include "project_list_hud.h"
 
 #include "layered_rendering.h"
+#include "monitor_scenario.h"
 
 #include <windowsx.h>
 
@@ -46,6 +47,9 @@ struct ProjectListHudState {
     enum DragMode { DragNone, DragMove, DragResizeLeft, DragResizeRight } dragMode = DragNone;
     POINT dragStart = {0, 0};
     RECT dragStartRect = {0, 0, 0, 0};
+    std::wstring scenarioKey; // current monitor scenario (see monitor_scenario.h) -- tracked so a
+                              // WM_DISPLAYCHANGE can tell whether the active monitor set actually
+                              // changed, and so a completed drag knows which scenario to save under
 };
 
 static int ClampInt(int value, int minValue, int maxValue) {
@@ -116,6 +120,29 @@ static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
     if (!state) return;
     SetWindowPos(hud, HWND_TOPMOST, state->x, state->y, state->width, state->height,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+// Re-checks the current monitor scenario against state->scenarioKey and, if
+// it changed, applies whatever placement was last saved for the new one --
+// or drops back to auto-placement if this scenario has never been seen
+// before, letting the next regular UpdateProjectListHud recompute the
+// default position/width. Called once at HUD creation (so the very first
+// sync already uses a remembered placement, if any) and on every
+// WM_DISPLAYCHANGE. Returns true if the scenario actually changed.
+static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
+    std::wstring key = GetMonitorScenarioKey();
+    if (!state || key == state->scenarioKey) return false;
+    state->scenarioKey = key;
+
+    SavedHudPlacement saved = LoadHudPlacement(key);
+    state->manualPosition = saved.found;
+    state->manualWidth = saved.found;
+    if (saved.found) {
+        state->x = saved.x;
+        state->y = saved.y;
+        state->width = saved.width;
+    }
+    return true;
 }
 
 static void ActivateProjectListItem(ProjectListHudState* state, int index) {
@@ -223,7 +250,25 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (state && state->dragMode != ProjectListHudState::DragNone) {
                 state->dragMode = ProjectListHudState::DragNone;
                 if (GetCapture() == hwnd) ReleaseCapture();
+                // Remember where the user just put it, scoped to the current
+                // monitor scenario -- so switching monitors later restores
+                // this placement instead of falling back to auto-anchoring.
+                if (state->manualPosition) SaveHudPlacement(state->scenarioKey, state->x, state->y, state->width);
                 SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))));
+            }
+            return 0;
+        case WM_DISPLAYCHANGE:
+            if (state && ApplyScenarioForCurrentMonitors(state) && state->manualPosition) {
+                // Only need to force an immediate refresh when we just
+                // snapped to a remembered placement -- if this scenario has
+                // no saved placement, manualPosition/manualWidth are now
+                // false and the next regular UpdateProjectListHud call
+                // (already running periodically) will recompute the default
+                // auto-placement on its own.
+                if (state->horizontal) RebuildHorizontalItemRects(state);
+                else RebuildVerticalItemRects(state);
+                RenderProjectListHud(hwnd, state);
+                PositionProjectListHud(hwnd, state);
             }
             return 0;
         case WM_MOUSELEAVE:
@@ -283,7 +328,13 @@ HWND CreateProjectListHud(HINSTANCE hInstance) {
         kProjectListHudClassName, L"", WS_POPUP,
         0, 0, 1, 1, nullptr, nullptr, hInstance, nullptr);
     if (!hwnd) return nullptr;
-    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)new ProjectListHudState());
+    ProjectListHudState* state = new ProjectListHudState();
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+    // Establishes the initial scenarioKey and, if this monitor scenario has
+    // a remembered placement, pre-sets manualPosition/manualWidth from it
+    // so the very first UpdateProjectListHud call (once real entries show
+    // up) uses it instead of auto-anchoring.
+    ApplyScenarioForCurrentMonitors(state);
     return hwnd;
 }
 
