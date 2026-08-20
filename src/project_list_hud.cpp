@@ -9,10 +9,11 @@
 static const wchar_t* kProjectListHudClassName = L"VSCodeBorderProjectListHudWndClass";
 static const int kProjectListGap = 6;
 static const int kProjectListEdgeGrip = 8;
-static const int kProjectListMinWidth = 130;
-static const int kProjectListMaxWidth = 900;   // manual (drag-resize) upper bound
-static const int kProjectListAutoMaxWidth = 360; // auto-measured upper bound -- narrower so a single long
-                                                  // label can't blow up the HUD when the user hasn't sized it by hand
+static const int kProjectListMinWidth = 130; // manual (drag-resize) lower bound, both styles -- no upper
+                                              // bound: the user can size the HUD as wide as they want
+static const int kProjectListAutoMaxWidth = 360; // auto-measured upper bound for the shared item/column
+                                                  // width -- narrower so a single long label can't blow up
+                                                  // the HUD when the user hasn't sized it by hand
 static const int kProjectListMeasurePaddingX = 32;
 static const int kProjectListBottomMargin = 24;
 
@@ -23,6 +24,8 @@ static HFONT CreateHudFont(int fontSize, int weight) {
 
 struct ProjectListHudState {
     std::vector<ProjectListHudEntry> entries;
+    std::vector<RECT> itemRects; // per-entry rect within the HUD's own client area (local coords)
+    bool horizontal = false;
     int x = 0;
     int y = 0;
     int width = 0;
@@ -51,12 +54,11 @@ static int ClampInt(int value, int minValue, int maxValue) {
 
 static int ProjectListHitTest(const ProjectListHudState* state, int x, int y) {
     if (!state || x < 0 || x >= state->width || y < 0 || y >= state->height) return -1;
-    int stride = state->rowHeight + kProjectListGap;
-    if (stride <= 0) return -1;
-    int index = y / stride;
-    if (index < 0 || index >= (int)state->entries.size()) return -1;
-    int rowTop = index * stride;
-    return y < rowTop + state->rowHeight ? index : -1;
+    for (size_t i = 0; i < state->itemRects.size(); i++) {
+        const RECT& r = state->itemRects[i];
+        if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return (int)i;
+    }
+    return -1;
 }
 
 static bool IsProjectListResizeEdge(const ProjectListHudState* state, int x) {
@@ -68,6 +70,35 @@ static ProjectListHudState::DragMode ProjectListDragModeForPoint(const ProjectLi
     if (x < kProjectListEdgeGrip) return ProjectListHudState::DragResizeLeft;
     if (x >= state->width - kProjectListEdgeGrip) return ProjectListHudState::DragResizeRight;
     return ProjectListHudState::DragMove;
+}
+
+// Recomputes vertical-style item rects from state->width/rowHeight/entries
+// -- cheap (no GDI/text-measurement calls), so it's safe to call on every
+// mouse-move frame of an interactive resize-drag.
+static void RebuildVerticalItemRects(ProjectListHudState* state) {
+    state->itemRects.assign(state->entries.size(), RECT{});
+    for (size_t i = 0; i < state->entries.size(); i++) {
+        int y = (int)i * (state->rowHeight + kProjectListGap);
+        state->itemRects[i] = {0, y, state->width, y + state->rowHeight};
+    }
+}
+
+// Divides state->width evenly across items, same width for every one
+// regardless of label length (long labels just ellipsize) -- the horizontal
+// analog of RebuildVerticalItemRects's shared column width. Cheap (no
+// GDI/text-measurement calls), so it's safe to call on every mouse-move
+// frame of an interactive resize-drag.
+static void RebuildHorizontalItemRects(ProjectListHudState* state) {
+    size_t n = state->entries.size();
+    state->itemRects.assign(n, RECT{});
+    if (n == 0) return;
+
+    int itemWidth = std::max(1, (state->width - (int)(n - 1) * kProjectListGap) / (int)n);
+    int x = 0;
+    for (size_t i = 0; i < n; i++) {
+        state->itemRects[i] = {x, 0, x + itemWidth, state->rowHeight};
+        x += itemWidth + kProjectListGap;
+    }
 }
 
 static LPCWSTR ProjectListCursorForPoint(const ProjectListHudState* state, int x, int y) {
@@ -138,11 +169,11 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     bottom += dy;
                     state->manualPosition = true;
                 } else if (state->dragMode == ProjectListHudState::DragResizeLeft) {
-                    left = ClampInt(left + dx, right - kProjectListMaxWidth, right - kProjectListMinWidth);
+                    left = std::min(left + dx, right - kProjectListMinWidth);
                     state->manualPosition = true;
                     state->manualWidth = true;
                 } else if (state->dragMode == ProjectListHudState::DragResizeRight) {
-                    right = ClampInt(right + dx, left + kProjectListMinWidth, left + kProjectListMaxWidth);
+                    right = std::max(right + dx, left + kProjectListMinWidth);
                     state->manualPosition = true;
                     state->manualWidth = true;
                 }
@@ -153,7 +184,11 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 state->y = top;
                 state->width = newWidth;
                 state->height = bottom - top;
-                if (sizeChanged) RenderProjectListHud(hwnd, state);
+                if (sizeChanged) {
+                    if (state->horizontal) RebuildHorizontalItemRects(state);
+                    else RebuildVerticalItemRects(state);
+                    RenderProjectListHud(hwnd, state);
+                }
                 PositionProjectListHud(hwnd, state);
                 SetCursor(LoadCursorW(nullptr, state->dragMode == ProjectListHudState::DragMove ? IDC_SIZEALL : IDC_SIZEWE));
                 return 0;
@@ -286,9 +321,10 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
     HFONT hoverFont = CreateHudFont(state->fontSize, FW_BLACK);
 
     const int paddingX = 12;
-    for (size_t i = 0; i < state->entries.size(); i++) {
+    for (size_t i = 0; i < state->entries.size() && i < state->itemRects.size(); i++) {
         const ProjectListHudEntry& entry = state->entries[i];
-        int y = (int)i * (rowHeight + kProjectListGap);
+        const RECT& item = state->itemRects[i];
+        int itemWidth = item.right - item.left;
         COLORREF color = entry.color;
         BYTE alpha = (BYTE)((int)i == state->hoverIndex ? state->hoverOpacity : state->normalOpacity);
         BYTE r = GetRValue(color), g = GetGValue(color), b = GetBValue(color);
@@ -299,18 +335,19 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
         }
         COLORREF chipColor = RGB(r, g, b);
         UINT32 chipPx = (UINT32(255) << 24) | (UINT32(r) << 16) | (UINT32(g) << 8) | UINT32(b);
-        for (int row = y; row < y + rowHeight && row < height; row++) {
-            for (int col = 0; col < width; col++) {
+        for (int row = item.top; row < item.bottom && row < height; row++) {
+            for (int col = item.left; col < item.right && col < width; col++) {
                 pixels[row * width + col] = chipPx;
             }
         }
         COLORREF tx = state->labelTextColorAuto ? ContrastTextColor(color) : state->labelTextColor;
-        BlendTextIntoPixels(screenDC, pixels, width, height, paddingX, y, width - paddingX * 2, rowHeight,
-                            entry.label, (int)i == state->hoverIndex ? hoverFont : font, chipColor, tx,
+        BlendTextIntoPixels(screenDC, pixels, width, height, item.left + paddingX, item.top,
+                            itemWidth - paddingX * 2, rowHeight, entry.label,
+                            (int)i == state->hoverIndex ? hoverFont : font, chipColor, tx,
                             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        for (int row = y; row < y + rowHeight && row < height; row++) {
-            for (int col = 0; col < width; col++) {
+        for (int row = item.top; row < item.bottom && row < height; row++) {
+            for (int col = item.left; col < item.right && col < width; col++) {
                 UINT32 px = pixels[row * width + col];
                 BYTE pxR = (BYTE)((px >> 16) & 0xFF);
                 BYTE pxG = (BYTE)((px >> 8) & 0xFF);
@@ -377,23 +414,41 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     });
 
     int rowHeight = std::max(18, style.rowHeight);
-    int height = (int)sorted.size() * rowHeight + ((int)sorted.size() - 1) * kProjectListGap;
+    state->rowHeight = rowHeight;
+    state->entries = sorted;
+    state->horizontal = style.horizontal;
+    int totalHeight;
 
-    if (!state->manualWidth) {
-        state->width = MeasureRequiredWidth(sorted, style.fontSize);
+    if (style.horizontal) {
+        // Every item shares one width (like MeasureRequiredWidth's shared
+        // column width for the vertical style), sized to fit the widest
+        // label when not manually resized.
+        if (!state->manualWidth) {
+            int itemWidth = MeasureRequiredWidth(sorted, style.fontSize);
+            state->width = (int)sorted.size() * itemWidth + (int)(sorted.size() - 1) * kProjectListGap;
+        } else {
+            state->width = std::max(state->width, kProjectListMinWidth);
+        }
+        RebuildHorizontalItemRects(state);
+        totalHeight = rowHeight;
     } else {
-        state->width = ClampInt(state->width, kProjectListMinWidth, kProjectListMaxWidth);
+        if (!state->manualWidth) {
+            state->width = MeasureRequiredWidth(sorted, style.fontSize);
+        } else {
+            state->width = std::max(state->width, kProjectListMinWidth);
+        }
+        RebuildVerticalItemRects(state);
+        totalHeight = (int)sorted.size() * rowHeight + ((int)sorted.size() - 1) * kProjectListGap;
     }
+    state->height = totalHeight;
+
     if (!state->manualPosition) {
         RECT workArea = {};
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
         state->x = workArea.right - state->width;
-        state->y = workArea.bottom - height - kProjectListBottomMargin;
+        state->y = workArea.bottom - state->height - kProjectListBottomMargin;
     }
 
-    state->entries = sorted;
-    state->height = height;
-    state->rowHeight = rowHeight;
     state->fontSize = style.fontSize;
     state->labelTextColorAuto = style.labelTextColorAuto;
     state->labelTextColor = style.labelTextColor;

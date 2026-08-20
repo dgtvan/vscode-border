@@ -15,6 +15,7 @@ struct Config {
     bool labelTextColorAuto = false; // true = auto black/white contrast against the border color
     COLORREF labelTextColor = RGB(0, 0, 0); // used when labelTextColorAuto is false
     bool showProjectList = true;
+    bool projectListHorizontal = true; // true = single horizontal strip, false = vertical list
     int projectListOpacityNormal = 255;
     int projectListOpacityHover = 255;
     bool projectListActivateOnHover = false;

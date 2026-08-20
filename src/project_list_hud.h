@@ -13,6 +13,7 @@ struct ProjectListHudEntry {
 };
 
 struct ProjectListHudStyle {
+    bool horizontal = true; // true = single horizontal strip, false = vertical list
     int rowHeight = 18;
     int fontSize = 13;
     bool labelTextColorAuto = false;
@@ -28,10 +29,15 @@ HWND CreateProjectListHud(HINSTANCE hInstance);
 void HideProjectListHud(HWND hud);
 
 // Sorts `entries` to match window layout (left-to-right, top-to-bottom),
-// measures/sizes the HUD to fit them, and shows it anchored to the
-// bottom-right of the work area -- unless the user has manually
-// moved/resized it (right-click-drag), in which case that placement is kept
-// instead. Does nothing if `entries` is empty; call HideProjectListHud in
-// that case instead.
+// measures/sizes the HUD to fit them -- as a single horizontal strip of
+// individually-sized items or a vertical list with one shared column width,
+// per `style.horizontal` -- and shows it anchored to the bottom-right of
+// the work area, unless the user has manually moved/resized it
+// (right-click-drag either edge to resize, the middle to move). In the
+// horizontal style, resizing scales every item's width proportionally
+// rather than setting one shared width. Once manually placed/sized, that
+// placement is kept on later calls instead of being recomputed. Does
+// nothing if `entries` is empty; call HideProjectListHud in that case
+// instead.
 void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entries,
                           const ProjectListHudStyle& style);
