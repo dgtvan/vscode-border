@@ -3,10 +3,12 @@
 #include "config.h"
 #include "logger.h"
 #include "overlay.h"
+#include "project_list_hud.h"
 #include "window_discovery.h"
 #include "window_title.h"
 #include "worktree_resolver.h"
 
+#include <algorithm>
 #include <unordered_map>
 #include <vector>
 
@@ -24,6 +26,7 @@ static std::wstring BuildLabelForTitle(const std::wstring& title) {
 
 static HINSTANCE g_hInstance = nullptr;
 static HWND g_ownerWnd = nullptr;
+static HWND g_projectListHud = nullptr;
 
 const UINT_PTR kForegroundPollTimerId = 2;
 static const UINT kForegroundPollIntervalMs = 50;
@@ -40,6 +43,76 @@ struct TrackedWindow {
 
 static std::unordered_map<HWND, TrackedWindow> g_tracked; // target hwnd -> info
 static std::vector<bool> g_colorInUse;
+
+static void SyncProjectListHud() {
+    if (!g_projectListHud) return;
+    if (!g_config.showProjectList || g_tracked.empty()) {
+        ShowWindow(g_projectListHud, SW_HIDE);
+        return;
+    }
+
+    struct Item {
+        HWND hwnd = nullptr;
+        RECT rect = {};
+        ProjectListHudEntry entry;
+    };
+    std::vector<Item> items;
+    for (auto& kv : g_tracked) {
+        if (!IsWindow(kv.first) || IsIconic(kv.first) || !IsWindowVisible(kv.first) || kv.second.label.empty()) continue;
+        RECT rect;
+        if (!GetVisibleWindowRect(kv.first, rect)) continue;
+        Item item;
+        item.hwnd = kv.first;
+        item.rect = rect;
+        item.entry.target = kv.first;
+        item.entry.label = kv.second.label;
+        item.entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
+        items.push_back(item);
+    }
+    if (items.empty()) {
+        ShowWindow(g_projectListHud, SW_HIDE);
+        return;
+    }
+
+    std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        if (a.rect.left != b.rect.left) return a.rect.left < b.rect.left;
+        if (a.rect.top != b.rect.top) return a.rect.top < b.rect.top;
+        return a.hwnd < b.hwnd;
+    });
+
+    HDC screenDC = GetDC(nullptr);
+    HFONT font = CreateFontW(-g_config.labelFontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    HFONT oldFont = (HFONT)SelectObject(screenDC, font);
+    int width = 0;
+    for (const Item& item : items) {
+        SIZE textSz = {0, 0};
+        GetTextExtentPoint32W(screenDC, item.entry.label.c_str(), (int)item.entry.label.size(), &textSz);
+        width = std::max(width, (int)textSz.cx + 32);
+    }
+    SelectObject(screenDC, oldFont);
+    DeleteObject(font);
+    ReleaseDC(nullptr, screenDC);
+
+    const int rowHeight = std::max(18, g_config.labelHeight);
+    const int gap = 6;
+    width = std::max(130, std::min(width, 360));
+    int height = (int)items.size() * rowHeight + ((int)items.size() - 1) * gap;
+
+    RECT workArea = {};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+    const int bottomMargin = 24;
+    int x = workArea.right - width;
+    int y = workArea.bottom - height - bottomMargin;
+
+    std::vector<ProjectListHudEntry> entries;
+    for (const Item& item : items) entries.push_back(item.entry);
+    UpdateProjectListHud(g_projectListHud, x, y, width, height, entries, rowHeight, g_config.labelFontSize,
+                         g_config.labelTextColorAuto, g_config.labelTextColor,
+                         g_config.projectListOpacityNormal, g_config.projectListOpacityHover,
+                         g_config.projectListActivateOnHover);
+}
 
 // EVENT_OBJECT_LOCATIONCHANGE fires for every move/resize/visibility/Z-order
 // change of every top-level window on the whole desktop -- registering it
@@ -116,18 +189,25 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     if (IsIconic(target) || !IsWindowVisible(target)) {
         LogFastDiag(L"sync hwnd=%p HIDE iconic=%d visible=%d", target, IsIconic(target), IsWindowVisible(target));
         ShowWindow(tw.overlay, SW_HIDE);
+        SyncProjectListHud();
         return;
     }
 
     RECT r;
-    if (!GetVisibleWindowRect(target, r)) return;
+    if (!GetVisibleWindowRect(target, r)) {
+        SyncProjectListHud();
+        return;
+    }
 
     int t = g_config.thickness;
     int ox = r.left - t;
     int oy = r.top - t;
     int ow = (r.right - r.left) + 2 * t;
     int oh = (r.bottom - r.top) + 2 * t;
-    if (ow <= 0 || oh <= 0) return;
+    if (ow <= 0 || oh <= 0) {
+        SyncProjectListHud();
+        return;
+    }
 
     if (ow != tw.lastWidth || oh != tw.lastHeight || tw.label != tw.lastLabel) {
         LogFastDiag(L"sync hwnd=%p REPAINT ow=%d oh=%d (was %dx%d) label=[%ls] (was [%ls])", target, ow, oh,
@@ -161,6 +241,7 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     if (aboveTarget != tw.overlay) {
         SetWindowPos(tw.overlay, aboveTarget, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
     }
+    SyncProjectListHud();
 }
 
 // VS Code can fire several rapid NAMECHANGE events in a row while
@@ -261,6 +342,7 @@ static void UntrackWindow(HWND hwnd) {
     DestroyWindow(it->second.overlay);
     g_tracked.erase(it);
     UpdateForegroundPollTimer();
+    SyncProjectListHud();
 
     auto debounce = g_labelDebounceByHwnd.find(hwnd);
     if (debounce != g_labelDebounceByHwnd.end()) {
@@ -278,6 +360,7 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM) {
 void TrackingInit(HINSTANCE hInstance, HWND ownerWnd) {
     g_hInstance = hInstance;
     g_ownerWnd = ownerWnd;
+    g_projectListHud = CreateProjectListHud(hInstance);
 }
 
 void RescanAllWindows() {
@@ -318,11 +401,16 @@ void RefreshAllLabels() {
         kv.second.label = BuildLabelForTitle(title);
         SyncOverlay(kv.first, kv.second); // repaints automatically if the label changed
     }
+    SyncProjectListHud();
 }
 
 void CleanupAllTracked() {
     for (auto& kv : g_tracked) DestroyWindow(kv.second.overlay);
     g_tracked.clear();
+    if (g_projectListHud) {
+        DestroyWindow(g_projectListHud);
+        g_projectListHud = nullptr;
+    }
     ReleaseAllPidHooks();
     UpdateForegroundPollTimer();
 }
