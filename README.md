@@ -71,8 +71,8 @@ first build):
 | `rescan_interval_ms` | Safety-net rescan interval; new/closed windows are normally detected instantly. |
 | `colors` | Comma-separated `RRGGBB` hex colors, assigned round-robin to windows. |
 | `show_label` | Show the folder/repo name as a label chip inside the border's top-left corner (`true`/`false`). |
-| `show_project_list` | Show an interactive project list HUD at the bottom-right of the desktop, using the same labels/colors and sorted by window left edge (`true`/`false`). |
-| `project_list_style` | Project list HUD layout: `horizontal` (single strip, each item sized to its own label) or `vertical` (stacked list, shared column width, resizable by right-click-dragging its left/right edge). Default `horizontal`. |
+| `show_project_list` | Show an interactive project list HUD at the bottom-right of the desktop, using the same labels/colors and sorted by window left edge; includes minimized windows so it doubles as a restore list (`true`/`false`). |
+| `project_list_style` | Project list HUD layout: `horizontal` (single strip, all items share one width) or `vertical` (stacked list, shared column width). Both are resizable by right-click-dragging either edge and movable by right-click-dragging the middle. Default `horizontal`. |
 | `project_list_opacity_normal` | Project list HUD opacity when no item is hovered: 0 (invisible) - 255 (fully opaque). |
 | `project_list_opacity_hover` | Project list HUD opacity for the currently hovered item: 0 (invisible) - 255 (fully opaque). |
 | `project_list_activate_on_hover` | Temporarily activate the matching VS Code window when hovering a project-list item (`true`/`false`, default `false`). |
@@ -83,6 +83,20 @@ first build):
 After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
 next launch (windows already tracked keep the color they were assigned).
+
+### Project list HUD position/size memory
+
+Right-click-dragging the project list HUD to move or resize it is
+remembered separately per **monitor scenario** -- the current set of active
+monitors, identified by hardware id (so unplugging/replugging or switching
+a projector between "extend" and "second screen only" doesn't lose the
+placement you set for each one). Moving it while on a laptop's built-in
+screen, then again after connecting an external monitor, remembers both
+independently and switches between them automatically as monitors are
+connected/disconnected -- no manual re-positioning needed each time. A
+scenario that's never been manually placed falls back to the default
+bottom-right auto-placement. Stored in
+`project_list_hud_positions.ini` next to `config.ini`.
 
 ### Getting the repo/branch label instead of just the folder name
 
@@ -142,7 +156,9 @@ to pick up worktrees created after the app started.
 ## Project layout
 
 - `src/vscode_border.cpp` -- tray icon and app lifecycle (`wWinMain`).
-- `src/file_util.*` -- shared exe-relative path / file-read helpers.
+- `src/file_util.*` -- shared exe-relative path / file-read / file-write helpers.
+- `src/monitor_scenario.*` -- identifies the current active-monitor set and persists/recalls the
+  project list HUD's placement per scenario (see "Project list HUD position/size memory" above).
 - `src/logger.*` -- file logging.
 - `src/config.*` -- `config.ini` loading.
 - `src/window_title.*` -- VS Code window title parsing (repo/branch/folder).

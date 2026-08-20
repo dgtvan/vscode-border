@@ -12,3 +12,6 @@ std::wstring GetExeDir();
 // if the file doesn't exist or is empty -- callers can't distinguish
 // "missing" from "empty" from the return value alone.
 std::string ReadFileBytes(const std::wstring& path);
+
+// Overwrites `path` with `content`. Returns false (and logs) on failure.
+bool WriteFileBytes(const std::wstring& path, const std::string& content);

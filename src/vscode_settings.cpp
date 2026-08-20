@@ -30,23 +30,6 @@ std::wstring GetStateFilePath() {
     return GetExeDir() + L"\\window_title_state.ini";
 }
 
-bool WriteFileBytes(const std::wstring& path, const std::string& content) {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        Log(L"vscode_settings: failed to open %ls for write, lastError=%lu", path.c_str(), GetLastError());
-        return false;
-    }
-    DWORD written = 0;
-    BOOL ok = WriteFile(h, content.data(), (DWORD)content.size(), &written, nullptr);
-    CloseHandle(h);
-    if (!ok || written != content.size()) {
-        Log(L"vscode_settings: failed to write %ls, lastError=%lu", path.c_str(), GetLastError());
-        return false;
-    }
-    return true;
-}
-
 bool DirectoryExists(const std::wstring& path) {
     DWORD attrs = GetFileAttributesW(path.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
