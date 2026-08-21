@@ -92,6 +92,28 @@ static int ProjectListHitTest(const ProjectListHudState* state, int x, int y) {
     return -1;
 }
 
+// Like ProjectListHitTest, but for choosing a reorder-drop target during an
+// active drag: ignores the cross-axis coordinate entirely (e.g. how far
+// above/below a horizontal strip the ghost has been dragged) and maps
+// purely by position along the strip's own axis, clamped to the first/last
+// slot past either end. This lets a middle slot still be targeted while
+// dragging far outside the strip's bounds, not just the two end slots.
+static int ProjectListDragCandidate(const ProjectListHudState* state, int x, int y) {
+    if (!state || state->itemRects.empty()) return -1;
+    if (state->horizontal) {
+        if (x < state->itemRects.front().left) return 0;
+        for (size_t i = 0; i < state->itemRects.size(); i++) {
+            if (x < state->itemRects[i].right) return (int)i;
+        }
+    } else {
+        if (y < state->itemRects.front().top) return 0;
+        for (size_t i = 0; i < state->itemRects.size(); i++) {
+            if (y < state->itemRects[i].bottom) return (int)i;
+        }
+    }
+    return (int)state->itemRects.size() - 1;
+}
+
 static bool IsProjectListResizeEdge(const ProjectListHudState* state, int x) {
     return state && state->width > 0 && (x < kProjectListEdgeGrip || x >= state->width - kProjectListEdgeGrip);
 }
@@ -411,17 +433,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
 
             if (state->dragMode == ProjectListHudState::DragReorder) {
                 state->reorderCursorClient = {mouseX, mouseY};
-                int candidate = ProjectListHitTest(state, mouseX, mouseY);
-                if (candidate < 0 && !state->itemRects.empty()) {
-                    // Outside every slot (dragged past an edge, or off the
-                    // strip entirely) -- fall back to whichever end the
-                    // cursor is nearer, so dragging past either edge still
-                    // lets you drop there instead of the candidate getting
-                    // stuck at its last in-bounds value.
-                    bool beforeFirst = state->horizontal ? mouseX < state->itemRects.front().left
-                                                          : mouseY < state->itemRects.front().top;
-                    candidate = beforeFirst ? 0 : (int)state->entries.size() - 1;
-                }
+                int candidate = ProjectListDragCandidate(state, mouseX, mouseY);
                 if (candidate >= 0 && candidate < (int)state->entries.size() && candidate != state->reorderIndex) {
                     ProjectListHudEntry dragged = state->entries[state->reorderIndex];
                     state->entries.erase(state->entries.begin() + state->reorderIndex);
