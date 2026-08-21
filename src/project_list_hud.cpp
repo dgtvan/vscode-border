@@ -44,6 +44,10 @@ struct ProjectListHudState {
     HWND previousForeground = nullptr;
     bool manualPosition = false;
     bool manualWidth = false;
+    int manualItemWidth = 0; // horizontal style only: the user's chosen per-item width, independent of
+                              // how many items are currently shown -- state->width (the whole strip) is
+                              // re-derived from this every time entries.size() changes, so item count
+                              // never changes how wide each item looks (see RebuildHorizontalItemRects)
     enum DragMode { DragNone, DragMove, DragResizeLeft, DragResizeRight } dragMode = DragNone;
     POINT dragStart = {0, 0};
     RECT dragStartRect = {0, 0, 0, 0};
@@ -129,6 +133,12 @@ static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
 // default position/width. Called once at HUD creation (so the very first
 // sync already uses a remembered placement, if any) and on every
 // WM_DISPLAYCHANGE. Returns true if the scenario actually changed.
+//
+// The saved "width" always means *per-item* width -- for the vertical
+// style that's the same thing as the whole strip's width (one shared
+// column), but for horizontal it's deliberately not the whole strip's
+// width, so restoring it doesn't depend on how many windows happen to be
+// tracked at that moment (see manualItemWidth's comment).
 static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
     std::wstring key = GetMonitorScenarioKey();
     if (!state || key == state->scenarioKey) return false;
@@ -140,7 +150,14 @@ static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
     if (saved.found) {
         state->x = saved.x;
         state->y = saved.y;
-        state->width = saved.width;
+        if (state->horizontal) {
+            state->manualItemWidth = std::max(1, saved.width);
+            size_t n = state->entries.size();
+            state->width = n > 0 ? (int)n * state->manualItemWidth + (int)(n - 1) * kProjectListGap
+                                  : state->manualItemWidth;
+        } else {
+            state->width = std::max(saved.width, kProjectListMinWidth);
+        }
     }
     return true;
 }
@@ -211,6 +228,15 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 state->y = top;
                 state->width = newWidth;
                 state->height = bottom - top;
+                if (state->horizontal) {
+                    // Cache what per-item width this drag corresponds to
+                    // *right now* (entries.size() is fixed for the duration
+                    // of a single drag) -- this, not state->width, is what
+                    // gets remembered on WM_RBUTTONUP.
+                    size_t n = state->entries.size();
+                    state->manualItemWidth =
+                        n > 0 ? std::max(1, (newWidth - (int)(n - 1) * kProjectListGap) / (int)n) : newWidth;
+                }
                 if (sizeChanged) {
                     if (state->horizontal) RebuildHorizontalItemRects(state);
                     else RebuildVerticalItemRects(state);
@@ -253,7 +279,12 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 // Remember where the user just put it, scoped to the current
                 // monitor scenario -- so switching monitors later restores
                 // this placement instead of falling back to auto-anchoring.
-                if (state->manualPosition) SaveHudPlacement(state->scenarioKey, state->x, state->y, state->width);
+                // Saved width is always per-item (see manualItemWidth), so
+                // it stays correct however many windows are tracked later.
+                if (state->manualPosition) {
+                    int savedWidth = state->horizontal ? state->manualItemWidth : state->width;
+                    SaveHudPlacement(state->scenarioKey, state->x, state->y, savedWidth);
+                }
                 SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))));
             }
             return 0;
@@ -321,7 +352,7 @@ static void RegisterProjectListHudClass(HINSTANCE hInstance) {
     registered = true;
 }
 
-HWND CreateProjectListHud(HINSTANCE hInstance) {
+HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal) {
     RegisterProjectListHudClass(hInstance);
     HWND hwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -329,6 +360,8 @@ HWND CreateProjectListHud(HINSTANCE hInstance) {
         0, 0, 1, 1, nullptr, nullptr, hInstance, nullptr);
     if (!hwnd) return nullptr;
     ProjectListHudState* state = new ProjectListHudState();
+    state->horizontal = horizontal; // must be right before ApplyScenarioForCurrentMonitors below, since
+                                     // it decides whether a saved width means "per-item" or "whole strip"
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
     // Establishes the initial scenarioKey and, if this monitor scenario has
     // a remembered placement, pre-sets manualPosition/manualWidth from it
@@ -467,19 +500,31 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     int rowHeight = std::max(18, style.rowHeight);
     state->rowHeight = rowHeight;
     state->entries = sorted;
+    if (state->horizontal != style.horizontal) {
+        // A manually-set size from one style doesn't translate to the
+        // other -- horizontal's per-item width and vertical's shared
+        // column width aren't the same concept, so reusing either one
+        // as-is after a style switch (e.g. via config reload) would size
+        // things nonsensically. Position stays valid either way, just the
+        // width falls back to auto-fit until the user resizes again.
+        state->manualWidth = false;
+        state->manualItemWidth = 0;
+    }
     state->horizontal = style.horizontal;
     int totalHeight;
 
     if (style.horizontal) {
         // Every item shares one width (like MeasureRequiredWidth's shared
         // column width for the vertical style), sized to fit the widest
-        // label when not manually resized.
-        if (!state->manualWidth) {
-            int itemWidth = MeasureRequiredWidth(sorted, style.fontSize);
-            state->width = (int)sorted.size() * itemWidth + (int)(sorted.size() - 1) * kProjectListGap;
-        } else {
-            state->width = std::max(state->width, kProjectListMinWidth);
-        }
+        // label when not manually resized. When manually resized, reuse the
+        // remembered per-item width (manualItemWidth) rather than whatever
+        // state->width happened to be -- state->width is a function of both
+        // that and the current entry count, so re-deriving it here is what
+        // keeps every item the same width no matter how many windows are
+        // currently tracked.
+        int itemWidth = !state->manualWidth ? MeasureRequiredWidth(sorted, style.fontSize)
+                                             : std::max(1, state->manualItemWidth);
+        state->width = (int)sorted.size() * itemWidth + (int)(sorted.size() - 1) * kProjectListGap;
         RebuildHorizontalItemRects(state);
         totalHeight = rowHeight;
     } else {
