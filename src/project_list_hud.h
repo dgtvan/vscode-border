@@ -23,7 +23,11 @@ struct ProjectListHudStyle {
     bool activateOnHover = false;
 };
 
-HWND CreateProjectListHud(HINSTANCE hInstance);
+// `horizontal` is the style to start with (see ProjectListHudStyle) --
+// needed up front because it's also used to interpret any placement
+// remembered for the current monitor scenario before the first real
+// UpdateProjectListHud call establishes it via `style`.
+HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal);
 
 // Hides the HUD (config disabled, or nothing currently worth showing).
 void HideProjectListHud(HWND hud);

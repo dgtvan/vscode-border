@@ -25,7 +25,10 @@ struct VSCodeTitleParts {
 VSCodeTitleParts ParseVSCodeTitle(const std::wstring& title);
 
 // Builds the border label text from parsed title parts: "repo - branch"
-// when a repo is present (folder ignored), otherwise just the folder name.
+// when a repo is present (folder ignored), otherwise the folder name, or a
+// "(no folder)" placeholder if neither is present (a bare, unopened
+// window) -- never empty, since an empty label makes a window invisible to
+// both the border's label chip and the project list HUD.
 std::wstring BuildFolderLabel(const VSCodeTitleParts& parts);
 
 // Convenience: ParseVSCodeTitle + BuildFolderLabel.

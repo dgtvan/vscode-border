@@ -343,7 +343,7 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM) {
 void TrackingInit(HINSTANCE hInstance, HWND ownerWnd) {
     g_hInstance = hInstance;
     g_ownerWnd = ownerWnd;
-    g_projectListHud = CreateProjectListHud(hInstance);
+    g_projectListHud = CreateProjectListHud(hInstance, g_config.projectListHorizontal);
 }
 
 void RescanAllWindows() {
