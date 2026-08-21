@@ -338,9 +338,24 @@ static void BeginAliasEdit(HWND hud, ProjectListHudState* state, int index) {
     state->editIndex = index;
 }
 
+// Clears whatever alias is set for item `index`, reverting its displayed
+// text back to the raw label -- the same end result as BeginAliasEdit
+// followed by committing an empty string, just without opening the edit
+// box first.
+static void ResetAlias(HWND hud, ProjectListHudState* state, int index) {
+    if (!state || index < 0 || index >= (int)state->entries.size()) return;
+    const std::wstring& rawLabel = state->entries[index].rawLabel;
+    SetAlias(rawLabel, L"");
+    state->entries[index].label = rawLabel;
+    RenderProjectListHud(hud, state);
+}
+
 static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, 1, L"Set Alias...");
+    bool hasAlias = index >= 0 && index < (int)state->entries.size() &&
+                    state->entries[index].label != state->entries[index].rawLabel;
+    if (hasAlias) AppendMenuW(menu, MF_STRING, 2, L"Reset Alias");
     SetForegroundWindow(hud); // required so the menu dismisses correctly on an outside click
     // Deliberately no TPM_RIGHTBUTTON: that flag restricts item *selection*
     // to the right mouse button, but the universal convention (and the only
@@ -351,6 +366,7 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     state->contextMenuOpen = false;
     DestroyMenu(menu);
     if (cmd == 1) BeginAliasEdit(hud, state, index);
+    else if (cmd == 2) ResetAlias(hud, state, index);
 }
 
 // Shared cleanup for ending a DragReorder, called both from a real
