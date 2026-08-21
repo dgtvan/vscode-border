@@ -72,7 +72,7 @@ first build):
 | `colors` | Comma-separated `RRGGBB` hex colors, assigned round-robin to windows. |
 | `show_label` | Show the folder/repo name as a label chip inside the border's top-left corner (`true`/`false`). |
 | `show_project_list` | Show an interactive project list HUD at the bottom-right of the desktop, using the same labels/colors and sorted by window left edge; includes minimized windows so it doubles as a restore list (`true`/`false`). |
-| `project_list_style` | Project list HUD layout: `horizontal` (single strip, all items share one width) or `vertical` (stacked list, shared column width). Both are resizable by right-click-dragging either edge and movable by right-click-dragging the middle. Default `horizontal`. |
+| `project_list_style` | Project list HUD layout: `horizontal` (single strip, all items share one width) or `vertical` (stacked list, shared column width). Both are resizable by Ctrl+left-click-dragging either edge and movable by Ctrl+left-click-dragging the middle; a plain right-click opens a context menu (currently just **Set Alias**). Default `horizontal`. |
 | `project_list_opacity_normal` | Project list HUD opacity when no item is hovered: 0 (invisible) - 255 (fully opaque). |
 | `project_list_opacity_hover` | Project list HUD opacity for the currently hovered item: 0 (invisible) - 255 (fully opaque). |
 | `project_list_activate_on_hover` | Temporarily activate the matching VS Code window when hovering a project-list item (`true`/`false`, default `false`). |
@@ -84,9 +84,21 @@ After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
 next launch (windows already tracked keep the color they were assigned).
 
+### Project list HUD aliases
+
+Right-click any item (or its border label chip -- same underlying label)
+and choose **Set Alias** to rename how it displays, without touching the
+actual folder/repo/branch. The item's text turns into an editable box in
+place -- type the new name and press Enter (or click elsewhere) to save it,
+or Escape to cancel; clearing the text back to empty removes the alias.
+Aliases are matched by the label's exact text, so if two windows ever
+happen to produce the identical label, aliasing one aliases both. Stored in
+`label_aliases.ini` next to `config.ini`, and re-read on **Reload Config**
+as well as at startup.
+
 ### Project list HUD position/size memory
 
-Right-click-dragging the project list HUD to move or resize it is
+Ctrl+left-click-dragging the project list HUD to move or resize it is
 remembered separately per **monitor scenario** -- the current set of active
 monitors, identified by hardware id (so unplugging/replugging or switching
 a projector between "extend" and "second screen only" doesn't lose the
@@ -159,6 +171,7 @@ to pick up worktrees created after the app started.
 - `src/file_util.*` -- shared exe-relative path / file-read / file-write helpers.
 - `src/monitor_scenario.*` -- identifies the current active-monitor set and persists/recalls the
   project list HUD's placement per scenario (see "Project list HUD position/size memory" above).
+- `src/label_alias.*` -- persists/recalls user-set label aliases (see "Project list HUD aliases" above).
 - `src/logger.*` -- file logging.
 - `src/config.*` -- `config.ini` loading.
 - `src/window_title.*` -- VS Code window title parsing (repo/branch/folder).

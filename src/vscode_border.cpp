@@ -21,6 +21,7 @@
 //   layered_rendering.* - shared per-pixel text-blend helpers for layered windows
 //   overlay.*           - layered overlay window creation/painting
 //   monitor_scenario.*  - identifies the active-monitor set, persists/recalls HUD placement per one
+//   label_alias.*       - persists/recalls user-set label aliases (HUD right-click > Set Alias)
 //   project_list_hud.*  - the draggable/resizable project-list HUD window
 //   tray_icon.*         - tray icon warning-badge compositing
 //   tracking.*          - tracked-window bookkeeping, WinEvent hooks, sync
@@ -30,6 +31,7 @@
 #include "resource.h"
 
 #include "config.h"
+#include "label_alias.h"
 #include "logger.h"
 #include "overlay.h"
 #include "tracking.h"
@@ -138,6 +140,7 @@ static void ReloadConfig() {
     g_config = LoadConfig(GetConfigPath());
     SyncWindowTitleSetting(g_config.showLabel);
     RefreshWorktreeCache();
+    ReloadAliases();
     RefreshAllLabels();
     ForceRepaintAllTracked();
     KillTimer(g_nid.hWnd, TIMER_RESCAN);

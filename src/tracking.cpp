@@ -1,6 +1,7 @@
 #include "tracking.h"
 
 #include "config.h"
+#include "label_alias.h"
 #include "logger.h"
 #include "overlay.h"
 #include "project_list_hud.h"
@@ -38,12 +39,21 @@ struct TrackedWindow {
     int lastWidth = -1;
     int lastHeight = -1;
     DWORD pid = 0;
-    std::wstring label;     // folder name derived from the target's title
+    std::wstring label;     // display text: rawLabel with any user-set alias applied (see label_alias.h)
+    std::wstring rawLabel;  // folder name derived from the target's title -- the alias map's key
     std::wstring lastLabel; // label last painted, to detect changes
     RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized -- lets a minimized
                               // window's project-list HUD entry keep sorting where it normally sits
                               // instead of jumping around (see SyncProjectListHud)
 };
+
+// Single choke point for computing both of a tracked window's label
+// fields, so every call site (initial track, name-change debounce,
+// RefreshAllLabels) picks up alias resolution consistently.
+static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
+    tw.rawLabel = BuildLabelForTitle(title);
+    tw.label = ResolveAlias(tw.rawLabel);
+}
 
 static std::unordered_map<HWND, TrackedWindow> g_tracked; // target hwnd -> info
 static std::vector<bool> g_colorInUse;
@@ -75,10 +85,20 @@ static void SyncProjectListHud() {
             continue;
         }
 
+        // Re-resolve on every sync (cheap: an in-memory map lookup) rather
+        // than trusting the cached tw.label -- that cache is otherwise only
+        // refreshed on track/name-change, so a freshly-set alias (see
+        // project_list_hud.cpp's BeginAliasEdit/EndAliasEdit) wouldn't show
+        // up here until the next title change, and would look like it
+        // "reverted" the moment this sync next overwrote the HUD's own
+        // locally-updated copy with the stale cached one.
+        kv.second.label = ResolveAlias(kv.second.rawLabel);
+
         ProjectListHudEntry entry;
         entry.target = kv.first;
         entry.windowRect = rect;
         entry.label = kv.second.label;
+        entry.rawLabel = kv.second.rawLabel;
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entries.push_back(entry);
     }
@@ -189,6 +209,12 @@ static void FreeColorIndex(int idx) {
 static void SyncOverlay(HWND target, TrackedWindow& tw) {
     if (!IsWindow(target) || !tw.overlay) return;
 
+    // Re-resolve on every sync (cheap: an in-memory map lookup) so a
+    // freshly-set alias (see project_list_hud.cpp's BeginAliasEdit) shows
+    // up in the border's label chip promptly, not just the next time the
+    // window's title itself changes.
+    tw.label = ResolveAlias(tw.rawLabel);
+
     if (IsIconic(target) || !IsWindowVisible(target)) {
         LogFastDiag(L"sync hwnd=%p HIDE iconic=%d visible=%d", target, IsIconic(target), IsWindowVisible(target));
         ShowWindow(tw.overlay, SW_HIDE);
@@ -271,7 +297,7 @@ static void CALLBACK LabelDebounceTimerProc(HWND, UINT, UINT_PTR idEvent, DWORD)
     if (tracked == g_tracked.end()) return;
     wchar_t title[512] = {};
     GetWindowTextW(target, title, 512);
-    tracked->second.label = BuildLabelForTitle(title);
+    ApplyLabelForTitle(tracked->second, title);
     LogFastDiag(L"namechange(settled) hwnd=%p title=[%ls] label=[%ls]", target, title, tracked->second.label.c_str());
     SyncOverlay(target, tracked->second);
 }
@@ -327,7 +353,7 @@ static void TrackWindow(HWND hwnd) {
     tw.overlay = CreateOverlay(g_hInstance);
     tw.colorIndex = AllocateColorIndex();
     tw.pid = pid;
-    tw.label = BuildLabelForTitle(title);
+    ApplyLabelForTitle(tw, title);
     g_tracked[hwnd] = tw;
     SyncOverlay(hwnd, g_tracked[hwnd]);
     AddPidHooks(pid);
@@ -401,7 +427,7 @@ void RefreshAllLabels() {
     for (auto& kv : g_tracked) {
         wchar_t title[512] = {};
         GetWindowTextW(kv.first, title, 512);
-        kv.second.label = BuildLabelForTitle(title);
+        ApplyLabelForTitle(kv.second, title);
         SyncOverlay(kv.first, kv.second); // repaints automatically if the label changed
     }
     SyncProjectListHud();
