@@ -16,6 +16,8 @@ struct Config {
     COLORREF labelTextColor = RGB(0, 0, 0); // used when labelTextColorAuto is false
     bool showProjectList = true;
     bool projectListHorizontal = true; // true = single horizontal strip, false = vertical list
+    bool projectListManualOrder = false; // true = user can drag items to reorder, remembered across
+                                          // restarts; false = always sorted by window left edge
     int projectListOpacityNormal = 255;
     int projectListOpacityHover = 255;
     bool projectListActivateOnHover = false;

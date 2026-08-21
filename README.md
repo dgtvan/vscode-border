@@ -71,8 +71,9 @@ first build):
 | `rescan_interval_ms` | Safety-net rescan interval; new/closed windows are normally detected instantly. |
 | `colors` | Comma-separated `RRGGBB` hex colors, assigned round-robin to windows. |
 | `show_label` | Show the folder/repo name as a label chip inside the border's top-left corner (`true`/`false`). |
-| `show_project_list` | Show an interactive project list HUD at the bottom-right of the desktop, using the same labels/colors and sorted by window left edge; includes minimized windows so it doubles as a restore list (`true`/`false`). |
+| `show_project_list` | Show an interactive project list HUD at the bottom-right of the desktop, using the same labels/colors as the border chips; includes minimized windows so it doubles as a restore list (`true`/`false`). |
 | `project_list_style` | Project list HUD layout: `horizontal` (single strip, all items share one width) or `vertical` (stacked list, shared column width). Both are resizable by Ctrl+left-click-dragging either edge and movable by Ctrl+left-click-dragging the middle; a plain right-click opens a context menu (currently just **Set Alias**). Default `horizontal`. |
+| `project_list_order` | Item order: `auto` (sorted by window left edge) or `manual` (drag items with a plain left-click to arrange them yourself -- see below). Default `auto`. |
 | `project_list_opacity_normal` | Project list HUD opacity when no item is hovered: 0 (invisible) - 255 (fully opaque). |
 | `project_list_opacity_hover` | Project list HUD opacity for the currently hovered item: 0 (invisible) - 255 (fully opaque). |
 | `project_list_activate_on_hover` | Temporarily activate the matching VS Code window when hovering a project-list item (`true`/`false`, default `false`). |
@@ -83,6 +84,21 @@ first build):
 After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
 next launch (windows already tracked keep the color they were assigned).
+
+### Project list HUD manual ordering
+
+With `project_list_order=manual`, plain left-click-and-hold on an item (as
+opposed to a plain click, which activates its window) drags it to a new
+position: as you move it, the other items shift live to open a gap at the
+candidate drop spot, and the item you're dragging floats above them,
+following the cursor, so you can always tell exactly where it'll land
+before you let go. Windows that appear for the first time are appended at
+the end until you place them. The order is matched by label text (same
+caveat as aliases: two windows sharing an identical label are kept
+adjacent to each other, not independently ordered) and is remembered
+across restarts, stored in `project_list_order.ini` next to `config.ini`.
+Switching `project_list_order` back to `auto` falls back to window-left-edge
+sorting; switching back to `manual` restores the last saved arrangement.
 
 ### Project list HUD aliases
 
@@ -169,9 +185,12 @@ to pick up worktrees created after the app started.
 
 - `src/vscode_border.cpp` -- tray icon and app lifecycle (`wWinMain`).
 - `src/file_util.*` -- shared exe-relative path / file-read / file-write helpers.
+- `src/text_util.*` -- shared UTF-8-safe line-escaping helpers for the small `*.ini` state files below.
 - `src/monitor_scenario.*` -- identifies the current active-monitor set and persists/recalls the
   project list HUD's placement per scenario (see "Project list HUD position/size memory" above).
 - `src/label_alias.*` -- persists/recalls user-set label aliases (see "Project list HUD aliases" above).
+- `src/project_list_order.*` -- persists/recalls the manually-dragged item order (see "Project list HUD
+  manual ordering" above).
 - `src/logger.*` -- file logging.
 - `src/config.*` -- `config.ini` loading.
 - `src/window_title.*` -- VS Code window title parsing (repo/branch/folder).

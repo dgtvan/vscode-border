@@ -3,6 +3,7 @@
 #include "label_alias.h"
 #include "layered_rendering.h"
 #include "monitor_scenario.h"
+#include "project_list_order.h"
 
 #include <windowsx.h>
 
@@ -17,6 +18,8 @@ static const int kProjectListAutoMaxWidth = 360; // auto-measured upper bound fo
                                                   // width -- narrower so a single long label can't blow up
                                                   // the HUD when the user hasn't sized it by hand
 static const int kProjectListMeasurePaddingX = 32;
+static const int kReorderDragThreshold = 4; // pixels of movement before a plain left-click-on-an-item
+                                             // commits to a reorder-drag instead of a click-to-activate
 static const int kProjectListBottomMargin = 24;
 
 static HFONT CreateHudFont(int fontSize, int weight) {
@@ -49,9 +52,22 @@ struct ProjectListHudState {
                               // how many items are currently shown -- state->width (the whole strip) is
                               // re-derived from this every time entries.size() changes, so item count
                               // never changes how wide each item looks (see RebuildHorizontalItemRects)
-    enum DragMode { DragNone, DragMove, DragResizeLeft, DragResizeRight } dragMode = DragNone;
+    enum DragMode { DragNone, DragMove, DragResizeLeft, DragResizeRight, DragReorder } dragMode = DragNone;
     POINT dragStart = {0, 0};
     RECT dragStartRect = {0, 0, 0, 0};
+    bool manualOrderMode = false; // mirrors style.manualOrder, cached here since WM_LBUTTONDOWN needs it
+                                  // without going through UpdateProjectListHud
+    std::vector<std::wstring> manualOrder; // rawLabels in last-dragged display order (see project_list_order.h)
+    int pendingDragIndex = -1;   // item index under the cursor at WM_LBUTTONDOWN, before a plain-left-drag
+                                  // has moved far enough to commit to DragReorder (vs. a plain click)
+    int reorderIndex = -1;       // during DragReorder: dragged entry's current position in state->entries
+    POINT reorderGrabOffset = {0, 0}; // cursor position relative to the dragged item's top-left at grab
+                                       // time, so the floating item doesn't jump to be cursor-centered
+    POINT reorderCursorClient = {0, 0}; // live cursor position (client coords) during DragReorder, used
+                                        // to place the floating item
+    HWND dragGhost = nullptr; // small always-on-top window, shown only during DragReorder, that renders
+                              // the floating dragged item -- kept separate from the HUD's own window so
+                              // it can move freely outside the HUD's bounds (see RenderDragGhost)
     std::wstring scenarioKey; // current monitor scenario (see monitor_scenario.h) -- tracked so a
                               // WM_DISPLAYCHANGE can tell whether the active monitor set actually
                               // changed, and so a completed drag knows which scenario to save under
@@ -131,6 +147,7 @@ static LPCWSTR ProjectListCursorForPoint(const ProjectListHudState* state, int x
 }
 
 static void RenderProjectListHud(HWND hud, ProjectListHudState* state);
+static void RenderDragGhost(ProjectListHudState* state);
 
 static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
     if (!state) return;
@@ -321,6 +338,52 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (!state) break;
             int mouseX = GET_X_LPARAM(lParam);
             int mouseY = GET_Y_LPARAM(lParam);
+
+            // Promote a pending plain-left-click on an item into a
+            // reorder-drag once the cursor has moved far enough to
+            // disambiguate it from a plain click (which activates the
+            // window on release instead -- see WM_LBUTTONUP).
+            if (state->manualOrderMode && state->dragMode == ProjectListHudState::DragNone &&
+                state->pendingDragIndex >= 0) {
+                POINT pt;
+                GetCursorPos(&pt);
+                if (abs(pt.x - state->dragStart.x) >= kReorderDragThreshold ||
+                    abs(pt.y - state->dragStart.y) >= kReorderDragThreshold) {
+                    state->dragMode = ProjectListHudState::DragReorder;
+                    state->reorderIndex = state->pendingDragIndex;
+                    const RECT& item = state->itemRects[state->reorderIndex];
+                    state->reorderGrabOffset = {mouseX - item.left, mouseY - item.top};
+                    SetCapture(hwnd);
+                }
+            }
+
+            if (state->dragMode == ProjectListHudState::DragReorder) {
+                state->reorderCursorClient = {mouseX, mouseY};
+                int candidate = ProjectListHitTest(state, mouseX, mouseY);
+                if (candidate < 0 && !state->itemRects.empty()) {
+                    // Outside every slot (dragged past an edge, or off the
+                    // strip entirely) -- fall back to whichever end the
+                    // cursor is nearer, so dragging past either edge still
+                    // lets you drop there instead of the candidate getting
+                    // stuck at its last in-bounds value.
+                    bool beforeFirst = state->horizontal ? mouseX < state->itemRects.front().left
+                                                          : mouseY < state->itemRects.front().top;
+                    candidate = beforeFirst ? 0 : (int)state->entries.size() - 1;
+                }
+                if (candidate >= 0 && candidate < (int)state->entries.size() && candidate != state->reorderIndex) {
+                    ProjectListHudEntry dragged = state->entries[state->reorderIndex];
+                    state->entries.erase(state->entries.begin() + state->reorderIndex);
+                    state->entries.insert(state->entries.begin() + candidate, dragged);
+                    state->reorderIndex = candidate;
+                    if (state->horizontal) RebuildHorizontalItemRects(state);
+                    else RebuildVerticalItemRects(state);
+                }
+                RenderProjectListHud(hwnd, state);
+                RenderDragGhost(state);
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+                return 0;
+            }
+
             if (state->dragMode != ProjectListHudState::DragNone) {
                 POINT pt;
                 GetCursorPos(&pt);
@@ -390,19 +453,47 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
         }
         case WM_LBUTTONDOWN:
             // Plain left-click activates on release (see WM_LBUTTONUP)
-            // without needing anything at button-down time. Ctrl+left-click
-            // instead starts a move/resize drag, mirroring the vertical
-            // style's old right-click-drag gesture but freeing up plain
-            // right-click for the context menu below.
+            // without needing anything at button-down time, unless it turns
+            // into a reorder-drag once the cursor moves far enough (see
+            // WM_MOUSEMOVE's promotion check) -- so for now just remember
+            // which item (if any) was under the cursor, and where, without
+            // committing to anything yet. Ctrl+left-click instead starts a
+            // move/resize drag immediately, mirroring the vertical style's
+            // old right-click-drag gesture but freeing up plain right-click
+            // for the context menu below.
             if (state && (GetKeyState(VK_CONTROL) & 0x8000)) {
                 state->dragMode = ProjectListDragModeForPoint(state, GET_X_LPARAM(lParam));
                 GetCursorPos(&state->dragStart);
                 GetWindowRect(hwnd, &state->dragStartRect);
                 SetCapture(hwnd);
                 SetCursor(LoadCursorW(nullptr, state->dragMode == ProjectListHudState::DragMove ? IDC_SIZEALL : IDC_SIZEWE));
+            } else if (state) {
+                int index = ProjectListHitTest(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+                if (index >= 0) {
+                    state->pendingDragIndex = index;
+                    GetCursorPos(&state->dragStart);
+                }
             }
             return 0;
         case WM_LBUTTONUP:
+            if (state && state->dragMode == ProjectListHudState::DragReorder) {
+                state->dragMode = ProjectListHudState::DragNone;
+                state->pendingDragIndex = -1;
+                state->reorderIndex = -1;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                // The live reordering during the drag already left
+                // state->entries in its final arrangement -- commit that as
+                // the new remembered order.
+                std::vector<std::wstring> order;
+                order.reserve(state->entries.size());
+                for (const ProjectListHudEntry& e : state->entries) order.push_back(e.rawLabel);
+                state->manualOrder = order;
+                SaveItemOrder(order);
+                if (state->dragGhost) ShowWindow(state->dragGhost, SW_HIDE);
+                RenderProjectListHud(hwnd, state); // redraw the dropped item's slot -- skipped while dragging
+                SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))));
+                return 0;
+            }
             if (state && state->dragMode != ProjectListHudState::DragNone) {
                 state->dragMode = ProjectListHudState::DragNone;
                 if (GetCapture() == hwnd) ReleaseCapture();
@@ -418,6 +509,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))));
                 return 0;
             }
+            if (state) state->pendingDragIndex = -1;
             if (state && state->hoverIndex >= 0 && state->hoverIndex < (int)state->entries.size()) {
                 ActivateProjectListItem(state, state->hoverIndex);
                 EndProjectListHoverFocus(state, false);
@@ -468,9 +560,20 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             }
             break;
         case WM_CAPTURECHANGED:
-            if (state) state->dragMode = ProjectListHudState::DragNone;
+            // If this interrupts an in-progress reorder-drag (e.g. another
+            // app steals capture), state->entries is left in whatever
+            // mid-drag arrangement it had reached -- unpersisted, so the
+            // next regular sync reapplies the last *saved* manualOrder and
+            // self-corrects the visual back to it.
+            if (state) {
+                state->dragMode = ProjectListHudState::DragNone;
+                state->pendingDragIndex = -1;
+                state->reorderIndex = -1;
+                if (state->dragGhost) ShowWindow(state->dragGhost, SW_HIDE);
+            }
             return 0;
         case WM_NCDESTROY:
+            if (state && state->dragGhost) DestroyWindow(state->dragGhost);
             delete state;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             break;
@@ -491,6 +594,24 @@ static void RegisterProjectListHudClass(HINSTANCE hInstance) {
     registered = true;
 }
 
+// The drag-ghost window is purely decorative (RenderDragGhost paints it,
+// nothing ever needs to handle input on it -- mouse capture stays on the
+// main HUD window for the whole drag, see WM_MOUSEMOVE), so DefWindowProcW
+// is all it needs.
+static const wchar_t* kProjectListGhostClassName = L"VSCodeBorderProjectListGhostWndClass";
+
+static void RegisterProjectListGhostClass(HINSTANCE hInstance) {
+    static bool registered = false;
+    if (registered) return;
+
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = kProjectListGhostClassName;
+    RegisterClassW(&wc);
+    registered = true;
+}
+
 HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal) {
     RegisterProjectListHudClass(hInstance);
     HWND hwnd = CreateWindowExW(
@@ -501,13 +622,71 @@ HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal) {
     ProjectListHudState* state = new ProjectListHudState();
     state->horizontal = horizontal; // must be right before ApplyScenarioForCurrentMonitors below, since
                                      // it decides whether a saved width means "per-item" or "whole strip"
+    state->manualOrder = LoadItemOrder();
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
     // Establishes the initial scenarioKey and, if this monitor scenario has
     // a remembered placement, pre-sets manualPosition/manualWidth from it
     // so the very first UpdateProjectListHud call (once real entries show
     // up) uses it instead of auto-anchoring.
     ApplyScenarioForCurrentMonitors(state);
+
+    // Created hidden up front (rather than lazily per-drag) to keep drag
+    // start/end cheap -- just shown/positioned/painted for the duration of
+    // a DragReorder. WS_EX_TRANSPARENT since it's purely visual: mouse
+    // capture stays on `hwnd` for the whole drag regardless of what's on
+    // top of it on screen.
+    RegisterProjectListGhostClass(hInstance);
+    state->dragGhost = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        kProjectListGhostClassName, L"", WS_POPUP,
+        0, 0, 1, 1, hwnd, nullptr, hInstance, nullptr);
+
     return hwnd;
+}
+
+// Draws one entry's chip (background + label text, alpha-blended by
+// `opacity`) into `pixels` at `item`. `item` may fall partly or entirely
+// outside [0,width)x[0,height) -- used for the floating dragged item
+// during DragReorder, which follows the cursor freely -- so bounds are
+// clamped explicitly (BlendTextIntoPixels already does its own clamping
+// internally).
+static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int rowHeight,
+                        const ProjectListHudEntry& entry, const RECT& item, bool highlighted, int opacity,
+                        bool labelTextColorAuto, COLORREF labelTextColor, HFONT font, HFONT hoverFont) {
+    const int paddingX = 12;
+    int itemWidth = item.right - item.left;
+    COLORREF color = entry.color;
+    BYTE r = GetRValue(color), g = GetGValue(color), b = GetBValue(color);
+    if (highlighted) {
+        r = (BYTE)std::min(255, (int)r + 32);
+        g = (BYTE)std::min(255, (int)g + 32);
+        b = (BYTE)std::min(255, (int)b + 32);
+    }
+    COLORREF chipColor = RGB(r, g, b);
+    UINT32 chipPx = (UINT32(255) << 24) | (UINT32(r) << 16) | (UINT32(g) << 8) | UINT32(b);
+
+    int rowStart = std::max((int)item.top, 0), rowEnd = std::min((int)item.bottom, height);
+    int colStart = std::max((int)item.left, 0), colEnd = std::min((int)item.right, width);
+    for (int row = rowStart; row < rowEnd; row++) {
+        for (int col = colStart; col < colEnd; col++) pixels[row * width + col] = chipPx;
+    }
+
+    COLORREF tx = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
+    BlendTextIntoPixels(screenDC, pixels, width, height, item.left + paddingX, item.top,
+                        itemWidth - paddingX * 2, rowHeight, entry.label, highlighted ? hoverFont : font,
+                        chipColor, tx, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    BYTE alpha = (BYTE)opacity;
+    for (int row = rowStart; row < rowEnd; row++) {
+        for (int col = colStart; col < colEnd; col++) {
+            UINT32 px = pixels[row * width + col];
+            BYTE pxR = (BYTE)((px >> 16) & 0xFF);
+            BYTE pxG = (BYTE)((px >> 8) & 0xFF);
+            BYTE pxB = (BYTE)(px & 0xFF);
+            pixels[row * width + col] = (UINT32(alpha) << 24) | (UINT32((pxR * alpha) / 255) << 16) |
+                                        (UINT32((pxG * alpha) / 255) << 8) | UINT32((pxB * alpha) / 255);
+        }
+    }
 }
 
 static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
@@ -543,42 +722,16 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
     HFONT font = CreateHudFont(state->fontSize, FW_SEMIBOLD);
     HFONT hoverFont = CreateHudFont(state->fontSize, FW_BLACK);
 
-    const int paddingX = 12;
+    // While reorder-dragging, the dragged item's own slot is left empty --
+    // RenderDragGhost draws it separately, in its own always-on-top window,
+    // so it can float freely outside the HUD's own bounds (see there).
+    bool dragging = state->dragMode == ProjectListHudState::DragReorder;
     for (size_t i = 0; i < state->entries.size() && i < state->itemRects.size(); i++) {
-        const ProjectListHudEntry& entry = state->entries[i];
-        const RECT& item = state->itemRects[i];
-        int itemWidth = item.right - item.left;
-        COLORREF color = entry.color;
-        BYTE alpha = (BYTE)((int)i == state->hoverIndex ? state->hoverOpacity : state->normalOpacity);
-        BYTE r = GetRValue(color), g = GetGValue(color), b = GetBValue(color);
-        if ((int)i == state->hoverIndex) {
-            r = (BYTE)std::min(255, (int)r + 32);
-            g = (BYTE)std::min(255, (int)g + 32);
-            b = (BYTE)std::min(255, (int)b + 32);
-        }
-        COLORREF chipColor = RGB(r, g, b);
-        UINT32 chipPx = (UINT32(255) << 24) | (UINT32(r) << 16) | (UINT32(g) << 8) | UINT32(b);
-        for (int row = item.top; row < item.bottom && row < height; row++) {
-            for (int col = item.left; col < item.right && col < width; col++) {
-                pixels[row * width + col] = chipPx;
-            }
-        }
-        COLORREF tx = state->labelTextColorAuto ? ContrastTextColor(color) : state->labelTextColor;
-        BlendTextIntoPixels(screenDC, pixels, width, height, item.left + paddingX, item.top,
-                            itemWidth - paddingX * 2, rowHeight, entry.label,
-                            (int)i == state->hoverIndex ? hoverFont : font, chipColor, tx,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-        for (int row = item.top; row < item.bottom && row < height; row++) {
-            for (int col = item.left; col < item.right && col < width; col++) {
-                UINT32 px = pixels[row * width + col];
-                BYTE pxR = (BYTE)((px >> 16) & 0xFF);
-                BYTE pxG = (BYTE)((px >> 8) & 0xFF);
-                BYTE pxB = (BYTE)(px & 0xFF);
-                pixels[row * width + col] = (UINT32(alpha) << 24) | (UINT32((pxR * alpha) / 255) << 16) |
-                                            (UINT32((pxG * alpha) / 255) << 8) | UINT32((pxB * alpha) / 255);
-            }
-        }
+        if (dragging && (int)i == state->reorderIndex) continue;
+        bool highlighted = (int)i == state->hoverIndex;
+        int opacity = highlighted ? state->hoverOpacity : state->normalOpacity;
+        DrawHudItem(screenDC, pixels, width, height, rowHeight, state->entries[i], state->itemRects[i],
+                    highlighted, opacity, state->labelTextColorAuto, state->labelTextColor, font, hoverFont);
     }
 
     DeleteObject(font);
@@ -592,6 +745,74 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
     blend.AlphaFormat = AC_SRC_ALPHA;
 
     UpdateLayeredWindow(hud, screenDC, nullptr, &sz, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
+
+    SelectObject(memDC, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(memDC);
+    ReleaseDC(nullptr, screenDC);
+}
+
+// Paints and positions state->dragGhost to track the cursor during a
+// DragReorder -- a screen-coordinate window, entirely independent of the
+// HUD's own bounds, so the item being dragged can move freely outside the
+// HUD (unlike the grid of other items, which is confined to it).
+static void RenderDragGhost(ProjectListHudState* state) {
+    if (!state || !state->dragGhost) return;
+    if (state->reorderIndex < 0 || state->reorderIndex >= (int)state->entries.size() ||
+        state->reorderIndex >= (int)state->itemRects.size()) {
+        return;
+    }
+    const RECT& slot = state->itemRects[state->reorderIndex];
+    int itemW = slot.right - slot.left, itemH = slot.bottom - slot.top;
+    if (itemW <= 0 || itemH <= 0) return;
+
+    HDC screenDC = GetDC(nullptr);
+    HDC memDC = CreateCompatibleDC(screenDC);
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = itemW;
+    bmi.bmiHeader.biHeight = -itemH;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp) {
+        DeleteDC(memDC);
+        ReleaseDC(nullptr, screenDC);
+        return;
+    }
+    HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, bmp);
+
+    UINT32* pixels = (UINT32*)bits;
+    for (int i = 0; i < itemW * itemH; i++) pixels[i] = 0x01000000u;
+
+    HFONT font = CreateHudFont(state->fontSize, FW_SEMIBOLD);
+    HFONT hoverFont = CreateHudFont(state->fontSize, FW_BLACK);
+    RECT localRect = {0, 0, itemW, itemH}; // ghost's own bitmap -- always local-origin, unlike the
+                                            // screen-position SetWindowPos call below
+    // Drawn "highlighted" (brightened + bold, like a hovered item) so the
+    // item you're actively moving reads as visually active.
+    DrawHudItem(screenDC, pixels, itemW, itemH, state->rowHeight, state->entries[state->reorderIndex],
+                localRect, true, state->hoverOpacity, state->labelTextColorAuto, state->labelTextColor, font,
+                hoverFont);
+    DeleteObject(font);
+    DeleteObject(hoverFont);
+
+    int screenX = state->x + state->reorderCursorClient.x - state->reorderGrabOffset.x;
+    int screenY = state->y + state->reorderCursorClient.y - state->reorderGrabOffset.y;
+    SetWindowPos(state->dragGhost, HWND_TOPMOST, screenX, screenY, itemW, itemH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    POINT ptSrc = {0, 0};
+    SIZE sz = {itemW, itemH};
+    BLENDFUNCTION blend = {};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+
+    UpdateLayeredWindow(state->dragGhost, screenDC, nullptr, &sz, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
 
     SelectObject(memDC, oldBmp);
     DeleteObject(bmp);
@@ -622,6 +843,25 @@ static int MeasureRequiredWidth(const std::vector<ProjectListHudEntry>& entries,
     return ClampInt(width, kProjectListMinWidth, kProjectListAutoMaxWidth);
 }
 
+// Rearranges `entries` (already in window-left-edge order) to match
+// `order` (a list of rawLabels in the user's last-dragged order): entries
+// whose rawLabel appears in `order` come first, in that relative order;
+// any not found (e.g. a window that appeared since the last drag) are
+// appended afterward, keeping their existing (left-edge) relative order --
+// std::stable_sort is what makes that "keep existing order" guarantee hold
+// for entries that compare equal (i.e. both not found).
+static void ApplyManualOrder(std::vector<ProjectListHudEntry>& entries, const std::vector<std::wstring>& order) {
+    std::stable_sort(entries.begin(), entries.end(),
+                     [&order](const ProjectListHudEntry& a, const ProjectListHudEntry& b) {
+        auto ia = std::find(order.begin(), order.end(), a.rawLabel);
+        auto ib = std::find(order.begin(), order.end(), b.rawLabel);
+        bool aFound = ia != order.end(), bFound = ib != order.end();
+        if (aFound != bFound) return aFound;
+        if (aFound) return (ia - ib) < 0;
+        return false;
+    });
+}
+
 void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entries,
                           const ProjectListHudStyle& style) {
     if (entries.empty()) return;
@@ -630,12 +870,16 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     if (!state) return;
     // Windows still pumps this app's timers/WinEvents while TrackPopupMenu's
     // modal loop is running (and similarly, nothing stops a regular sync
-    // from firing while the alias edit box is up) -- resyncing right then
-    // would re-assert HWND_TOPMOST on the HUD via PositionProjectListHud,
-    // which can visually push it back above the still-open menu/edit box.
-    // Skip the sync entirely until it closes; nothing here needs to be
-    // live-updated while the user's attention is on either of those anyway.
-    if (state->contextMenuOpen || state->editIndex >= 0) return;
+    // from firing while the alias edit box is up, or mid-drag) -- resyncing
+    // right then would re-assert HWND_TOPMOST on the HUD via
+    // PositionProjectListHud (which can visually push it back above the
+    // still-open menu/edit box), or clobber state->entries out from under
+    // an in-progress drag's own live reordering. Skip the sync entirely
+    // until whichever is active finishes; nothing here needs to be
+    // live-updated while the user's attention is on any of them anyway.
+    if (state->contextMenuOpen || state->editIndex >= 0 || state->dragMode != ProjectListHudState::DragNone) {
+        return;
+    }
 
     std::vector<ProjectListHudEntry> sorted = entries;
     std::sort(sorted.begin(), sorted.end(), [](const ProjectListHudEntry& a, const ProjectListHudEntry& b) {
@@ -643,6 +887,8 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
         if (a.windowRect.top != b.windowRect.top) return a.windowRect.top < b.windowRect.top;
         return a.target < b.target;
     });
+    state->manualOrderMode = style.manualOrder;
+    if (style.manualOrder) ApplyManualOrder(sorted, state->manualOrder);
 
     int rowHeight = std::max(18, style.rowHeight);
     state->rowHeight = rowHeight;

@@ -12,6 +12,7 @@
 //
 // Implementation is split across:
 //   file_util.*         - shared exe-relative path / file-read / file-write helpers
+//   text_util.*         - shared UTF-8-safe line-escaping helpers for small *.ini state files
 //   logger.*            - file logging
 //   config.*            - config.ini loading
 //   window_title.*      - VS Code window title -> folder/repo label parsing
@@ -22,6 +23,7 @@
 //   overlay.*           - layered overlay window creation/painting
 //   monitor_scenario.*  - identifies the active-monitor set, persists/recalls HUD placement per one
 //   label_alias.*       - persists/recalls user-set label aliases (HUD right-click > Set Alias)
+//   project_list_order.* - persists/recalls the manually-dragged project-list item order
 //   project_list_hud.*  - the draggable/resizable project-list HUD window
 //   tray_icon.*         - tray icon warning-badge compositing
 //   tracking.*          - tracked-window bookkeeping, WinEvent hooks, sync
