@@ -1,5 +1,6 @@
 #include "project_list_hud.h"
 
+#include "label_alias.h"
 #include "layered_rendering.h"
 #include "monitor_scenario.h"
 
@@ -54,6 +55,12 @@ struct ProjectListHudState {
     std::wstring scenarioKey; // current monitor scenario (see monitor_scenario.h) -- tracked so a
                               // WM_DISPLAYCHANGE can tell whether the active monitor set actually
                               // changed, and so a completed drag knows which scenario to save under
+    HWND editControl = nullptr; // non-null while inline-editing an item's alias (see BeginAliasEdit)
+    HFONT editFont = nullptr;
+    int editIndex = -1;
+    bool contextMenuOpen = false; // true for the duration of TrackPopupMenu's modal loop -- see
+                                   // UpdateProjectListHud's guard for why this (and editIndex >= 0)
+                                   // needs to suppress resyncs while set
 };
 
 static int ClampInt(int value, int minValue, int maxValue) {
@@ -109,12 +116,17 @@ static void RebuildHorizontalItemRects(ProjectListHudState* state) {
     }
 }
 
+// Move/resize is Ctrl+left-click-drag (plain right-click is the context
+// menu instead -- see WM_RBUTTONUP), so the move/resize cursor hints only
+// show while Ctrl is actually held; otherwise items just look clickable.
 static LPCWSTR ProjectListCursorForPoint(const ProjectListHudState* state, int x, int y) {
     if (state && (state->dragMode == ProjectListHudState::DragResizeLeft ||
                   state->dragMode == ProjectListHudState::DragResizeRight)) {
         return IDC_SIZEWE;
     }
-    if (IsProjectListResizeEdge(state, x)) return IDC_SIZEWE;
+    if (state && state->dragMode == ProjectListHudState::DragMove) return IDC_SIZEALL;
+    bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    if (ctrlDown) return IsProjectListResizeEdge(state, x) ? IDC_SIZEWE : IDC_SIZEALL;
     return ProjectListHitTest(state, x, y) >= 0 ? IDC_HAND : IDC_ARROW;
 }
 
@@ -188,6 +200,119 @@ static void EndProjectListHoverFocus(ProjectListHudState* state, bool restorePre
     }
 }
 
+static std::wstring TrimWhitespace(const std::wstring& s) {
+    size_t a = s.find_first_not_of(L" \t\r\n");
+    if (a == std::wstring::npos) return L"";
+    size_t b = s.find_last_not_of(L" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+// Ends the in-progress alias edit (if any): on commit, saves the trimmed
+// text as the new alias for that item's rawLabel (an empty result removes
+// the alias, reverting to the raw label) and updates the entry's displayed
+// text immediately. Guarding on editIndex/editControl up front, and
+// clearing them *before* DestroyWindow, makes this safe to call
+// re-entrantly -- DestroyWindow on a focused window synchronously fires
+// WM_KILLFOCUS, which would otherwise call back into this function while
+// it's still unwinding.
+static void EndAliasEdit(HWND hud, ProjectListHudState* state, bool commit) {
+    if (!state || state->editIndex < 0 || !state->editControl) return;
+    int index = state->editIndex;
+    HWND edit = state->editControl;
+    HFONT font = state->editFont;
+    state->editIndex = -1;
+    state->editControl = nullptr;
+    state->editFont = nullptr;
+
+    if (commit && index < (int)state->entries.size()) {
+        wchar_t buf[256] = {};
+        GetWindowTextW(edit, buf, 255);
+        std::wstring newAlias = TrimWhitespace(buf);
+        const std::wstring& rawLabel = state->entries[index].rawLabel;
+        SetAlias(rawLabel, newAlias);
+        state->entries[index].label = newAlias.empty() ? rawLabel : newAlias;
+    }
+
+    DestroyWindow(edit);
+    if (font) DeleteObject(font);
+    RenderProjectListHud(hud, state);
+}
+
+// Classic (pre-comctl32-subclassing) WNDPROC swap for the alias EDIT
+// control -- the original proc is stashed in the edit control's own
+// GWLP_USERDATA (distinct from the HUD window's GWLP_USERDATA, which holds
+// ProjectListHudState). Catches Enter/Escape to commit/cancel, and
+// focus-loss (e.g. clicking elsewhere) to commit.
+static LRESULT CALLBACK AliasEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    WNDPROC origProc = (WNDPROC)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if ((msg == WM_KEYDOWN && (wParam == VK_RETURN || wParam == VK_ESCAPE)) || msg == WM_KILLFOCUS) {
+        HWND hud = GetParent(hwnd);
+        ProjectListHudState* state = (ProjectListHudState*)GetWindowLongPtrW(hud, GWLP_USERDATA);
+        EndAliasEdit(hud, state, msg != WM_KEYDOWN || wParam == VK_RETURN);
+        return 0; // control is destroyed by EndAliasEdit -- do not forward to origProc
+    }
+    return CallWindowProcW(origProc, hwnd, msg, wParam, lParam);
+}
+
+// Turns item `index` into an inline text box (prefilled with its current
+// display text) so the user can type a new alias -- Enter/focus-loss
+// commits, Escape cancels. See EndAliasEdit for how the result is applied.
+//
+// The edit box is a genuine top-level window OWNED by (not a WS_CHILD of)
+// the HUD, positioned in screen coordinates over the item -- not a child
+// window in HUD client coordinates. A WS_CHILD control does not reliably
+// repaint on top of a parent that paints itself via UpdateLayeredWindow
+// (as the HUD does, for its per-pixel-alpha chips): it still receives
+// keyboard input, but typed characters don't visibly appear until
+// something else forces a full repaint of that screen region. An owned
+// top-level window composites normally regardless, sidestepping that
+// entirely. GetParent() on an owned popup still returns the owner, so
+// AliasEditSubclassProc's lookup of the HUD's state is unaffected.
+static void BeginAliasEdit(HWND hud, ProjectListHudState* state, int index) {
+    if (!state || index < 0 || index >= (int)state->itemRects.size()) return;
+    EndAliasEdit(hud, state, false); // defensive: cancel any stray edit already in progress
+
+    const RECT& item = state->itemRects[index];
+    int screenX = state->x + item.left;
+    int screenY = state->y + item.top;
+    int width = item.right - item.left;
+    int height = item.bottom - item.top;
+
+    HWND edit = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"EDIT", state->entries[index].label.c_str(),
+                                 WS_POPUP | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                                 screenX, screenY, width, height,
+                                 hud, nullptr, (HINSTANCE)GetWindowLongPtrW(hud, GWLP_HINSTANCE), nullptr);
+    if (!edit) return;
+
+    HFONT font = CreateHudFont(state->fontSize, FW_SEMIBOLD);
+    SendMessageW(edit, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(edit, EM_SETSEL, 0, -1);
+
+    WNDPROC origProc = (WNDPROC)SetWindowLongPtrW(edit, GWLP_WNDPROC, (LONG_PTR)AliasEditSubclassProc);
+    SetWindowLongPtrW(edit, GWLP_USERDATA, (LONG_PTR)origProc);
+    SetForegroundWindow(edit);
+    SetFocus(edit);
+
+    state->editControl = edit;
+    state->editFont = font;
+    state->editIndex = index;
+}
+
+static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, 1, L"Set Alias...");
+    SetForegroundWindow(hud); // required so the menu dismisses correctly on an outside click
+    // Deliberately no TPM_RIGHTBUTTON: that flag restricts item *selection*
+    // to the right mouse button, but the universal convention (and the only
+    // thing a user would naturally try) is right-click to open, then
+    // left-click to pick an item -- TPM_RIGHTBUTTON would silently eat that.
+    state->contextMenuOpen = true; // see UpdateProjectListHud's guard
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
+    state->contextMenuOpen = false;
+    DestroyMenu(menu);
+    if (cmd == 1) BeginAliasEdit(hud, state, index);
+}
+
 static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     ProjectListHudState* state = (ProjectListHudState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
@@ -232,7 +357,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     // Cache what per-item width this drag corresponds to
                     // *right now* (entries.size() is fixed for the duration
                     // of a single drag) -- this, not state->width, is what
-                    // gets remembered on WM_RBUTTONUP.
+                    // gets remembered on WM_LBUTTONUP.
                     size_t n = state->entries.size();
                     state->manualItemWidth =
                         n > 0 ? std::max(1, (newWidth - (int)(n - 1) * kProjectListGap) / (int)n) : newWidth;
@@ -263,8 +388,13 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             }
             return 0;
         }
-        case WM_RBUTTONDOWN:
-            if (state) {
+        case WM_LBUTTONDOWN:
+            // Plain left-click activates on release (see WM_LBUTTONUP)
+            // without needing anything at button-down time. Ctrl+left-click
+            // instead starts a move/resize drag, mirroring the vertical
+            // style's old right-click-drag gesture but freeing up plain
+            // right-click for the context menu below.
+            if (state && (GetKeyState(VK_CONTROL) & 0x8000)) {
                 state->dragMode = ProjectListDragModeForPoint(state, GET_X_LPARAM(lParam));
                 GetCursorPos(&state->dragStart);
                 GetWindowRect(hwnd, &state->dragStartRect);
@@ -272,7 +402,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 SetCursor(LoadCursorW(nullptr, state->dragMode == ProjectListHudState::DragMove ? IDC_SIZEALL : IDC_SIZEWE));
             }
             return 0;
-        case WM_RBUTTONUP:
+        case WM_LBUTTONUP:
             if (state && state->dragMode != ProjectListHudState::DragNone) {
                 state->dragMode = ProjectListHudState::DragNone;
                 if (GetCapture() == hwnd) ReleaseCapture();
@@ -286,6 +416,21 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     SaveHudPlacement(state->scenarioKey, state->x, state->y, savedWidth);
                 }
                 SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))));
+                return 0;
+            }
+            if (state && state->hoverIndex >= 0 && state->hoverIndex < (int)state->entries.size()) {
+                ActivateProjectListItem(state, state->hoverIndex);
+                EndProjectListHoverFocus(state, false);
+            }
+            return 0;
+        case WM_RBUTTONUP:
+            if (state) {
+                int index = ProjectListHitTest(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+                if (index >= 0) {
+                    POINT screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                    ClientToScreen(hwnd, &screenPt);
+                    ShowItemContextMenu(hwnd, state, index, screenPt);
+                }
             }
             return 0;
         case WM_DISPLAYCHANGE:
@@ -324,12 +469,6 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             break;
         case WM_CAPTURECHANGED:
             if (state) state->dragMode = ProjectListHudState::DragNone;
-            return 0;
-        case WM_LBUTTONUP:
-            if (state && state->hoverIndex >= 0 && state->hoverIndex < (int)state->entries.size()) {
-                ActivateProjectListItem(state, state->hoverIndex);
-                EndProjectListHoverFocus(state, false);
-            }
             return 0;
         case WM_NCDESTROY:
             delete state;
@@ -489,6 +628,14 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
 
     ProjectListHudState* state = (ProjectListHudState*)GetWindowLongPtrW(hud, GWLP_USERDATA);
     if (!state) return;
+    // Windows still pumps this app's timers/WinEvents while TrackPopupMenu's
+    // modal loop is running (and similarly, nothing stops a regular sync
+    // from firing while the alias edit box is up) -- resyncing right then
+    // would re-assert HWND_TOPMOST on the HUD via PositionProjectListHud,
+    // which can visually push it back above the still-open menu/edit box.
+    // Skip the sync entirely until it closes; nothing here needs to be
+    // live-updated while the user's attention is on either of those anyway.
+    if (state->contextMenuOpen || state->editIndex >= 0) return;
 
     std::vector<ProjectListHudEntry> sorted = entries;
     std::sort(sorted.begin(), sorted.end(), [](const ProjectListHudEntry& a, const ProjectListHudEntry& b) {
