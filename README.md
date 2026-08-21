@@ -107,10 +107,12 @@ and choose **Set Alias** to rename how it displays, without touching the
 actual folder/repo/branch. The item's text turns into an editable box in
 place -- type the new name and press Enter (or click elsewhere) to save it,
 or Escape to cancel; clearing the text back to empty removes the alias.
-Aliases are matched by the label's exact text, so if two windows ever
-happen to produce the identical label, aliasing one aliases both. Stored in
-`label_aliases.ini` next to `config.ini`, and re-read on **Reload Config**
-as well as at startup.
+Once an item has an alias, the same menu also offers **Reset Alias**, which
+clears it immediately without opening the edit box. Aliases are matched by
+the label's exact text, so if two windows ever happen to produce the
+identical label, aliasing one aliases both. Stored in `label_aliases.ini`
+next to `config.ini`, and re-read on **Reload Config** as well as at
+startup.
 
 ### Project list HUD position/size memory
 
