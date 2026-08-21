@@ -1,6 +1,7 @@
 #include "worktree_resolver.h"
 
 #include "config.h"
+#include "file_util.h"
 #include "logger.h"
 
 #include <windows.h>
@@ -54,19 +55,8 @@ static std::wstring FileUriToPath(const std::string& uri) {
 // workspace.json file -- multi-root ("workspace": "...") entries are
 // skipped since they don't map to a single worktree checkout.
 static bool ReadFolderUri(const std::wstring& jsonPath, std::string& outUri) {
-    HANDLE h = CreateFileW(jsonPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-
-    DWORD size = GetFileSize(h, nullptr);
-    std::string content;
-    if (size != INVALID_FILE_SIZE && size > 0) {
-        content.resize(size);
-        DWORD bytesRead = 0;
-        ReadFile(h, &content[0], size, &bytesRead, nullptr);
-        content.resize(bytesRead);
-    }
-    CloseHandle(h);
+    std::string content = ReadFileBytes(jsonPath);
+    if (content.empty()) return false;
 
     size_t keyPos = content.find("\"folder\"");
     if (keyPos == std::string::npos) return false;

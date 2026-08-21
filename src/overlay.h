@@ -6,7 +6,7 @@
 
 extern const wchar_t* kOverlayClassName;
 
-// Creates the (hidden, 1x1) layered click-through overlay popup window.
+// Creates the (hidden, 1x1) layered click-through border overlay popup window.
 HWND CreateOverlay(HINSTANCE hInstance);
 
 // Paints a hollow rectangular frame of `thickness` px into the overlay's

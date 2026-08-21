@@ -71,7 +71,13 @@ VSCodeTitleParts ParseVSCodeTitle(const std::wstring& title) {
 
 std::wstring BuildFolderLabel(const VSCodeTitleParts& parts) {
     if (!parts.repo.empty()) return parts.repo + L" - " + parts.branch;
-    return parts.folder;
+    if (!parts.folder.empty()) return parts.folder;
+    // No repo and no folder open (a bare "File > New Window") -- an empty
+    // label would make this window invisible to both the border's label
+    // chip (overlay.cpp skips drawing an empty one) and the project list
+    // HUD (tracking.cpp skips entries with an empty label entirely), so
+    // fall back to a placeholder instead of leaving it unlabeled.
+    return L"(no folder)";
 }
 
 std::wstring ExtractFolderName(const std::wstring& title) {
