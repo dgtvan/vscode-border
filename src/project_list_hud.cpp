@@ -67,7 +67,7 @@ struct ProjectListHudState {
                                         // to place the floating item
     HWND dragGhost = nullptr; // small always-on-top window, shown only during DragReorder, that renders
                               // the floating dragged item -- kept separate from the HUD's own window so
-                              // it can move freely outside the HUD's bounds (see RenderDragGhost)
+                              // it can move freely outside the HUD's bounds (see PaintDragGhost)
     std::wstring scenarioKey; // current monitor scenario (see monitor_scenario.h) -- tracked so a
                               // WM_DISPLAYCHANGE can tell whether the active monitor set actually
                               // changed, and so a completed drag knows which scenario to save under
@@ -147,7 +147,8 @@ static LPCWSTR ProjectListCursorForPoint(const ProjectListHudState* state, int x
 }
 
 static void RenderProjectListHud(HWND hud, ProjectListHudState* state);
-static void RenderDragGhost(ProjectListHudState* state);
+static void PaintDragGhost(ProjectListHudState* state);
+static void MoveDragGhost(ProjectListHudState* state);
 
 static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
     if (!state) return;
@@ -330,6 +331,36 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     if (cmd == 1) BeginAliasEdit(hud, state, index);
 }
 
+// Shared cleanup for ending a DragReorder, called both from a real
+// WM_LBUTTONUP and from WM_MOUSEMOVE's defensive check for a left button
+// that's no longer physically down (see that check's comment).
+static void EndReorderDrag(HWND hwnd, ProjectListHudState* state, int mouseX, int mouseY) {
+    state->dragMode = ProjectListHudState::DragNone;
+    state->pendingDragIndex = -1;
+    state->reorderIndex = -1;
+    if (GetCapture() == hwnd) ReleaseCapture();
+    std::vector<std::wstring> order;
+    order.reserve(state->entries.size());
+    for (const ProjectListHudEntry& e : state->entries) order.push_back(e.rawLabel);
+    state->manualOrder = order;
+    SaveItemOrder(order);
+    if (state->dragGhost) ShowWindow(state->dragGhost, SW_HIDE);
+    RenderProjectListHud(hwnd, state);
+    SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, mouseX, mouseY)));
+}
+
+// Shared cleanup for ending a DragMove/DragResizeLeft/DragResizeRight, same
+// two call sites as EndReorderDrag above.
+static void EndMoveResizeDrag(HWND hwnd, ProjectListHudState* state, int mouseX, int mouseY) {
+    state->dragMode = ProjectListHudState::DragNone;
+    if (GetCapture() == hwnd) ReleaseCapture();
+    if (state->manualPosition) {
+        int savedWidth = state->horizontal ? state->manualItemWidth : state->width;
+        SaveHudPlacement(state->scenarioKey, state->x, state->y, savedWidth);
+    }
+    SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, mouseX, mouseY)));
+}
+
 static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     ProjectListHudState* state = (ProjectListHudState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
@@ -338,6 +369,24 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (!state) break;
             int mouseX = GET_X_LPARAM(lParam);
             int mouseY = GET_Y_LPARAM(lParam);
+
+            // Some touchpads' "tap twice and drag" gesture leaves the
+            // logical left button down (continuing to feed mouse-move
+            // messages to whoever holds capture) past the finger's actual
+            // lift, only truly releasing on a later confirming tap -- so a
+            // drag started that way never got a WM_LBUTTONUP and looked
+            // stuck until the user clicked again. Checking the *real*
+            // hardware button state here ends the drag as soon as it's
+            // actually released, regardless of whether a matching
+            // WM_LBUTTONUP message ever shows up.
+            if (state->dragMode != ProjectListHudState::DragNone && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) {
+                if (state->dragMode == ProjectListHudState::DragReorder) {
+                    EndReorderDrag(hwnd, state, mouseX, mouseY);
+                } else {
+                    EndMoveResizeDrag(hwnd, state, mouseX, mouseY);
+                }
+                return 0;
+            }
 
             // Promote a pending plain-left-click on an item into a
             // reorder-drag once the cursor has moved far enough to
@@ -353,7 +402,10 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     state->reorderIndex = state->pendingDragIndex;
                     const RECT& item = state->itemRects[state->reorderIndex];
                     state->reorderGrabOffset = {mouseX - item.left, mouseY - item.top};
+                    state->reorderCursorClient = {mouseX, mouseY};
                     SetCapture(hwnd);
+                    RenderProjectListHud(hwnd, state); // show the now-empty original slot immediately
+                    PaintDragGhost(state); // paints + positions the floating item for the first time
                 }
             }
 
@@ -377,9 +429,14 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     state->reorderIndex = candidate;
                     if (state->horizontal) RebuildHorizontalItemRects(state);
                     else RebuildVerticalItemRects(state);
+                    RenderProjectListHud(hwnd, state); // only repaint the (expensive, full-bitmap) main
+                                                        // grid when the arrangement actually changed
                 }
-                RenderProjectListHud(hwnd, state);
-                RenderDragGhost(state);
+                // Cheap every frame: just repositions the already-painted
+                // ghost (see MoveDragGhost/PaintDragGhost's comments for
+                // why repainting on every mouse-move visibly lagged behind
+                // fast cursor movement).
+                MoveDragGhost(state);
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
                 return 0;
             }
@@ -477,36 +534,11 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             return 0;
         case WM_LBUTTONUP:
             if (state && state->dragMode == ProjectListHudState::DragReorder) {
-                state->dragMode = ProjectListHudState::DragNone;
-                state->pendingDragIndex = -1;
-                state->reorderIndex = -1;
-                if (GetCapture() == hwnd) ReleaseCapture();
-                // The live reordering during the drag already left
-                // state->entries in its final arrangement -- commit that as
-                // the new remembered order.
-                std::vector<std::wstring> order;
-                order.reserve(state->entries.size());
-                for (const ProjectListHudEntry& e : state->entries) order.push_back(e.rawLabel);
-                state->manualOrder = order;
-                SaveItemOrder(order);
-                if (state->dragGhost) ShowWindow(state->dragGhost, SW_HIDE);
-                RenderProjectListHud(hwnd, state); // redraw the dropped item's slot -- skipped while dragging
-                SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))));
+                EndReorderDrag(hwnd, state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
                 return 0;
             }
             if (state && state->dragMode != ProjectListHudState::DragNone) {
-                state->dragMode = ProjectListHudState::DragNone;
-                if (GetCapture() == hwnd) ReleaseCapture();
-                // Remember where the user just put it, scoped to the current
-                // monitor scenario -- so switching monitors later restores
-                // this placement instead of falling back to auto-anchoring.
-                // Saved width is always per-item (see manualItemWidth), so
-                // it stays correct however many windows are tracked later.
-                if (state->manualPosition) {
-                    int savedWidth = state->horizontal ? state->manualItemWidth : state->width;
-                    SaveHudPlacement(state->scenarioKey, state->x, state->y, savedWidth);
-                }
-                SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))));
+                EndMoveResizeDrag(hwnd, state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
                 return 0;
             }
             if (state) state->pendingDragIndex = -1;
@@ -594,9 +626,10 @@ static void RegisterProjectListHudClass(HINSTANCE hInstance) {
     registered = true;
 }
 
-// The drag-ghost window is purely decorative (RenderDragGhost paints it,
-// nothing ever needs to handle input on it -- mouse capture stays on the
-// main HUD window for the whole drag, see WM_MOUSEMOVE), so DefWindowProcW
+// The drag-ghost window is purely decorative (PaintDragGhost/MoveDragGhost
+// paint and reposition it, nothing ever needs to handle input on it --
+// mouse capture stays on the main HUD window for the whole drag, see
+// WM_MOUSEMOVE), so DefWindowProcW
 // is all it needs.
 static const wchar_t* kProjectListGhostClassName = L"VSCodeBorderProjectListGhostWndClass";
 
@@ -634,12 +667,19 @@ HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal) {
     // start/end cheap -- just shown/positioned/painted for the duration of
     // a DragReorder. WS_EX_TRANSPARENT since it's purely visual: mouse
     // capture stays on `hwnd` for the whole drag regardless of what's on
-    // top of it on screen.
+    // top of it on screen. Deliberately NOT owned by `hwnd` (nullptr parent,
+    // not hwnd): Windows couples an owned window's z-order to its owner in
+    // a way that silently overrode this window's own HWND_TOPMOST requests
+    // -- SetWindowPos kept reporting success and landing at the requested
+    // rect, but WindowFromPoint at that exact rect still resolved to the
+    // (owner) HUD window, i.e. the HUD was painting over this one despite
+    // "winning" every individual z-order call. A fully independent
+    // top-level window has no such coupling.
     RegisterProjectListGhostClass(hInstance);
     state->dragGhost = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kProjectListGhostClassName, L"", WS_POPUP,
-        0, 0, 1, 1, hwnd, nullptr, hInstance, nullptr);
+        0, 0, 1, 1, nullptr, nullptr, hInstance, nullptr);
 
     return hwnd;
 }
@@ -723,8 +763,9 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
     HFONT hoverFont = CreateHudFont(state->fontSize, FW_BLACK);
 
     // While reorder-dragging, the dragged item's own slot is left empty --
-    // RenderDragGhost draws it separately, in its own always-on-top window,
-    // so it can float freely outside the HUD's own bounds (see there).
+    // PaintDragGhost/MoveDragGhost draw it separately, in its own
+    // always-on-top window, so it can float freely outside the HUD's own
+    // bounds (see there).
     bool dragging = state->dragMode == ProjectListHudState::DragReorder;
     for (size_t i = 0; i < state->entries.size() && i < state->itemRects.size(); i++) {
         if (dragging && (int)i == state->reorderIndex) continue;
@@ -752,11 +793,36 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
     ReleaseDC(nullptr, screenDC);
 }
 
-// Paints and positions state->dragGhost to track the cursor during a
-// DragReorder -- a screen-coordinate window, entirely independent of the
-// HUD's own bounds, so the item being dragged can move freely outside the
-// HUD (unlike the grid of other items, which is confined to it).
-static void RenderDragGhost(ProjectListHudState* state) {
+// Repositions state->dragGhost to track the cursor -- cheap (a single
+// SetWindowPos, no repainting), since the dragged item's *appearance*
+// never changes for the duration of a drag, only its screen position. Call
+// on every mouse-move frame of a DragReorder; see PaintDragGhost for the
+// one-time paint that must happen first.
+static void MoveDragGhost(ProjectListHudState* state) {
+    if (!state || !state->dragGhost) return;
+    int screenX = state->x + state->reorderCursorClient.x - state->reorderGrabOffset.x;
+    int screenY = state->y + state->reorderCursorClient.y - state->reorderGrabOffset.y;
+    // See PaintDragGhost's comment: toggling through HWND_NOTOPMOST forces a
+    // real re-insertion at the front of the topmost band, which a plain
+    // repeated HWND_TOPMOST call does not reliably do once some other
+    // window (e.g. the shell's taskbar-hover helper) has gone topmost more
+    // recently than we have.
+    SetWindowPos(state->dragGhost, HWND_NOTOPMOST, screenX, screenY, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+    SetWindowPos(state->dragGhost, HWND_TOPMOST, screenX, screenY, 0, 0,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOSIZE);
+}
+
+// Paints state->dragGhost's appearance (the dragged item's chip) and
+// positions it for the first time, at the start of a DragReorder -- a
+// screen-coordinate window, entirely independent of the HUD's own bounds,
+// so the item being dragged can move freely outside the HUD (unlike the
+// grid of other items, which is confined to it). See MoveDragGhost for the
+// cheap per-frame repositioning that follows: repainting on every
+// mouse-move -- a full 32bpp bitmap create+draw+composite pass, on top of
+// the main grid's own such pass -- measurably lagged behind fast cursor
+// movement, which looked like the dragged item getting stuck/not keeping
+// up. Since the content never changes mid-drag, painting it once is enough.
+static void PaintDragGhost(ProjectListHudState* state) {
     if (!state || !state->dragGhost) return;
     if (state->reorderIndex < 0 || state->reorderIndex >= (int)state->entries.size() ||
         state->reorderIndex >= (int)state->itemRects.size()) {
@@ -803,6 +869,12 @@ static void RenderDragGhost(ProjectListHudState* state) {
 
     int screenX = state->x + state->reorderCursorClient.x - state->reorderGrabOffset.x;
     int screenY = state->y + state->reorderCursorClient.y - state->reorderGrabOffset.y;
+    // Re-asserting HWND_TOPMOST on a window that's already topmost doesn't
+    // reliably move it ahead of other topmost windows that appeared more
+    // recently (e.g. the shell's taskbar-hover helper window) -- toggling
+    // through HWND_NOTOPMOST first forces a real re-insertion at the front.
+    // See MoveDragGhost for the same pattern, applied every frame.
+    SetWindowPos(state->dragGhost, HWND_NOTOPMOST, screenX, screenY, itemW, itemH, SWP_NOACTIVATE);
     SetWindowPos(state->dragGhost, HWND_TOPMOST, screenX, screenY, itemW, itemH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
     POINT ptSrc = {0, 0};
