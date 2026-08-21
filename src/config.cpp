@@ -1,4 +1,5 @@
 #include "config.h"
+#include "file_util.h"
 #include "logger.h"
 
 #include <algorithm>
@@ -15,33 +16,8 @@ static std::vector<COLORREF> DefaultPalette() {
     };
 }
 
-static std::wstring GetExeDir() {
-    wchar_t path[MAX_PATH];
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring s(path);
-    size_t slash = s.find_last_of(L"\\/");
-    return (slash == std::wstring::npos) ? L"." : s.substr(0, slash);
-}
-
 std::wstring GetConfigPath() {
     return GetExeDir() + L"\\config.ini";
-}
-
-static std::string ReadFileBytes(const std::wstring& path) {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return std::string();
-
-    DWORD size = GetFileSize(h, nullptr);
-    std::string buf;
-    if (size != INVALID_FILE_SIZE && size > 0) {
-        buf.resize(size);
-        DWORD bytesRead = 0;
-        ReadFile(h, &buf[0], size, &bytesRead, nullptr);
-        buf.resize(bytesRead);
-    }
-    CloseHandle(h);
-    return buf;
 }
 
 static std::vector<std::string> SplitChar(const std::string& s, char delim) {
@@ -97,6 +73,16 @@ Config LoadConfig(const std::wstring& path) {
             cfg.rescanIntervalMs = std::max(500, atoi(val.c_str()));
         } else if (key == "show_label") {
             cfg.showLabel = (val == "1" || _stricmp(val.c_str(), "true") == 0);
+        } else if (key == "show_project_list") {
+            cfg.showProjectList = (val == "1" || _stricmp(val.c_str(), "true") == 0);
+        } else if (key == "project_list_style") {
+            cfg.projectListHorizontal = (_stricmp(val.c_str(), "vertical") != 0);
+        } else if (key == "project_list_opacity_normal") {
+            cfg.projectListOpacityNormal = std::min(255, std::max(0, atoi(val.c_str())));
+        } else if (key == "project_list_opacity_hover") {
+            cfg.projectListOpacityHover = std::min(255, std::max(0, atoi(val.c_str())));
+        } else if (key == "project_list_activate_on_hover") {
+            cfg.projectListActivateOnHover = (val == "1" || _stricmp(val.c_str(), "true") == 0);
         } else if (key == "label_height") {
             cfg.labelHeight = std::max(0, atoi(val.c_str()));
         } else if (key == "label_font_size") {
@@ -120,8 +106,11 @@ Config LoadConfig(const std::wstring& path) {
         }
     }
 
-    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X verbose_logging=%d colors=%zu",
-        cfg.thickness, cfg.opacity, cfg.rescanIntervalMs, cfg.showLabel, cfg.labelHeight, cfg.labelFontSize,
+    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_style=%ls project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X verbose_logging=%d colors=%zu",
+        cfg.thickness, cfg.opacity, cfg.rescanIntervalMs, cfg.showLabel, cfg.showProjectList,
+        cfg.projectListHorizontal ? L"horizontal" : L"vertical",
+        cfg.projectListOpacityNormal, cfg.projectListOpacityHover, cfg.projectListActivateOnHover,
+        cfg.labelHeight, cfg.labelFontSize,
         cfg.labelTextColorAuto, (unsigned)((GetRValue(cfg.labelTextColor) << 16) | (GetGValue(cfg.labelTextColor) << 8) | GetBValue(cfg.labelTextColor)),
         cfg.verboseLogging, cfg.palette.size());
     return cfg;

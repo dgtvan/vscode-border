@@ -52,7 +52,7 @@ automatically at login, see [docs/AUTOSTART.md](docs/AUTOSTART.md).
 If something unexpected happens during a run (e.g. a VS Code window's
 title doesn't match any recognized shape -- see [Getting the repo/branch
 label](#getting-the-repobranch-label-instead-of-just-the-folder-name)), the
-tray icon gets a small red asterisk badge and its tooltip changes to say
+tray icon gets a small yellow "!" badge and its tooltip changes to say
 so. **Open Log Folder** jumps straight to `bin\vscode_border.log` (same
 folder as `config.ini`; set `verbose_logging=true` in `config.ini` for full
 per-event tracing on top of that). The log starts fresh on every launch,
@@ -71,6 +71,11 @@ first build):
 | `rescan_interval_ms` | Safety-net rescan interval; new/closed windows are normally detected instantly. |
 | `colors` | Comma-separated `RRGGBB` hex colors, assigned round-robin to windows. |
 | `show_label` | Show the folder/repo name as a label chip inside the border's top-left corner (`true`/`false`). |
+| `show_project_list` | Show an interactive project list HUD at the bottom-right of the desktop, using the same labels/colors and sorted by window left edge; includes minimized windows so it doubles as a restore list (`true`/`false`). |
+| `project_list_style` | Project list HUD layout: `horizontal` (single strip, all items share one width) or `vertical` (stacked list, shared column width). Both are resizable by right-click-dragging either edge and movable by right-click-dragging the middle. Default `horizontal`. |
+| `project_list_opacity_normal` | Project list HUD opacity when no item is hovered: 0 (invisible) - 255 (fully opaque). |
+| `project_list_opacity_hover` | Project list HUD opacity for the currently hovered item: 0 (invisible) - 255 (fully opaque). |
+| `project_list_activate_on_hover` | Temporarily activate the matching VS Code window when hovering a project-list item (`true`/`false`, default `false`). |
 | `label_height` | Label chip height in pixels. |
 | `label_font_size` | Label text font size in points. |
 | `label_text_color` | Label text color: a hex `RRGGBB` color, or `auto` to pick black/white based on contrast against the border color. Default `000000` (black). |
@@ -78,6 +83,20 @@ first build):
 After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
 next launch (windows already tracked keep the color they were assigned).
+
+### Project list HUD position/size memory
+
+Right-click-dragging the project list HUD to move or resize it is
+remembered separately per **monitor scenario** -- the current set of active
+monitors, identified by hardware id (so unplugging/replugging or switching
+a projector between "extend" and "second screen only" doesn't lose the
+placement you set for each one). Moving it while on a laptop's built-in
+screen, then again after connecting an external monitor, remembers both
+independently and switches between them automatically as monitors are
+connected/disconnected -- no manual re-positioning needed each time. A
+scenario that's never been manually placed falls back to the default
+bottom-right auto-placement. Stored in
+`project_list_hud_positions.ini` next to `config.ini`.
 
 ### Getting the repo/branch label instead of just the folder name
 
@@ -137,14 +156,20 @@ to pick up worktrees created after the app started.
 ## Project layout
 
 - `src/vscode_border.cpp` -- tray icon and app lifecycle (`wWinMain`).
+- `src/file_util.*` -- shared exe-relative path / file-read / file-write helpers.
+- `src/monitor_scenario.*` -- identifies the current active-monitor set and persists/recalls the
+  project list HUD's placement per scenario (see "Project list HUD position/size memory" above).
 - `src/logger.*` -- file logging.
 - `src/config.*` -- `config.ini` loading.
 - `src/window_title.*` -- VS Code window title parsing (repo/branch/folder).
 - `src/worktree_resolver.*` -- maps a git worktree's folder name back to its main repo name.
 - `src/vscode_settings.*` -- auto-manages VS Code's `window.title` setting to match `show_label` (see [Getting the repo/branch label](#getting-the-repobranch-label-instead-of-just-the-folder-name)).
 - `src/window_discovery.*` -- finding/filtering VS Code top-level windows.
-- `src/overlay.*` -- layered overlay window creation/painting.
-- `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, sync.
+- `src/overlay.*` -- passive per-window border overlay creation/painting.
+- `src/project_list_hud.*` -- interactive desktop project-list HUD: sorts/sizes/positions itself from the entries it's given, plus hover focus, click, move, and resize behavior.
+- `src/layered_rendering.*` -- shared alpha-blended text helpers for layered windows.
+- `src/tray_icon.*` -- tray icon warning-badge compositing.
+- `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, border sync, and feeding the HUD its entries.
 - `src/resource.rc`, `assets/app.ico`, `assets/square-dashed.png` -- tray icon resource (`app.ico` is generated from the PNG; see [Credits](#credits)).
 - `config.ini` -- default config template (copied to `bin\` on first build).
 - `build.ps1` -- build script.

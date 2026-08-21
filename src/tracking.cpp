@@ -3,10 +3,13 @@
 #include "config.h"
 #include "logger.h"
 #include "overlay.h"
+#include "project_list_hud.h"
 #include "window_discovery.h"
 #include "window_title.h"
 #include "worktree_resolver.h"
 
+#include <cstdlib>
+#include <ctime>
 #include <unordered_map>
 #include <vector>
 
@@ -24,6 +27,7 @@ static std::wstring BuildLabelForTitle(const std::wstring& title) {
 
 static HINSTANCE g_hInstance = nullptr;
 static HWND g_ownerWnd = nullptr;
+static HWND g_projectListHud = nullptr;
 
 const UINT_PTR kForegroundPollTimerId = 2;
 static const UINT kForegroundPollIntervalMs = 50;
@@ -36,10 +40,64 @@ struct TrackedWindow {
     DWORD pid = 0;
     std::wstring label;     // folder name derived from the target's title
     std::wstring lastLabel; // label last painted, to detect changes
+    RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized -- lets a minimized
+                              // window's project-list HUD entry keep sorting where it normally sits
+                              // instead of jumping around (see SyncProjectListHud)
 };
 
 static std::unordered_map<HWND, TrackedWindow> g_tracked; // target hwnd -> info
 static std::vector<bool> g_colorInUse;
+
+static void SyncProjectListHud() {
+    if (!g_projectListHud) return;
+    if (!g_config.showProjectList || g_tracked.empty()) {
+        HideProjectListHud(g_projectListHud);
+        return;
+    }
+
+    std::vector<ProjectListHudEntry> entries;
+    for (auto& kv : g_tracked) {
+        if (!IsWindow(kv.first) || !IsWindowVisible(kv.first) || kv.second.label.empty()) continue;
+
+        // Minimized windows are still WS_VISIBLE (that's a separate style
+        // bit from iconic/minimized state) -- keep showing them in the HUD
+        // rather than dropping them, since restoring a minimized window is
+        // exactly the kind of thing this list is for. There's no meaningful
+        // *current* on-screen rect to sort by while minimized, so fall back
+        // to wherever it was last seen (zero-rect if never seen, e.g.
+        // tracked while already minimized).
+        RECT rect;
+        if (IsIconic(kv.first)) {
+            rect = kv.second.lastKnownRect;
+        } else if (GetVisibleWindowRect(kv.first, rect)) {
+            kv.second.lastKnownRect = rect;
+        } else {
+            continue;
+        }
+
+        ProjectListHudEntry entry;
+        entry.target = kv.first;
+        entry.windowRect = rect;
+        entry.label = kv.second.label;
+        entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
+        entries.push_back(entry);
+    }
+    if (entries.empty()) {
+        HideProjectListHud(g_projectListHud);
+        return;
+    }
+
+    ProjectListHudStyle style;
+    style.horizontal = g_config.projectListHorizontal;
+    style.rowHeight = g_config.labelHeight;
+    style.fontSize = g_config.labelFontSize;
+    style.labelTextColorAuto = g_config.labelTextColorAuto;
+    style.labelTextColor = g_config.labelTextColor;
+    style.normalOpacity = g_config.projectListOpacityNormal;
+    style.hoverOpacity = g_config.projectListOpacityHover;
+    style.activateOnHover = g_config.projectListActivateOnHover;
+    UpdateProjectListHud(g_projectListHud, entries, style);
+}
 
 // EVENT_OBJECT_LOCATIONCHANGE fires for every move/resize/visibility/Z-order
 // change of every top-level window on the whole desktop -- registering it
@@ -88,18 +146,36 @@ static void ReleaseAllPidHooks() {
     g_pidHooks.clear();
 }
 
+// Picked once per run (not once per window) so the *set* of colors handed
+// out in a session still cycles through the whole palette in a fixed
+// round-robin order -- only where that cycle starts changes, so two
+// windows never collide and every run doesn't visually start with the same
+// color for whichever window happens to be tracked first.
+static int RandomColorOffset(size_t n) {
+    if (n == 0) return 0;
+    static bool seeded = false;
+    if (!seeded) {
+        srand((unsigned)time(nullptr));
+        seeded = true;
+    }
+    return rand() % (int)n;
+}
+
 static int AllocateColorIndex() {
     size_t n = g_config.palette.size();
     if (g_colorInUse.size() != n) g_colorInUse.assign(n, false);
+    static int offset = -1;
+    if (offset < 0) offset = RandomColorOffset(n);
 
     for (size_t i = 0; i < n; i++) {
-        if (!g_colorInUse[i]) {
-            g_colorInUse[i] = true;
-            return (int)i;
+        size_t idx = (i + (size_t)offset) % n;
+        if (!g_colorInUse[idx]) {
+            g_colorInUse[idx] = true;
+            return (int)idx;
         }
     }
     static int roundRobin = 0;
-    int idx = roundRobin % (int)n;
+    int idx = (roundRobin + offset) % (int)n;
     roundRobin++;
     return idx;
 }
@@ -116,18 +192,25 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     if (IsIconic(target) || !IsWindowVisible(target)) {
         LogFastDiag(L"sync hwnd=%p HIDE iconic=%d visible=%d", target, IsIconic(target), IsWindowVisible(target));
         ShowWindow(tw.overlay, SW_HIDE);
+        SyncProjectListHud();
         return;
     }
 
     RECT r;
-    if (!GetVisibleWindowRect(target, r)) return;
+    if (!GetVisibleWindowRect(target, r)) {
+        SyncProjectListHud();
+        return;
+    }
 
     int t = g_config.thickness;
     int ox = r.left - t;
     int oy = r.top - t;
     int ow = (r.right - r.left) + 2 * t;
     int oh = (r.bottom - r.top) + 2 * t;
-    if (ow <= 0 || oh <= 0) return;
+    if (ow <= 0 || oh <= 0) {
+        SyncProjectListHud();
+        return;
+    }
 
     if (ow != tw.lastWidth || oh != tw.lastHeight || tw.label != tw.lastLabel) {
         LogFastDiag(L"sync hwnd=%p REPAINT ow=%d oh=%d (was %dx%d) label=[%ls] (was [%ls])", target, ow, oh,
@@ -161,6 +244,7 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     if (aboveTarget != tw.overlay) {
         SetWindowPos(tw.overlay, aboveTarget, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
     }
+    SyncProjectListHud();
 }
 
 // VS Code can fire several rapid NAMECHANGE events in a row while
@@ -261,6 +345,7 @@ static void UntrackWindow(HWND hwnd) {
     DestroyWindow(it->second.overlay);
     g_tracked.erase(it);
     UpdateForegroundPollTimer();
+    SyncProjectListHud();
 
     auto debounce = g_labelDebounceByHwnd.find(hwnd);
     if (debounce != g_labelDebounceByHwnd.end()) {
@@ -278,6 +363,7 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM) {
 void TrackingInit(HINSTANCE hInstance, HWND ownerWnd) {
     g_hInstance = hInstance;
     g_ownerWnd = ownerWnd;
+    g_projectListHud = CreateProjectListHud(hInstance, g_config.projectListHorizontal);
 }
 
 void RescanAllWindows() {
@@ -318,11 +404,16 @@ void RefreshAllLabels() {
         kv.second.label = BuildLabelForTitle(title);
         SyncOverlay(kv.first, kv.second); // repaints automatically if the label changed
     }
+    SyncProjectListHud();
 }
 
 void CleanupAllTracked() {
     for (auto& kv : g_tracked) DestroyWindow(kv.second.overlay);
     g_tracked.clear();
+    if (g_projectListHud) {
+        DestroyWindow(g_projectListHud);
+        g_projectListHud = nullptr;
+    }
     ReleaseAllPidHooks();
     UpdateForegroundPollTimer();
 }

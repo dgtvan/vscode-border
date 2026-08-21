@@ -1,5 +1,7 @@
 #include "overlay.h"
 
+#include "layered_rendering.h"
+
 #include <algorithm>
 
 const wchar_t* kOverlayClassName = L"VSCodeBorderOverlayWndClass";
@@ -9,13 +11,6 @@ HWND CreateOverlay(HINSTANCE hInstance) {
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kOverlayClassName, L"", WS_POPUP,
         0, 0, 1, 1, nullptr, nullptr, hInstance, nullptr);
-}
-
-// Picks black or white text so the label stays readable against any
-// palette color.
-static COLORREF ContrastTextColor(COLORREF bg) {
-    double luminance = 0.299 * GetRValue(bg) + 0.587 * GetGValue(bg) + 0.114 * GetBValue(bg);
-    return luminance > 150.0 ? RGB(0, 0, 0) : RGB(255, 255, 255);
 }
 
 // Only the border bands (and label rect) are touched (not the whole
@@ -92,7 +87,6 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
                 int lx = t, ly = t;
                 COLORREF textColor = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
                 BYTE bgR = GetRValue(color), bgG = GetGValue(color), bgB = GetBValue(color);
-                BYTE txR = GetRValue(textColor), txG = GetGValue(textColor), txB = GetBValue(textColor);
                 UINT32 lpx = (UINT32(255) << 24) | (UINT32(bgR) << 16) | (UINT32(bgG) << 8) | UINT32(bgB);
                 for (int y = ly; y < ly + lh; y++)
                     for (int x = lx; x < lx + lw; x++) pixels[y * width + x] = lpx;
@@ -106,47 +100,8 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
                 // glyphs into an isolated black-background mask instead and
                 // use its per-channel brightness as blend coverage, so the
                 // label rect written above always stays fully opaque.
-                HDC maskDC = CreateCompatibleDC(screenDC);
-                BITMAPINFO maskBmi = {};
-                maskBmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-                maskBmi.bmiHeader.biWidth = lw;
-                maskBmi.bmiHeader.biHeight = -lh;
-                maskBmi.bmiHeader.biPlanes = 1;
-                maskBmi.bmiHeader.biBitCount = 32;
-                maskBmi.bmiHeader.biCompression = BI_RGB;
-                void* maskBits = nullptr;
-                HBITMAP maskBmp = CreateDIBSection(maskDC, &maskBmi, DIB_RGB_COLORS, &maskBits, nullptr, 0);
-                if (maskBmp) {
-                    HBITMAP oldMaskBmp = (HBITMAP)SelectObject(maskDC, maskBmp);
-                    // Freshly committed pages are zero-filled, giving a black background for free.
-                    HFONT oldMaskFont = (HFONT)SelectObject(maskDC, font);
-                    SetBkMode(maskDC, TRANSPARENT);
-                    SetTextColor(maskDC, RGB(255, 255, 255));
-                    RECT textRect = {paddingX, 0, lw - paddingX, lh};
-                    DrawTextW(maskDC, label.c_str(), (int)label.size(), &textRect,
-                              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-                    SelectObject(maskDC, oldMaskFont);
-
-                    UINT32* maskPixels = (UINT32*)maskBits;
-                    for (int y = 0; y < lh; y++) {
-                        for (int x = 0; x < lw; x++) {
-                            UINT32 mp = maskPixels[y * lw + x];
-                            BYTE covR = (BYTE)((mp >> 16) & 0xFF);
-                            BYTE covG = (BYTE)((mp >> 8) & 0xFF);
-                            BYTE covB = (BYTE)(mp & 0xFF);
-                            if (covR == 0 && covG == 0 && covB == 0) continue; // no coverage here
-                            BYTE outR = (BYTE)(bgR + ((int)(txR - bgR) * covR) / 255);
-                            BYTE outG = (BYTE)(bgG + ((int)(txG - bgG) * covG) / 255);
-                            BYTE outB = (BYTE)(bgB + ((int)(txB - bgB) * covB) / 255);
-                            pixels[(ly + y) * width + (lx + x)] =
-                                (UINT32(255) << 24) | (UINT32(outR) << 16) | (UINT32(outG) << 8) | UINT32(outB);
-                        }
-                    }
-
-                    SelectObject(maskDC, oldMaskBmp);
-                    DeleteObject(maskBmp);
-                }
-                DeleteDC(maskDC);
+                BlendTextIntoPixels(screenDC, pixels, width, height, lx + paddingX, ly, lw - paddingX * 2, lh,
+                                    label, font, color, textColor, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
 
             DeleteObject(font);
