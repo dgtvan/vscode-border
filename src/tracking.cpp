@@ -8,6 +8,8 @@
 #include "window_title.h"
 #include "worktree_resolver.h"
 
+#include <cstdlib>
+#include <ctime>
 #include <unordered_map>
 #include <vector>
 
@@ -144,18 +146,36 @@ static void ReleaseAllPidHooks() {
     g_pidHooks.clear();
 }
 
+// Picked once per run (not once per window) so the *set* of colors handed
+// out in a session still cycles through the whole palette in a fixed
+// round-robin order -- only where that cycle starts changes, so two
+// windows never collide and every run doesn't visually start with the same
+// color for whichever window happens to be tracked first.
+static int RandomColorOffset(size_t n) {
+    if (n == 0) return 0;
+    static bool seeded = false;
+    if (!seeded) {
+        srand((unsigned)time(nullptr));
+        seeded = true;
+    }
+    return rand() % (int)n;
+}
+
 static int AllocateColorIndex() {
     size_t n = g_config.palette.size();
     if (g_colorInUse.size() != n) g_colorInUse.assign(n, false);
+    static int offset = -1;
+    if (offset < 0) offset = RandomColorOffset(n);
 
     for (size_t i = 0; i < n; i++) {
-        if (!g_colorInUse[i]) {
-            g_colorInUse[i] = true;
-            return (int)i;
+        size_t idx = (i + (size_t)offset) % n;
+        if (!g_colorInUse[idx]) {
+            g_colorInUse[idx] = true;
+            return (int)idx;
         }
     }
     static int roundRobin = 0;
-    int idx = roundRobin % (int)n;
+    int idx = (roundRobin + offset) % (int)n;
     roundRobin++;
     return idx;
 }
