@@ -77,6 +77,8 @@ Config LoadConfig(const std::wstring& path) {
             cfg.showProjectList = (val == "1" || _stricmp(val.c_str(), "true") == 0);
         } else if (key == "project_list_style") {
             cfg.projectListHorizontal = (_stricmp(val.c_str(), "vertical") != 0);
+        } else if (key == "project_list_order") {
+            cfg.projectListManualOrder = (_stricmp(val.c_str(), "manual") == 0);
         } else if (key == "project_list_opacity_normal") {
             cfg.projectListOpacityNormal = std::min(255, std::max(0, atoi(val.c_str())));
         } else if (key == "project_list_opacity_hover") {
@@ -106,9 +108,10 @@ Config LoadConfig(const std::wstring& path) {
         }
     }
 
-    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_style=%ls project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X verbose_logging=%d colors=%zu",
+    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_style=%ls project_list_order=%ls project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X verbose_logging=%d colors=%zu",
         cfg.thickness, cfg.opacity, cfg.rescanIntervalMs, cfg.showLabel, cfg.showProjectList,
         cfg.projectListHorizontal ? L"horizontal" : L"vertical",
+        cfg.projectListManualOrder ? L"manual" : L"auto",
         cfg.projectListOpacityNormal, cfg.projectListOpacityHover, cfg.projectListActivateOnHover,
         cfg.labelHeight, cfg.labelFontSize,
         cfg.labelTextColorAuto, (unsigned)((GetRValue(cfg.labelTextColor) << 16) | (GetGValue(cfg.labelTextColor) << 8) | GetBValue(cfg.labelTextColor)),
