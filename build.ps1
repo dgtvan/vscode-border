@@ -42,4 +42,9 @@ if (-not (Test-Path $configOut)) {
     Write-Host "Copied default config.ini to bin\ (edit that copy; it won't be overwritten by future builds)"
 }
 
+# Unlike config.ini, this is app logic (not user-editable config) -- always
+# overwritten so fixes/format changes reach bin\ without the user needing to
+# notice and re-copy it themselves.
+Copy-Item (Join-Path $root "claude_status_hook.ps1") (Join-Path $outDir "claude_status_hook.ps1") -Force
+
 Write-Host "Built: $outExe"

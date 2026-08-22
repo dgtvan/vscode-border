@@ -167,3 +167,23 @@ was prototyped and confirmed to eliminate the blink). That was reverted by
 request in favor of keeping the label inset into the border's corner
 (cosmetic preference), accepting the occasional blink as a known,
 extremely minor trade-off.
+
+## Why `claude_status.ini` state isn't cached in memory, unlike aliases/order
+
+`label_alias.cpp`'s alias map and `project_list_order.cpp`'s saved order are
+both loaded once and cached, only re-read from disk on an explicit trigger
+(`ReloadAliases`, `RefreshAllLabels`) -- safe because the only writer of
+those files is this app itself, so it always knows when its own cache goes
+stale.
+
+`claude_status.cpp` can't use that pattern: its files are written by
+`claude_status_hook.ps1`, an entirely separate process (or several, one per
+live Claude Code session) invoked by Claude Code's own hooks, completely
+outside this app's control or knowledge. There's no event this app could
+hook to learn "the status changed" the way a WinEvent hook tells it a
+window moved. `LoadClaudeStatuses()` re-reads the small `claude_status\`
+directory from disk on every call instead, which is acceptable because
+`SyncProjectListHud()` (its only caller) already runs frequently -- nearly
+every relevant WinEvent for a tracked window, plus the periodic rescan --
+so this doesn't introduce a new I/O cadence, just adds a bit of work to one
+that already exists.

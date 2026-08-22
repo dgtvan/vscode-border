@@ -23,6 +23,17 @@ struct Config {
     bool projectListActivateOnHover = false;
     bool verboseLogging = false; // logs every WinEvent + overlay sync decision for tracked windows
     std::vector<COLORREF> palette;
+
+    // AI status indicator (see ai_provider.h) -- "claude" is the only
+    // currently-implemented provider; other tokens (e.g. a future "copilot")
+    // are accepted but produce no indicator until that integration exists.
+    bool aiIndicatorEnabled = true;
+    std::vector<std::string> aiIndicatorProviders = {"claude"};
+    COLORREF aiIndicatorColorWorking = RGB(255, 159, 10);
+    COLORREF aiIndicatorColorAttention = RGB(220, 38, 38);
+    COLORREF aiIndicatorColorWaiting = RGB(52, 199, 89);
+    bool aiIndicatorBorderColorAuto = true; // true = auto black/white contrast against the item's own color
+    COLORREF aiIndicatorBorderColor = RGB(255, 255, 255); // used when aiIndicatorBorderColorAuto is false
 };
 
 // Global, live config -- reloadable at runtime via the tray menu.

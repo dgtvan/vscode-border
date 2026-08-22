@@ -17,7 +17,16 @@
 // (caller should keep showing `repoName` unchanged in that case).
 std::wstring ResolveMainRepoName(const std::wstring& repoName);
 
-// Forces the next call to ResolveMainRepoName to rescan from disk. Wired up
-// to the tray's "Reload Config" action so newly created worktrees can be
-// picked up without restarting the app.
+// Given a folder/repo name as shown in a tracked window's label, looks up
+// the real absolute path VS Code has it open at, via the same
+// workspaceStorage scan ResolveMainRepoName uses -- for every entry, not
+// just worktree ones. Returns an empty string if no matching entry is
+// found (e.g. a plain non-git folder VS Code has never recorded, or a
+// multi-root workspace, which workspace.json doesn't expose as a single
+// folder path).
+std::wstring ResolveFolderPath(const std::wstring& name);
+
+// Forces the next call to ResolveMainRepoName/ResolveFolderPath to rescan
+// from disk. Wired up to the tray's "Reload Config" action so newly
+// created worktrees can be picked up without restarting the app.
 void RefreshWorktreeCache();

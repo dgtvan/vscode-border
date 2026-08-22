@@ -105,16 +105,56 @@ Config LoadConfig(const std::wstring& path) {
                 if (!c.empty()) palette.push_back(ParseHexColor(c));
             }
             if (!palette.empty()) cfg.palette = palette;
+        } else if (key == "ai_indicator_enabled") {
+            cfg.aiIndicatorEnabled = (val == "1" || _stricmp(val.c_str(), "true") == 0);
+        } else if (key == "ai_indicator_provider") {
+            std::vector<std::string> providers;
+            for (const std::string& item : SplitChar(val, ',')) {
+                std::string p = Trim(item);
+                std::transform(p.begin(), p.end(), p.begin(), ::tolower);
+                if (p.empty()) continue;
+                // "copilot" is a documented future value -- accepted without
+                // warning even though it does nothing yet (see README's
+                // "Claude Code status dots" section). Anything else is
+                // probably a typo, so it's dropped with a warning rather
+                // than silently doing nothing.
+                if (p == "claude" || p == "copilot") {
+                    providers.push_back(p);
+                } else {
+                    LogWarn(L"config: ai_indicator_provider has unrecognized value [%hs] -- ignoring it",
+                            p.c_str());
+                }
+            }
+            cfg.aiIndicatorProviders = providers;
+        } else if (key == "ai_indicator_color_working") {
+            cfg.aiIndicatorColorWorking = ParseHexColor(val);
+        } else if (key == "ai_indicator_color_attention") {
+            cfg.aiIndicatorColorAttention = ParseHexColor(val);
+        } else if (key == "ai_indicator_color_waiting") {
+            cfg.aiIndicatorColorWaiting = ParseHexColor(val);
+        } else if (key == "ai_indicator_border_color") {
+            if (_stricmp(val.c_str(), "auto") == 0) {
+                cfg.aiIndicatorBorderColorAuto = true;
+            } else {
+                cfg.aiIndicatorBorderColorAuto = false;
+                cfg.aiIndicatorBorderColor = ParseHexColor(val);
+            }
         }
     }
 
-    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_style=%ls project_list_order=%ls project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X verbose_logging=%d colors=%zu",
+    std::string providersJoined;
+    for (const std::string& p : cfg.aiIndicatorProviders) {
+        if (!providersJoined.empty()) providersJoined += ",";
+        providersJoined += p;
+    }
+
+    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_style=%ls project_list_order=%ls project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X verbose_logging=%d colors=%zu ai_indicator_enabled=%d ai_indicator_provider=%hs",
         cfg.thickness, cfg.opacity, cfg.rescanIntervalMs, cfg.showLabel, cfg.showProjectList,
         cfg.projectListHorizontal ? L"horizontal" : L"vertical",
         cfg.projectListManualOrder ? L"manual" : L"auto",
         cfg.projectListOpacityNormal, cfg.projectListOpacityHover, cfg.projectListActivateOnHover,
         cfg.labelHeight, cfg.labelFontSize,
         cfg.labelTextColorAuto, (unsigned)((GetRValue(cfg.labelTextColor) << 16) | (GetGValue(cfg.labelTextColor) << 8) | GetBValue(cfg.labelTextColor)),
-        cfg.verboseLogging, cfg.palette.size());
+        cfg.verboseLogging, cfg.palette.size(), cfg.aiIndicatorEnabled, providersJoined.c_str());
     return cfg;
 }
