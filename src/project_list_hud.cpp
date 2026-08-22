@@ -174,6 +174,12 @@ static void MoveDragGhost(ProjectListHudState* state);
 
 static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
     if (!state) return;
+    // Re-asserting HWND_TOPMOST on a window that's already topmost doesn't
+    // reliably move it ahead of some other window that's gone topmost more
+    // recently (e.g. briefly, when another app's own window is maximized) --
+    // toggling through HWND_NOTOPMOST first forces a real re-insertion at
+    // the front. Same fix, same reasoning, as MoveDragGhost/PaintDragGhost.
+    SetWindowPos(hud, HWND_NOTOPMOST, state->x, state->y, state->width, state->height, SWP_NOACTIVATE);
     SetWindowPos(hud, HWND_TOPMOST, state->x, state->y, state->width, state->height,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
