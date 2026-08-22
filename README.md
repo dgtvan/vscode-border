@@ -80,6 +80,10 @@ first build):
 | `label_height` | Label chip height in pixels. |
 | `label_font_size` | Label text font size in points. |
 | `label_text_color` | Label text color: a hex `RRGGBB` color, or `auto` to pick black/white based on contrast against the border color. Default `000000` (black). |
+| `ai_indicator_enabled` | Show the AI status indicator on project list HUD items (`true`/`false` -- see below). Default `true`. |
+| `ai_indicator_provider` | Comma-separated AI services to source it from: `claude` (implemented) and/or `copilot` (reserved, not yet implemented). |
+| `ai_indicator_color_working` / `_attention` / `_waiting` | Hex `RRGGBB` colors for the 3 states -- see below. |
+| `ai_indicator_border_color` | Indicator border color: `auto` (black/white by contrast) or a fixed hex `RRGGBB`. Default `auto`. |
 
 After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
@@ -113,6 +117,77 @@ the label's exact text, so if two windows ever happen to produce the
 identical label, aliasing one aliases both. Stored in `label_aliases.ini`
 next to `config.ini`, and re-read on **Reload Config** as well as at
 startup.
+
+### AI status indicator
+
+Each HUD item can show a small status indicator in its top-right corner
+for an AI coding assistant running in that VS Code window's terminal(s):
+
+- **Working** -- amber, a small square chasing itself around an 8-position
+  ring -- actively generating a response or running a tool, *or* the main
+  turn has finished but a background task (a long-running dev server, a
+  log watcher, a background subagent) is still going. Claude Code's
+  `Stop`/`StopFailure`/`SubagentStop` payloads carry a live
+  `background_tasks` list, confirmed against a real session that showed 3
+  running shell tasks in its `Stop` payload despite the conversation being
+  idle -- a non-empty list here counts as still "working", not "waiting".
+- **Attention** -- red, a single pulsing square -- blocked mid-turn on a
+  permission prompt or an MCP server asking the user something. This is
+  the state that most needs you to look at it, and takes priority over a
+  background task still running.
+- **Waiting** -- green, a single static square -- a finished turn, idle,
+  no background tasks either, ready for your next prompt.
+- No indicator at all if nothing's running there.
+
+If a window has more than one session running (e.g. several terminals),
+the indicator reflects the aggregate, in that priority order: Attention
+beats Working beats Waiting.
+
+Controlled by `config.ini`:
+
+```ini
+ai_indicator_enabled=true      ; turn the whole feature on/off
+ai_indicator_provider=claude   ; comma-separated: "claude" today, "copilot" reserved for later
+ai_indicator_color_working=FF9F0A
+ai_indicator_color_attention=DC2626
+ai_indicator_color_waiting=34C759
+ai_indicator_border_color=auto ; "auto" (black/white by contrast) or a fixed hex RRGGBB
+```
+
+Claude Code has no built-in way for another app to observe its state, so
+this works via Claude Code's **hooks**: `claude_status_hook.ps1` (repo
+root, copied to `bin\` on every build) runs on several of Claude Code's
+lifecycle events and writes a small status file per session under
+`bin\claude_status\`. This app manages the hook registrations in
+`%USERPROFILE%\.claude\settings.json` for you -- automatically, on
+startup and every **Reload Config** -- adding them when
+`ai_indicator_enabled=true` and `claude` is in `ai_indicator_provider`,
+removing them otherwise. No manual JSON editing needed. It only ever
+touches its own entries (matched by their exact command string, tracked in
+`bin\ai_hooks_installed.ini` so a relocated install can still find and
+clean up old ones) -- everything else in that file, including hooks you've
+added yourself, is left alone. If it can't safely parse that file (e.g. a
+hand-edit broke its JSON), it logs a warning, sets the tray icon's warning
+badge, and leaves the file untouched rather than risk overwriting it -- see
+`src/claude_provider.*` and `src/json_scan.*`.
+
+This is Claude Code's implementation of a generic `AiProvider` interface
+(`src/ai_provider.h`) -- installing/removing whatever config it needs and
+reading back whatever it reported are the two things any AI assistant
+integration has to do, so a future Copilot integration would plug in the
+same way, behind the same interface, without changing anything else that
+uses it (`tracking.cpp`'s window-matching, the tray's **Clear AI Status**).
+
+A hook here applies to every Claude Code session on the machine, in any
+project -- not just this repo. Changes to `~/.claude/settings.json` are
+picked up by already-running sessions automatically (typically within a
+few seconds), so nothing needs restarting for it to take effect. Each
+status file is matched to a tracked window by folder (a real absolute-path
+match when VS Code has recorded one, e.g. via `workspaceStorage`, falling
+back to a plain name comparison otherwise -- see `src/claude_provider.*`
+and `src/worktree_resolver.*`). The tray menu's **Clear AI Status** clears
+all status files manually -- see "Known limitations" below for when that's
+needed.
 
 ### Project list HUD position/size memory
 
@@ -182,6 +257,38 @@ to pick up worktrees created after the app started.
   there's no uninstall hook to restore it. Set `show_label=false` and let
   it reload (or start it once more) before removing the app if you want
   that reverted first.
+- If a terminal running Claude Code is killed abruptly (not a clean `/exit`
+  or closing the terminal normally), its `SessionEnd` hook never fires --
+  Claude Code's hook payload has no process id or other liveness signal in
+  it at all, so there's no *documented* way to detect that. This app works
+  around it anyway: `claude_status_hook.ps1` walks up its own process
+  ancestry looking for the real `claude.exe` process and records that pid,
+  and `claude_provider.cpp` does a live lookup of that pid (via
+  `OpenProcess`/`QueryFullProcessImageNameW`, confirming it's *still*
+  claude.exe and not some unrelated process Windows has since reused that
+  pid for) every time it reads statuses -- a confirmed-dead session is
+  deleted automatically, no manual cleanup needed in the normal case. This
+  relies on undocumented internals (specifically, that Claude Code's hook
+  processes are descended from the main `claude.exe` process a small,
+  bounded number of hops up) that could change in a future Claude Code
+  update; if the ancestry walk ever fails to find `claude.exe`, that
+  session's status is logged (`claude_provider: ... has no pid recorded`)
+  and falls back to the original SessionEnd-only behavior for that session
+  rather than breaking. The tray's **Clear AI Status** remains as a manual
+  fallback for whatever this doesn't catch. No staleness *timeout* was
+  added on top of this, deliberately -- a genuinely long-running task can
+  stay "working" for 30+ minutes, and a naive timeout would misfire on it
+  where the pid check doesn't.
+- Claude Code status matching falls back to a plain folder-name comparison
+  when VS Code hasn't recorded that folder's real path (e.g. multi-root
+  workspaces aren't covered) -- two windows opened on different folders
+  that happen to share the same name are indistinguishable in that case.
+- Deleting/uninstalling this app while `ai_indicator_enabled=true` leaves
+  the hook entries it added in `~/.claude/settings.json` in place -- same
+  caveat as `window.title` above, no uninstall hook runs. Claude Code will
+  keep harmlessly invoking a now-missing script path. Set
+  `ai_indicator_enabled=false` and let it reload (or start it once more)
+  before removing the app if you want those removed first.
 
 ## Project layout
 
@@ -193,10 +300,19 @@ to pick up worktrees created after the app started.
 - `src/label_alias.*` -- persists/recalls user-set label aliases (see "Project list HUD aliases" above).
 - `src/project_list_order.*` -- persists/recalls the manually-dragged item order (see "Project list HUD
   manual ordering" above).
+- `src/ai_provider.h` -- abstract interface an AI coding assistant integration implements (install/remove its
+  config, read back its reported status, manual clear) -- see "AI status indicator" above.
+- `src/claude_provider.*` -- Claude Code's `AiProvider` implementation: installs/removes its hook
+  registrations in `%USERPROFILE%\.claude\settings.json`, reads the per-session status files
+  `claude_status_hook.ps1` writes, and auto-expires ones whose recorded pid is no longer a live
+  `claude.exe` process (see "Known limitations" above).
+- `src/json_scan.*` -- minimal JSONC span-scanner (find/insert/remove one key or array element without
+  parsing/reserializing the rest of the file), generalized from `vscode_settings.cpp`'s scanner.
 - `src/logger.*` -- file logging.
 - `src/config.*` -- `config.ini` loading.
 - `src/window_title.*` -- VS Code window title parsing (repo/branch/folder).
-- `src/worktree_resolver.*` -- maps a git worktree's folder name back to its main repo name.
+- `src/worktree_resolver.*` -- maps a git worktree's folder name back to its main repo name, and resolves a
+  folder's real absolute path (used for the AI status indicator's window matching).
 - `src/vscode_settings.*` -- auto-manages VS Code's `window.title` setting to match `show_label` (see [Getting the repo/branch label](#getting-the-repobranch-label-instead-of-just-the-folder-name)).
 - `src/window_discovery.*` -- finding/filtering VS Code top-level windows.
 - `src/overlay.*` -- passive per-window border overlay creation/painting.
@@ -206,6 +322,8 @@ to pick up worktrees created after the app started.
 - `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, border sync, and feeding the HUD its entries.
 - `src/resource.rc`, `assets/app.ico`, `assets/square-dashed.png` -- tray icon resource (`app.ico` is generated from the PNG; see [Credits](#credits)).
 - `config.ini` -- default config template (copied to `bin\` on first build).
+- `claude_status_hook.ps1` -- Claude Code hook script (copied to `bin\` on every build; see "Claude Code
+  status dots" above).
 - `build.ps1` -- build script.
 - `install-autostart.ps1` / `uninstall-autostart.ps1` -- autostart management, see [docs/AUTOSTART.md](docs/AUTOSTART.md).
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) -- design decisions and why.

@@ -13,6 +13,8 @@
 #include <unordered_map>
 
 static std::unordered_map<std::wstring, std::wstring> g_cache; // lowercased worktree leaf name -> main repo name
+static std::unordered_map<std::wstring, std::wstring> g_pathCache; // lowercased leaf name -> full path (every
+                                                                     // entry, not just worktrees)
 static bool g_cacheBuilt = false;
 
 static std::wstring ToLowerCopy(const std::wstring& s) {
@@ -89,6 +91,11 @@ static void ProcessWorkspaceJson(const std::wstring& jsonPath) {
     std::wstring leaf = path.substr(slash + 1);
     std::wstring parent = path.substr(0, slash);
 
+    // Every workspace.json entry maps its own leaf folder name to its real
+    // path, not just worktrees -- kept separately from the worktree-name
+    // mapping below since most entries aren't worktrees at all.
+    g_pathCache[ToLowerCopy(leaf)] = path;
+
     size_t parentSlash = parent.find_last_of(L"\\/");
     std::wstring parentName = (parentSlash == std::wstring::npos) ? parent : parent.substr(parentSlash + 1);
 
@@ -132,6 +139,7 @@ static void ScanUserDataDir(const std::wstring& userDir) {
 
 static void BuildCache() {
     g_cache.clear();
+    g_pathCache.clear();
 
     wchar_t appData[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
@@ -181,6 +189,32 @@ std::wstring ResolveMainRepoName(const std::wstring& repoName) {
         return L"";
     }
     LogDiag(L"worktree resolver: resolved repo=[%ls] -> mainRepo=[%ls]", repoName.c_str(), it->second.c_str());
+    return it->second;
+}
+
+std::wstring ResolveFolderPath(const std::wstring& name) {
+    if (!g_cacheBuilt) {
+        BuildCache();
+        g_cacheBuilt = true;
+        g_lastRebuildTick = GetTickCount64();
+    }
+
+    std::wstring key = ToLowerCopy(name);
+    auto it = g_pathCache.find(key);
+
+    // Same self-correcting rebuild-on-miss as ResolveMainRepoName, and
+    // sharing its cooldown timer -- a miss from either function within the
+    // same window shouldn't trigger two rescans back to back.
+    if (it == g_pathCache.end()) {
+        ULONGLONG now = GetTickCount64();
+        if (now - g_lastRebuildTick >= kRebuildCooldownMs) {
+            BuildCache();
+            g_lastRebuildTick = now;
+            it = g_pathCache.find(key);
+        }
+    }
+
+    if (it == g_pathCache.end()) return L"";
     return it->second;
 }
 

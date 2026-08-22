@@ -1,5 +1,6 @@
 #include "tracking.h"
 
+#include "ai_provider.h"
 #include "config.h"
 #include "label_alias.h"
 #include "logger.h"
@@ -9,22 +10,12 @@
 #include "window_title.h"
 #include "worktree_resolver.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <cwchar>
 #include <ctime>
 #include <unordered_map>
 #include <vector>
-
-// Inside a git worktree checkout, VS Code's ${activeRepositoryName} is the
-// *worktree's* folder name rather than the main repo's -- substitute the
-// real main repo name when the worktree_resolver can map it.
-static std::wstring BuildLabelForTitle(const std::wstring& title) {
-    VSCodeTitleParts parts = ParseVSCodeTitle(title);
-    if (!parts.repo.empty()) {
-        std::wstring mainRepo = ResolveMainRepoName(parts.repo);
-        if (!mainRepo.empty()) parts.repo = mainRepo;
-    }
-    return BuildFolderLabel(parts);
-}
 
 static HINSTANCE g_hInstance = nullptr;
 static HWND g_ownerWnd = nullptr;
@@ -41,28 +32,103 @@ struct TrackedWindow {
     DWORD pid = 0;
     std::wstring label;     // display text: rawLabel with any user-set alias applied (see label_alias.h)
     std::wstring rawLabel;  // folder name derived from the target's title -- the alias map's key
+    std::wstring folderName; // pre-worktree-substitution repo/folder name, i.e. what VS Code's own
+                              // workspaceStorage records as the leaf folder name -- distinct from rawLabel,
+                              // which shows the substituted *main* repo name for a worktree checkout (see
+                              // ApplyLabelForTitle). Used only to resolve a real path via
+                              // worktree_resolver's ResolveFolderPath (see SyncProjectListHud).
     std::wstring lastLabel; // label last painted, to detect changes
     RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized -- lets a minimized
                               // window's project-list HUD entry keep sorting where it normally sits
                               // instead of jumping around (see SyncProjectListHud)
 };
 
-// Single choke point for computing both of a tracked window's label
-// fields, so every call site (initial track, name-change debounce,
-// RefreshAllLabels) picks up alias resolution consistently.
+// Single choke point for computing a tracked window's label fields, so
+// every call site (initial track, name-change debounce, RefreshAllLabels)
+// picks up alias resolution consistently. Also captures folderName (see its
+// field comment) before any worktree substitution is applied to the
+// display label.
 static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
-    tw.rawLabel = BuildLabelForTitle(title);
+    VSCodeTitleParts parts = ParseVSCodeTitle(title);
+    tw.folderName = !parts.repo.empty() ? parts.repo : parts.folder;
+
+    // Inside a git worktree checkout, VS Code's ${activeRepositoryName} is
+    // the *worktree's* folder name rather than the main repo's -- substitute
+    // the real main repo name (for display only) when the worktree_resolver
+    // can map it.
+    if (!parts.repo.empty()) {
+        std::wstring mainRepo = ResolveMainRepoName(parts.repo);
+        if (!mainRepo.empty()) parts.repo = mainRepo;
+    }
+    tw.rawLabel = BuildFolderLabel(parts);
     tw.label = ResolveAlias(tw.rawLabel);
 }
 
 static std::unordered_map<HWND, TrackedWindow> g_tracked; // target hwnd -> info
 static std::vector<bool> g_colorInUse;
 
+// True if `cwd` is `folderPath` itself, or somewhere underneath it (e.g. a
+// Claude Code session started from a subdirectory of the opened folder) --
+// checked with a trailing separator boundary so "...\myproject2" doesn't
+// false-match a folderPath of "...\myproject".
+static bool PathIsWithinFolder(const std::wstring& cwd, const std::wstring& folderPath) {
+    if (folderPath.empty() || cwd.size() < folderPath.size()) return false;
+    if (_wcsnicmp(cwd.c_str(), folderPath.c_str(), folderPath.size()) != 0) return false;
+    if (cwd.size() == folderPath.size()) return true;
+    wchar_t next = cwd[folderPath.size()];
+    return next == L'\\' || next == L'/';
+}
+
+static std::wstring LastPathSegment(const std::wstring& path) {
+    size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+// Aggregates every AI session (see ai_provider.h) that belongs to this
+// window's folder into one status, attention > working > waiting > none.
+// Prefers a real path match via worktree_resolver's ResolveFolderPath
+// (correct for worktrees and subdirectory cwds -- see folderName's field
+// comment), falling back to a same-name comparison against just the last
+// path segment when no path is on record, e.g. a plain folder VS Code has
+// never logged to workspaceStorage.
+static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<AiSessionStatus>& sessions) {
+    if (sessions.empty() || tw.folderName.empty()) return ClaudeStatus::None;
+
+    std::wstring folderPath = ResolveFolderPath(tw.folderName);
+    bool anyAttention = false, anyWorking = false, anyWaiting = false;
+    for (const AiSessionStatus& s : sessions) {
+        bool matches = !folderPath.empty() ? PathIsWithinFolder(s.cwd, folderPath)
+                                            : _wcsicmp(LastPathSegment(s.cwd).c_str(), tw.folderName.c_str()) == 0;
+        if (!matches) continue;
+        if (s.status == L"attention") anyAttention = true;
+        else if (s.status == L"working") anyWorking = true;
+        else if (s.status == L"waiting") anyWaiting = true;
+    }
+    if (anyAttention) return ClaudeStatus::Attention;
+    if (anyWorking) return ClaudeStatus::Working;
+    if (anyWaiting) return ClaudeStatus::Waiting;
+    return ClaudeStatus::None;
+}
+
 static void SyncProjectListHud() {
     if (!g_projectListHud) return;
     if (!g_config.showProjectList || g_tracked.empty()) {
         HideProjectListHud(g_projectListHud);
         return;
+    }
+
+    // Skip every provider's status scan entirely when the feature is off,
+    // not just visually suppress the result. Each configured provider id
+    // that isn't implemented yet (e.g. "copilot" today) is silently
+    // skipped here -- GetAiProvider returns nullptr for it.
+    std::vector<AiSessionStatus> aiSessions;
+    if (g_config.aiIndicatorEnabled) {
+        for (const std::string& id : g_config.aiIndicatorProviders) {
+            AiProvider* provider = GetAiProvider(id);
+            if (!provider) continue;
+            std::vector<AiSessionStatus> s = provider->LoadStatuses();
+            aiSessions.insert(aiSessions.end(), s.begin(), s.end());
+        }
     }
 
     std::vector<ProjectListHudEntry> entries;
@@ -100,6 +166,7 @@ static void SyncProjectListHud() {
         entry.label = kv.second.label;
         entry.rawLabel = kv.second.rawLabel;
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
+        entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
         entries.push_back(entry);
     }
     if (entries.empty()) {
@@ -117,6 +184,11 @@ static void SyncProjectListHud() {
     style.normalOpacity = g_config.projectListOpacityNormal;
     style.hoverOpacity = g_config.projectListOpacityHover;
     style.activateOnHover = g_config.projectListActivateOnHover;
+    style.claudeColorWorking = g_config.aiIndicatorColorWorking;
+    style.claudeColorAttention = g_config.aiIndicatorColorAttention;
+    style.claudeColorWaiting = g_config.aiIndicatorColorWaiting;
+    style.claudeBorderColorAuto = g_config.aiIndicatorBorderColorAuto;
+    style.claudeBorderColor = g_config.aiIndicatorBorderColor;
     UpdateProjectListHud(g_projectListHud, entries, style);
 }
 

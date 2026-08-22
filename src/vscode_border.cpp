@@ -26,12 +26,15 @@
 //   project_list_order.* - persists/recalls the manually-dragged project-list item order
 //   project_list_hud.*  - the draggable/resizable project-list HUD window
 //   tray_icon.*         - tray icon warning-badge compositing
+//   ai_provider.*        - abstract interface an AI coding assistant integration implements
+//   claude_provider.*   - Claude Code's AiProvider implementation (hooks + status file reading)
 //   tracking.*          - tracked-window bookkeeping, WinEvent hooks, sync
 
 #include <windows.h>
 #include <shellapi.h>
 #include "resource.h"
 
+#include "ai_provider.h"
 #include "config.h"
 #include "label_alias.h"
 #include "logger.h"
@@ -55,6 +58,7 @@ static const UINT WM_APP_TRAYICON = WM_APP + 1;
 static const UINT ID_TRAY_RELOAD = 1;
 static const UINT ID_TRAY_OPEN_CONFIG = 2;
 static const UINT ID_TRAY_OPEN_LOG_FOLDER = 3;
+static const UINT ID_TRAY_CLEAR_AI_STATUS = 5;
 static const UINT ID_TRAY_EXIT = 4;
 static const UINT_PTR TIMER_RESCAN = 1;
 // TIMER id 2 is kForegroundPollTimerId (tracking.cpp), started/stopped there.
@@ -131,6 +135,7 @@ static void ShowTrayMenu(HWND hwnd) {
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload Config");
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_CONFIG, L"Open Config");
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_LOG_FOLDER, L"Open Log Folder");
+    AppendMenuW(menu, MF_STRING, ID_TRAY_CLEAR_AI_STATUS, L"Clear AI Status");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Exit");
     SetForegroundWindow(hwnd); // required so the menu dismisses correctly
@@ -141,6 +146,7 @@ static void ShowTrayMenu(HWND hwnd) {
 static void ReloadConfig() {
     g_config = LoadConfig(GetConfigPath());
     SyncWindowTitleSetting(g_config.showLabel);
+    SyncAllAiProviders(g_config);
     RefreshWorktreeCache();
     ReloadAliases();
     RefreshAllLabels();
@@ -199,6 +205,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 OpenConfigInDefaultEditor();
             } else if (LOWORD(wParam) == ID_TRAY_OPEN_LOG_FOLDER) {
                 OpenLogFolderInExplorer();
+            } else if (LOWORD(wParam) == ID_TRAY_CLEAR_AI_STATUS) {
+                for (AiProvider* provider : GetAllAiProviders()) provider->ClearStatus();
+                RescanAllWindows(); // forces an immediate HUD refresh instead of waiting for the next sync
             }
             return 0;
         case WM_TIMER:
@@ -228,6 +237,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     g_hInstance = hInstance;
     g_config = LoadConfig(GetConfigPath());
     SyncWindowTitleSetting(g_config.showLabel);
+    SyncAllAiProviders(g_config);
 
     const wchar_t* kClassName = L"VSCodeBorderAppWndClass";
     WNDCLASSW wc = {};

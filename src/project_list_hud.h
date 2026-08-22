@@ -5,12 +5,22 @@
 #include <string>
 #include <vector>
 
+// Whether Claude Code is currently running in this window's integrated
+// terminal(s) -- see claude_status.h. When a window has more than one
+// Claude Code session, the aggregate is whichever of these is highest in
+// this list: Attention (blocked on a permission/MCP prompt -- needs the
+// user right now) outranks Working (actively generating/running a tool),
+// which outranks Waiting (a finished turn, idle, ready for the next
+// prompt).
+enum class ClaudeStatus { None, Attention, Working, Waiting };
+
 struct ProjectListHudEntry {
     HWND target = nullptr;
     RECT windowRect = {}; // target's on-screen bounds -- used to order entries to match window layout
     std::wstring label;    // display text (an alias, if the user set one for rawLabel -- see label_alias.h)
     std::wstring rawLabel; // the un-aliased label, i.e. the alias map's key
     COLORREF color = RGB(0, 0, 0);
+    ClaudeStatus claudeStatus = ClaudeStatus::None;
 };
 
 struct ProjectListHudStyle {
@@ -24,6 +34,15 @@ struct ProjectListHudStyle {
     int normalOpacity = 255;
     int hoverOpacity = 255;
     bool activateOnHover = false;
+    // AI status indicator colors (see claude_status.h / ClaudeStatus above)
+    // -- Claude-named internally since Claude is still the only implemented
+    // data source, even though the user-facing config keys are the generic
+    // `ai_indicator_*` (see config.h).
+    COLORREF claudeColorWorking = RGB(255, 159, 10);
+    COLORREF claudeColorAttention = RGB(220, 38, 38);
+    COLORREF claudeColorWaiting = RGB(52, 199, 89);
+    bool claudeBorderColorAuto = true;
+    COLORREF claudeBorderColor = RGB(255, 255, 255);
 };
 
 // `horizontal` is the style to start with (see ProjectListHudStyle) --

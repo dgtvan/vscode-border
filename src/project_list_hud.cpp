@@ -8,6 +8,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cmath>
 
 static const wchar_t* kProjectListHudClassName = L"VSCodeBorderProjectListHudWndClass";
 static const int kProjectListGap = 6;
@@ -21,6 +22,10 @@ static const int kProjectListMeasurePaddingX = 32;
 static const int kReorderDragThreshold = 4; // pixels of movement before a plain left-click-on-an-item
                                              // commits to a reorder-drag instead of a click-to-activate
 static const int kProjectListBottomMargin = 24;
+static const UINT_PTR kClaudePulseTimerId = 1; // repaints while >=1 item is ClaudeStatus::Working, to
+                                                // animate its dot -- started/stopped on demand, see
+                                                // UpdateProjectListHud
+static const UINT kClaudePulseIntervalMs = 150;
 
 static HFONT CreateHudFont(int fontSize, int weight) {
     return CreateFontW(-fontSize, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
@@ -42,6 +47,11 @@ struct ProjectListHudState {
     int normalOpacity = 255;
     int hoverOpacity = 255;
     bool activateOnHover = false;
+    COLORREF claudeColorWorking = RGB(255, 159, 10);
+    COLORREF claudeColorAttention = RGB(220, 38, 38);
+    COLORREF claudeColorWaiting = RGB(52, 199, 89);
+    bool claudeBorderColorAuto = true;
+    COLORREF claudeBorderColor = RGB(255, 255, 255);
     int hoverIndex = -1;
     bool trackingMouseLeave = false;
     bool hoverFocusActive = false;
@@ -77,6 +87,7 @@ struct ProjectListHudState {
     bool contextMenuOpen = false; // true for the duration of TrackPopupMenu's modal loop -- see
                                    // UpdateProjectListHud's guard for why this (and editIndex >= 0)
                                    // needs to suppress resyncs while set
+    bool pulseTimerActive = false; // mirrors whether kClaudePulseTimerId is currently running
 };
 
 static int ClampInt(int value, int minValue, int maxValue) {
@@ -605,6 +616,9 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 PositionProjectListHud(hwnd, state);
             }
             return 0;
+        case WM_TIMER:
+            if (wParam == kClaudePulseTimerId && state) RenderProjectListHud(hwnd, state);
+            return 0;
         case WM_MOUSELEAVE:
             if (state) {
                 if (state->dragMode != ProjectListHudState::DragNone) return 0;
@@ -726,7 +740,9 @@ HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal) {
 // internally).
 static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int rowHeight,
                         const ProjectListHudEntry& entry, const RECT& item, bool highlighted, int opacity,
-                        bool labelTextColorAuto, COLORREF labelTextColor, HFONT font, HFONT hoverFont) {
+                        bool labelTextColorAuto, COLORREF labelTextColor, HFONT font, HFONT hoverFont,
+                        COLORREF claudeColorWorking, COLORREF claudeColorAttention, COLORREF claudeColorWaiting,
+                        bool claudeBorderColorAuto, COLORREF claudeBorderColor) {
     const int paddingX = 12;
     int itemWidth = item.right - item.left;
     COLORREF color = entry.color;
@@ -749,6 +765,89 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
     BlendTextIntoPixels(screenDC, pixels, width, height, item.left + paddingX, item.top,
                         itemWidth - paddingX * 2, rowHeight, entry.label, highlighted ? hoverFont : font,
                         chipColor, tx, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // Claude Code status indicator, top-right corner -- drawn before the
+    // opacity pass below so it fades with the rest of the chip on
+    // hover/normal opacity instead of always looking fully solid.
+    const int dotMargin = 4;
+    // The chip's background color is user-configurable (see config.ini's
+    // `colors`), so a fixed red/green/amber fill can end up low-contrast
+    // against it -- a 1px border, auto-picked black or white by the same
+    // luminance check already used for the label text (ContrastTextColor),
+    // keeps every indicator legible regardless of that item's own color.
+    // The border is solid even where the fill itself pulses (Attention),
+    // so it stays a stable anchor rather than fading with it.
+    UINT32 borderPx = [&] {
+        COLORREF bc = claudeBorderColorAuto ? ContrastTextColor(color) : claudeBorderColor;
+        return (UINT32(255) << 24) | (UINT32(GetRValue(bc)) << 16) | (UINT32(GetGValue(bc)) << 8) | UINT32(GetBValue(bc));
+    }();
+    auto drawBorderedSquare = [&](int left, int top, int size, UINT32 fillPx) {
+        int right = left + size, bottom = top + size;
+        int bRowStart = std::max(top, rowStart), bRowEnd = std::min(bottom, rowEnd);
+        int bColStart = std::max(left, colStart), bColEnd = std::min(right, colEnd);
+        for (int row = bRowStart; row < bRowEnd; row++) {
+            for (int col = bColStart; col < bColEnd; col++) pixels[row * width + col] = borderPx;
+        }
+        int iRowStart = std::max(top + 1, rowStart), iRowEnd = std::min(bottom - 1, rowEnd);
+        int iColStart = std::max(left + 1, colStart), iColEnd = std::min(right - 1, colEnd);
+        for (int row = iRowStart; row < iRowEnd; row++) {
+            for (int col = iColStart; col < iColEnd; col++) pixels[row * width + col] = fillPx;
+        }
+    };
+    if (entry.claudeStatus == ClaudeStatus::Working) {
+        // Ring spinner: 8 cells in a 3x3 grid with an empty center, only
+        // one lit at a time, advancing one step per pulse timer tick --
+        // reads as a single square chasing itself around the ring. (A
+        // brightness pulse on a single dot was tried first and judged too
+        // subtle to notice at a glance.)
+        COLORREF dotColor = claudeColorWorking;
+        UINT32 dotPx = (UINT32(255) << 24) | (UINT32(GetRValue(dotColor)) << 16) |
+                      (UINT32(GetGValue(dotColor)) << 8) | UINT32(GetBValue(dotColor));
+        const int cell = 4, gap = 1, stride = cell + gap, ringSpan = 3 * cell + 2 * gap; // 14x14 overall
+        // {col, row} in the 3x3 grid, in clockwise perimeter order (each
+        // step moves to an *adjacent* cell -- indexing the grid in plain
+        // row-major order instead jumps straight from top-right to
+        // mid-left, breaking the "chasing around a ring" illusion).
+        static const int kRingCells[8][2] = {
+            {0, 0}, {1, 0}, {2, 0}, {2, 1}, {2, 2}, {1, 2}, {0, 2}, {0, 1},
+        };
+        int activeIndex = (int)((GetTickCount64() / kClaudePulseIntervalMs) % 8);
+        int baseX = (int)item.right - dotMargin - ringSpan;
+        int baseY = (int)item.top + dotMargin;
+        int sqLeft = baseX + kRingCells[activeIndex][0] * stride;
+        int sqTop = baseY + kRingCells[activeIndex][1] * stride;
+        drawBorderedSquare(sqLeft, sqTop, cell, dotPx);
+    } else if (entry.claudeStatus == ClaudeStatus::Attention || entry.claudeStatus == ClaudeStatus::Waiting) {
+        // A single big square, vertically centered on the item (unlike the
+        // ring spinner above, which stays corner-anchored) -- red and
+        // pulsing for Attention (blocked on a permission/MCP prompt, needs
+        // the user right now), green and static for Waiting (a finished
+        // turn, idle, nothing needed). Same footprint as the ring
+        // spinner's 14x14 bounding box, so all three states occupy the
+        // same visual "slot" regardless of which is showing.
+        const int bigSize = 14;
+        COLORREF dotColor = entry.claudeStatus == ClaudeStatus::Attention ? claudeColorAttention : claudeColorWaiting;
+        int dr = GetRValue(dotColor), dg = GetGValue(dotColor), db = GetBValue(dotColor);
+        if (entry.claudeStatus == ClaudeStatus::Attention) {
+            // Pulse by blending toward the chip's own background color and
+            // back -- the opacity pass below discards and recomputes this
+            // pixel's alpha uniformly for the whole item, so only the RGB
+            // value itself can carry a per-pixel animation through that
+            // pass (see the ring spinner's construction for the same
+            // reasoning). A faster cycle and a lower dim floor than a
+            // typical pulse, since this state is meant to read as more
+            // urgent than a calm animation.
+            double phase = (GetTickCount64() % 900) / 900.0 * 2.0 * 3.14159265358979323846;
+            double t = 0.25 + 0.75 * (0.5 + 0.5 * sin(phase));
+            dr = (int)(r + (dr - (int)r) * t);
+            dg = (int)(g + (dg - (int)g) * t);
+            db = (int)(b + (db - (int)b) * t);
+        }
+        UINT32 dotPx = (UINT32(255) << 24) | (UINT32(dr) << 16) | (UINT32(dg) << 8) | UINT32(db);
+        int sqTop = (int)item.top + (rowHeight - bigSize) / 2;
+        int sqLeft = (int)item.right - dotMargin - bigSize;
+        drawBorderedSquare(sqLeft, sqTop, bigSize, dotPx);
+    }
 
     BYTE alpha = (BYTE)opacity;
     for (int row = rowStart; row < rowEnd; row++) {
@@ -806,7 +905,9 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
         bool highlighted = (int)i == state->hoverIndex;
         int opacity = highlighted ? state->hoverOpacity : state->normalOpacity;
         DrawHudItem(screenDC, pixels, width, height, rowHeight, state->entries[i], state->itemRects[i],
-                    highlighted, opacity, state->labelTextColorAuto, state->labelTextColor, font, hoverFont);
+                    highlighted, opacity, state->labelTextColorAuto, state->labelTextColor, font, hoverFont,
+                    state->claudeColorWorking, state->claudeColorAttention, state->claudeColorWaiting,
+                    state->claudeBorderColorAuto, state->claudeBorderColor);
     }
 
     DeleteObject(font);
@@ -897,7 +998,8 @@ static void PaintDragGhost(ProjectListHudState* state) {
     // item you're actively moving reads as visually active.
     DrawHudItem(screenDC, pixels, itemW, itemH, state->rowHeight, state->entries[state->reorderIndex],
                 localRect, true, state->hoverOpacity, state->labelTextColorAuto, state->labelTextColor, font,
-                hoverFont);
+                hoverFont, state->claudeColorWorking, state->claudeColorAttention, state->claudeColorWaiting,
+                state->claudeBorderColorAuto, state->claudeBorderColor);
     DeleteObject(font);
     DeleteObject(hoverFont);
 
@@ -1047,11 +1149,33 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     state->fontSize = style.fontSize;
     state->labelTextColorAuto = style.labelTextColorAuto;
     state->labelTextColor = style.labelTextColor;
+    state->claudeColorWorking = style.claudeColorWorking;
+    state->claudeColorAttention = style.claudeColorAttention;
+    state->claudeColorWaiting = style.claudeColorWaiting;
+    state->claudeBorderColorAuto = style.claudeBorderColorAuto;
+    state->claudeBorderColor = style.claudeBorderColor;
     state->normalOpacity = ClampInt(style.normalOpacity, 0, 255);
     state->hoverOpacity = ClampInt(style.hoverOpacity, 0, 255);
     state->activateOnHover = style.activateOnHover;
     if (!state->activateOnHover) EndProjectListHoverFocus(state, true);
     if (state->hoverIndex >= (int)sorted.size()) state->hoverIndex = -1;
+
+    // Both the Working ring spinner and the Attention pulse need a repaint
+    // every kClaudePulseIntervalMs to actually animate, but only while
+    // there's something to animate -- started/stopped here so an idle
+    // desktop (or one where nothing's currently animating) never pays for
+    // it, same on-demand pattern as tracking.cpp's foreground-poll timer.
+    bool anyAnimating = std::any_of(sorted.begin(), sorted.end(), [](const ProjectListHudEntry& e) {
+        return e.claudeStatus == ClaudeStatus::Working || e.claudeStatus == ClaudeStatus::Attention;
+    });
+    if (anyAnimating && !state->pulseTimerActive) {
+        SetTimer(hud, kClaudePulseTimerId, kClaudePulseIntervalMs, nullptr);
+        state->pulseTimerActive = true;
+    } else if (!anyAnimating && state->pulseTimerActive) {
+        KillTimer(hud, kClaudePulseTimerId);
+        state->pulseTimerActive = false;
+    }
+
     RenderProjectListHud(hud, state);
     PositionProjectListHud(hud, state);
 }
