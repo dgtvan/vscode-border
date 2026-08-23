@@ -95,19 +95,25 @@ static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<A
     if (sessions.empty() || tw.folderName.empty()) return ClaudeStatus::None;
 
     std::wstring folderPath = ResolveFolderPath(tw.folderName);
+    LogDiag(L"ai_status: matching window folderName=[%ls] resolvedFolderPath=[%ls] against %zu session(s)",
+            tw.folderName.c_str(), folderPath.c_str(), sessions.size());
     bool anyAttention = false, anyWorking = false, anyWaiting = false;
     for (const AiSessionStatus& s : sessions) {
         bool matches = !folderPath.empty() ? PathIsWithinFolder(s.cwd, folderPath)
                                             : _wcsicmp(LastPathSegment(s.cwd).c_str(), tw.folderName.c_str()) == 0;
+        LogDiag(L"ai_status:   session cwd=[%ls] status=[%ls] -> %ls", s.cwd.c_str(), s.status.c_str(),
+                matches ? L"MATCH" : L"no match");
         if (!matches) continue;
         if (s.status == L"attention") anyAttention = true;
         else if (s.status == L"working") anyWorking = true;
         else if (s.status == L"waiting") anyWaiting = true;
     }
-    if (anyAttention) return ClaudeStatus::Attention;
-    if (anyWorking) return ClaudeStatus::Working;
-    if (anyWaiting) return ClaudeStatus::Waiting;
-    return ClaudeStatus::None;
+    ClaudeStatus result = anyAttention  ? ClaudeStatus::Attention
+                          : anyWorking  ? ClaudeStatus::Working
+                          : anyWaiting  ? ClaudeStatus::Waiting
+                                        : ClaudeStatus::None;
+    LogDiag(L"ai_status: folderName=[%ls] resolved to %d", tw.folderName.c_str(), (int)result);
+    return result;
 }
 
 static void SyncProjectListHud() {

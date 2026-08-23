@@ -1,5 +1,6 @@
 #include "claude_provider.h"
 
+#include "config.h"
 #include "file_util.h"
 #include "json_scan.h"
 #include "logger.h"
@@ -16,9 +17,7 @@ namespace {
 const wchar_t* kEventNames[] = {
     L"SessionStart",       L"UserPromptSubmit", L"Stop",        L"StopFailure",
     L"SessionEnd",         L"PermissionRequest", L"Elicitation", L"ElicitationResult",
-    L"SubagentStop", // re-fires (and lets status recompute) when a background subagent finishes,
-                      // even if the main turn is otherwise idle -- see claude_status_hook.ps1's
-                      // background_tasks handling
+    L"SubagentStop", // treated the same as Stop -- see claude_status_hook.ps1
 };
 
 std::wstring GetSettingsPath() {
@@ -136,20 +135,6 @@ bool IsClaudeProcessAlive(DWORD pid) {
 // a status that *has* a pid -- that path is checked precisely, every
 // sync, regardless of age).
 const DWORD kNoPidStaleMinutes = 24 * 60;
-
-// Separate, much shorter staleness bound for "working" reported only
-// because a Stop/StopFailure/SubagentStop payload's background_tasks was
-// non-empty at that moment (see claude_status_hook.ps1's
-// via_background_tasks) -- a weaker, one-time snapshot with no equivalent
-// "the background task just finished" hook to refresh it, unlike a
-// genuinely active turn (UserPromptSubmit), which keeps no timeout at all
-// and relies solely on the precise pid-liveness check above. 30 minutes
-// balances "don't second-guess a background build/test/dev-server that's
-// still legitimately running" against "don't show 'working' for hours
-// after it actually finished" -- this only ever *downgrades the status
-// this function returns*, never deletes or rewrites the file, so a real
-// event later still overwrites it with a fresh, accurate snapshot either way.
-const DWORD kBackgroundTasksStaleMinutes = 30;
 
 bool IsOlderThanMinutes(const FILETIME& ft, DWORD minutes) {
     FILETIME now;
@@ -325,7 +310,6 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
         std::string content = ReadFileBytes(path);
         AiSessionStatus status;
         DWORD pid = 0;
-        bool viaBackgroundTasks = false;
         size_t pos = 0;
         while (pos < content.size()) {
             size_t eol = content.find('\n', pos);
@@ -340,9 +324,11 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
             if (key == "status") status.status = Utf8ToWide(rawValue);
             else if (key == "cwd") status.cwd = Utf8ToWide(rawValue);
             else if (key == "pid") pid = (DWORD)atol(rawValue.c_str());
-            else if (key == "via_background_tasks") viaBackgroundTasks = rawValue == "1";
         }
         if (status.status.empty() || status.cwd.empty()) continue;
+
+        LogDiag(L"claude_provider: read %ls: status=%ls cwd=%ls pid=%lu", fileName.c_str(), status.status.c_str(),
+                status.cwd.c_str(), pid);
 
         if (pid != 0) {
             if (!IsClaudeProcessAlive(pid)) {
@@ -382,24 +368,17 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
                     fileName.c_str(), kNoPidStaleMinutes);
         }
 
-        // The pid check above only confirms the *session* is alive, not
-        // that this specific "working" snapshot is still accurate --
-        // background_tasks-derived "working" (see
-        // claude_status_hook.ps1) has no event to refresh it when the
-        // background task actually finishes, so it can go stale while the
-        // session itself keeps running. Downgrading what's *returned*
-        // here (not the file) means a real event later still overwrites
-        // it with a fresh, accurate snapshot either way.
-        if (viaBackgroundTasks && status.status == L"working" &&
-            IsOlderThanMinutes(fd.ftLastWriteTime, kBackgroundTasksStaleMinutes)) {
-            status.status = L"waiting";
-        }
-
         result.push_back(status);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 
     for (const std::wstring& path : toDelete) DeleteFileW(path.c_str());
+
+    if (g_config.verboseLogging) {
+        std::wstring summary;
+        for (const AiSessionStatus& s : result) summary += L"[" + s.status + L" " + s.cwd + L"] ";
+        LogDiag(L"claude_provider: LoadStatuses returning %zu session(s): %ls", result.size(), summary.c_str());
+    }
 
     return result;
 }

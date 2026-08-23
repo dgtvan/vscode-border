@@ -13,6 +13,39 @@
 
 $ErrorActionPreference = "SilentlyContinue"
 
+# Always-on event log (not gated by config.ini's verbose_logging -- that
+# setting only controls the C++ app's own LogDiag calls, and this script
+# has no way to read config.ini anyway) recording every hook invocation
+# this script ever sees, one line each, appended -- never truncated by this
+# script. This is the ground truth for diagnosing "the indicator shows the
+# wrong thing" reports: the .ini status files only ever show the *latest*
+# write, so if hook events fire out of order (e.g. a straggling
+# SubagentStop from a background subagent arriving after a fresh
+# UserPromptSubmit and overwriting "working" back to "waiting"), the .ini
+# file alone can't reveal that -- this log can, since every event is kept,
+# in the order this script actually observed them. Cross-reference against
+# src/claude_provider.cpp's LogDiag output (config.ini's verbose_logging)
+# and the corresponding bin\claude_status\<session_id>.ini file's content.
+$hookLogDir = Join-Path $PSScriptRoot "logs"
+if (-not (Test-Path $hookLogDir)) { New-Item -ItemType Directory -Path $hookLogDir -Force | Out-Null }
+$hookLogFile = Join-Path $hookLogDir "claude_hook_events.log"
+
+# Cheap unbounded-growth guard, checked once per invocation before
+# appending -- keeps only the most recent ~5000 lines once the file passes
+# 5 MB, rather than letting it grow forever across every hook firing on
+# the machine for however long this feature stays enabled.
+if ((Test-Path $hookLogFile) -and (Get-Item $hookLogFile).Length -gt 5MB) {
+    $tail = Get-Content $hookLogFile -Tail 5000
+    [System.IO.File]::WriteAllLines($hookLogFile, $tail, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Write-HookEventLog {
+    param([string]$Line)
+    $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    $full = "[$stamp] $Line`n"
+    [System.IO.File]::AppendAllText($hookLogFile, $full, [System.Text.UTF8Encoding]::new($false))
+}
+
 # Read stdin as UTF-8 explicitly -- Windows PowerShell 5.1's default
 # console input encoding isn't reliably UTF-8, which could otherwise mangle
 # non-ASCII paths before ConvertFrom-Json ever sees them.
@@ -24,15 +57,20 @@ if (-not $json) { exit 0 }
 try {
     $data = $json | ConvertFrom-Json
 } catch {
+    Write-HookEventLog "PARSE_ERROR raw=$($json.Substring(0, [Math]::Min(200, $json.Length)))"
     exit 0
 }
 
 $statusDir = Join-Path $PSScriptRoot "claude_status"
 
-if (-not $data.session_id) { exit 0 }
+if (-not $data.session_id) {
+    Write-HookEventLog "event=$($data.hook_event_name) session=MISSING"
+    exit 0
+}
 $file = Join-Path $statusDir "$($data.session_id).ini"
 
 if ($data.hook_event_name -eq "SessionEnd") {
+    Write-HookEventLog "event=SessionEnd session=$($data.session_id) (status file removed)"
     Remove-Item -Path $file -Force -ErrorAction SilentlyContinue
     exit 0
 }
@@ -45,31 +83,22 @@ $status = switch ($data.hook_event_name) {
     default { "waiting" } # SessionStart, Stop, StopFailure, SubagentStop
 }
 
-# A background task (a long-running dev server, a log watcher, a
-# background subagent -- anything started without blocking the main turn)
-# can still be running after the main turn itself finishes. Stop/
-# StopFailure/SubagentStop's payload includes a live background_tasks
-# list -- confirmed empirically (a real session showed 3 running shell
-# tasks in its Stop payload even though its main turn had ended) -- so
-# treat that as still "working" rather than "waiting", since real work is
-# still happening even though the conversation itself is idle. Doesn't
-# override "attention": a pending permission/MCP prompt is more urgent
-# than "something's still running in the background".
-#
-# This is a weaker signal than a genuinely active turn (UserPromptSubmit),
-# though: it's a one-time snapshot with no equivalent "the background task
-# just finished" hook to refresh it later, so it can go stale -- e.g. the
-# background task finishes minutes later and nothing ever re-fires to
-# notice. Marked via_background_tasks so claude_provider.cpp can apply a
-# staleness bound to *this* specific reason for "working" without touching
-# the real UserPromptSubmit-driven case (which can legitimately stay
-# "working" for a long time and shouldn't be second-guessed by a timeout).
-$viaBackgroundTasks = $false
-if ($status -eq "waiting" -and $data.background_tasks -and $data.background_tasks.Count -gt 0) {
-    $status = "working"
-    $viaBackgroundTasks = $true
-}
-
+# Stop/StopFailure/SubagentStop's payload includes a live background_tasks
+# list of anything still running in the background (a dev server, a log
+# watcher, a background subagent). This was tried as a "working" signal --
+# treating a non-empty list as still "working" rather than "waiting" -- but
+# real captured data (see bgDetail below and bin\logs\claude_hook_events.log)
+# showed that doesn't work: a background_tasks entry has no way to
+# distinguish "about to finish any second" from "a server that was started
+# once and will just sit there running for the rest of the session" -- both
+# report the same live "running" status on every single check, forever, in
+# the latter case. No staleness window can fix that (a long window pins
+# "working" for the server's entire lifetime; a short one just flickers
+# "working" for a few seconds after every Stop with the conversational turn
+# already over, which isn't informative either way) -- so this is
+# deliberately *not* factored into $status at all. Still logged below
+# (bgCount/bgDetail) purely for visibility into what's running, in case a
+# more targeted signal becomes possible later.
 if (-not (Test-Path $statusDir)) {
     New-Item -ItemType Directory -Path $statusDir -Force | Out-Null
 }
@@ -101,7 +130,14 @@ $claudePid = Find-ClaudeAncestorPid -StartPid $PID
 
 $content = "status=$status`ncwd=$($data.cwd)`n"
 if ($claudePid) { $content += "pid=$claudePid`n" }
-if ($viaBackgroundTasks) { $content += "via_background_tasks=1`n" }
 [System.IO.File]::WriteAllText($file, $content, [System.Text.UTF8Encoding]::new($false))
+
+$bgCount = if ($data.background_tasks) { $data.background_tasks.Count } else { 0 }
+$bgDetail = ""
+if ($bgCount -gt 0) {
+    $parts = $data.background_tasks | ForEach-Object { "$($_.id):$($_.status):$($_.description)" }
+    $bgDetail = " bgDetail=[" + ($parts -join "; ") + "]"
+}
+Write-HookEventLog "event=$($data.hook_event_name) session=$($data.session_id) status=$status pid=$claudePid cwd=$($data.cwd)$bgDetail"
 
 exit 0
