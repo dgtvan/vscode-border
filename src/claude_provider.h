@@ -12,5 +12,4 @@ public:
     const char* Id() const override { return "claude"; }
     void SyncInstallation(bool enabled) override;
     std::vector<AiSessionStatus> LoadStatuses() override;
-    void ClearStatus() override;
 };

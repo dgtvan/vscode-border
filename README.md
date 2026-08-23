@@ -176,7 +176,7 @@ This is Claude Code's implementation of a generic `AiProvider` interface
 reading back whatever it reported are the two things any AI assistant
 integration has to do, so a future Copilot integration would plug in the
 same way, behind the same interface, without changing anything else that
-uses it (`tracking.cpp`'s window-matching, the tray's **Clear AI Status**).
+uses it (`tracking.cpp`'s window-matching).
 
 A hook here applies to every Claude Code session on the machine, in any
 project -- not just this repo. Changes to `~/.claude/settings.json` are
@@ -185,9 +185,8 @@ few seconds), so nothing needs restarting for it to take effect. Each
 status file is matched to a tracked window by folder (a real absolute-path
 match when VS Code has recorded one, e.g. via `workspaceStorage`, falling
 back to a plain name comparison otherwise -- see `src/claude_provider.*`
-and `src/worktree_resolver.*`). The tray menu's **Clear AI Status** clears
-all status files manually -- see "Known limitations" below for when that's
-needed.
+and `src/worktree_resolver.*`). Stale/abandoned status files are cleaned
+up automatically -- see "Known limitations" below for exactly how.
 
 ### Project list HUD position/size memory
 
@@ -273,12 +272,27 @@ to pick up worktrees created after the app started.
   bounded number of hops up) that could change in a future Claude Code
   update; if the ancestry walk ever fails to find `claude.exe`, that
   session's status is logged (`claude_provider: ... has no pid recorded`)
-  and falls back to the original SessionEnd-only behavior for that session
-  rather than breaking. The tray's **Clear AI Status** remains as a manual
-  fallback for whatever this doesn't catch. No staleness *timeout* was
-  added on top of this, deliberately -- a genuinely long-running task can
-  stay "working" for 30+ minutes, and a naive timeout would misfire on it
-  where the pid check doesn't.
+  and falls back to a much coarser, generous 24-hour staleness check
+  instead (a status with no pid that hasn't been updated in over a day is
+  treated as abandoned) -- deliberately not applied to the normal, precise
+  pid-based path, since a genuinely long-running task can legitimately stay
+  "working" for 30+ minutes and a short timeout would misfire on it there.
+  Between the two, every case resolves on its own -- there's no manual
+  clear/recovery action, by design, since one shouldn't be needed.
+- The "Working" status derived from a non-empty `background_tasks` list (see
+  "AI status indicator" above) is a one-time snapshot -- there's no hook that
+  fires when a background task later finishes, so on its own it could stay
+  "working" forever after the task actually ends. `claude_status_hook.ps1`
+  marks statuses reached this way (`via_background_tasks=1` in the status
+  file), and `claude_provider.cpp` applies a separate, shorter 30-minute
+  staleness bound to *only* that marked case -- if the status file hasn't
+  been refreshed by a new hook event within 30 minutes, it's treated as
+  "waiting" instead. This is deliberately scoped to just the
+  background-tasks-derived case: a genuinely active turn
+  (`UserPromptSubmit`-driven "working") gets no such timeout, since it can
+  legitimately run 30+ minutes on its own. No manual clear/recovery action
+  here either -- the next real hook event for that session overwrites the
+  file fresh regardless.
 - Claude Code status matching falls back to a plain folder-name comparison
   when VS Code hasn't recorded that folder's real path (e.g. multi-root
   workspaces aren't covered) -- two windows opened on different folders
