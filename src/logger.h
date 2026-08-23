@@ -2,9 +2,11 @@
 
 #include <string>
 
-// Writes a timestamped line to vscode_border.log next to the exe (same
-// folder as config.ini; truncated at the start of each run). printf-style
-// formatting, wide strings.
+// Writes a timestamped line to the current session's log file, under
+// logs\ next to the exe (same folder as config.ini). Each app startup
+// begins a new file rather than truncating -- see logger.cpp for the
+// naming scheme and rotation/retention rules. printf-style formatting,
+// wide strings.
 void Log(const wchar_t* fmt, ...);
 
 // Same formatting, but appends to an in-memory ring buffer instead of
@@ -35,13 +37,11 @@ void LogFastDiag(const wchar_t* fmt, ...);
 void LogWarn(const wchar_t* fmt, ...);
 
 // True once LogWarn has fired during the current run (always false right
-// after a fresh launch, since the log itself starts empty every run --
-// nothing is carried over from a previous run's log, which has already
-// been truncated away by then). Drives the tray icon's warning badge in
-// vscode_border.cpp; restarting the app is what clears it.
+// after a fresh launch -- this flag itself isn't persisted, only what it
+// gates: the current run's warning badge). Drives the tray icon's warning
+// badge in vscode_border.cpp; restarting the app is what clears it.
 bool HasWarnings();
 
-// Full path to the on-disk log file. Wired to the tray menu's "Open Log
-// Folder".
+// Full path to the on-disk log file currently being written to. Wired to
+// the tray menu's "Open Log Folder".
 std::wstring GetLogFilePath();
-
