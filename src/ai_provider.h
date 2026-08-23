@@ -36,12 +36,10 @@ public:
 
     // Every currently-reported session, for the caller to correlate to
     // tracked windows by folder (see tracking.cpp's ComputeAiStatus).
+    // Responsible for its own stale/abandoned-state cleanup (e.g. a
+    // session whose terminal was killed abruptly) -- there's no separate
+    // manual recovery path, so a provider can't leave that to the user.
     virtual std::vector<AiSessionStatus> LoadStatuses() = 0;
-
-    // Manual recovery for stuck/stale state (wired to the tray's "Clear AI
-    // Status" action) -- e.g. deleting leftover status files left behind
-    // by a session whose terminal was killed abruptly.
-    virtual void ClearStatus() = 0;
 };
 
 // Returns the provider for `id` (e.g. "claude"), or nullptr if `id` isn't
@@ -50,8 +48,7 @@ public:
 AiProvider* GetAiProvider(const std::string& id);
 
 // Every implemented provider, regardless of whether it's currently enabled
-// in config -- for callers (the tray's "Clear AI Status") that need to act
-// on all of them.
+// in config. Used internally by SyncAllAiProviders/GetAiProvider.
 std::vector<AiProvider*> GetAllAiProviders();
 
 // Syncs every provider's installation state to match `cfg`: installs (or

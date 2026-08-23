@@ -126,6 +126,44 @@ bool IsClaudeProcessAlive(DWORD pid) {
     return _wcsicmp(base.c_str(), L"claude.exe") == 0;
 }
 
+// Fallback staleness check used only when a status file has no pid to
+// verify liveness against (the ancestor walk in claude_status_hook.ps1
+// failed to find a claude.exe process -- expected to be rare). A generous
+// threshold, not a real "is this session done" signal like the pid check:
+// it exists so this degraded case still cleans up on its own -- there's no
+// manual recovery path, so it has to -- without misfiring on a genuinely
+// long-running task the way a short timeout would (this never applies to
+// a status that *has* a pid -- that path is checked precisely, every
+// sync, regardless of age).
+const DWORD kNoPidStaleMinutes = 24 * 60;
+
+// Separate, much shorter staleness bound for "working" reported only
+// because a Stop/StopFailure/SubagentStop payload's background_tasks was
+// non-empty at that moment (see claude_status_hook.ps1's
+// via_background_tasks) -- a weaker, one-time snapshot with no equivalent
+// "the background task just finished" hook to refresh it, unlike a
+// genuinely active turn (UserPromptSubmit), which keeps no timeout at all
+// and relies solely on the precise pid-liveness check above. 30 minutes
+// balances "don't second-guess a background build/test/dev-server that's
+// still legitimately running" against "don't show 'working' for hours
+// after it actually finished" -- this only ever *downgrades the status
+// this function returns*, never deletes or rewrites the file, so a real
+// event later still overwrites it with a fresh, accurate snapshot either way.
+const DWORD kBackgroundTasksStaleMinutes = 30;
+
+bool IsOlderThanMinutes(const FILETIME& ft, DWORD minutes) {
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER a, b;
+    a.LowPart = ft.dwLowDateTime;
+    a.HighPart = ft.dwHighDateTime;
+    b.LowPart = now.dwLowDateTime;
+    b.HighPart = now.dwHighDateTime;
+    if (b.QuadPart <= a.QuadPart) return false;
+    ULONGLONG ageTicks = b.QuadPart - a.QuadPart; // 100ns ticks
+    return ageTicks > (ULONGLONG)minutes * 60ULL * 10000000ULL;
+}
+
 struct HooksLocation {
     bool ok = false;
     JsonScan::Span root;
@@ -287,6 +325,7 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
         std::string content = ReadFileBytes(path);
         AiSessionStatus status;
         DWORD pid = 0;
+        bool viaBackgroundTasks = false;
         size_t pos = 0;
         while (pos < content.size()) {
             size_t eol = content.find('\n', pos);
@@ -301,6 +340,7 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
             if (key == "status") status.status = Utf8ToWide(rawValue);
             else if (key == "cwd") status.cwd = Utf8ToWide(rawValue);
             else if (key == "pid") pid = (DWORD)atol(rawValue.c_str());
+            else if (key == "via_background_tasks") viaBackgroundTasks = rawValue == "1";
         }
         if (status.status.empty() || status.cwd.empty()) continue;
 
@@ -309,24 +349,50 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
                 // Confirmed dead: the process this status came from is gone
                 // (or that pid now belongs to something else entirely), so
                 // SessionEnd clearly never got the chance to clean this up
-                // itself -- delete it now instead of waiting for a manual
-                // Clear AI Status. This is what actually closes the "forced
-                // kill" detection gap, not just documents it.
+                // itself -- delete it now, automatically. This is what
+                // actually closes the "forced kill" detection gap, not
+                // just documents it.
                 toDelete.push_back(path);
                 Log(L"claude_provider: pid=%lu for %ls is no longer a live claude.exe process -- treating its "
                     L"status as ended",
                     pid, fileName.c_str());
                 continue;
             }
+        } else if (IsOlderThanMinutes(fd.ftLastWriteTime, kNoPidStaleMinutes)) {
+            // No pid to verify liveness against, and this hasn't been
+            // touched in a long time -- treat it as abandoned. See
+            // kNoPidStaleMinutes' comment for why this is a generous,
+            // separate threshold from the precise pid-based check above,
+            // not a general staleness timeout.
+            toDelete.push_back(path);
+            warnedMissingPid.erase(fileName);
+            Log(L"claude_provider: %ls has no pid recorded and hasn't been updated in over %lu minutes -- "
+                L"treating it as abandoned",
+                fileName.c_str(), kNoPidStaleMinutes);
+            continue;
         } else if (warnedMissingPid.insert(fileName).second) {
             // A missing pid is expected to be rare (the hook's ancestor
             // walk failing to find a claude.exe process, or a leftover file
-            // from before this feature existed) -- degrades gracefully to
-            // the old SessionEnd-only cleanup rather than failing, but is
-            // still worth surfacing rather than silently doing nothing.
-            LogWarn(L"claude_provider: %ls has no pid recorded -- can't verify liveness for it, falling back to "
-                    L"SessionEnd-only cleanup",
-                    fileName.c_str());
+            // from before this feature existed) -- degrades gracefully
+            // (still shown, still eventually auto-cleaned by the staleness
+            // check above) rather than failing, but is still worth
+            // surfacing rather than silently doing nothing.
+            LogWarn(L"claude_provider: %ls has no pid recorded -- can't verify liveness for it, will fall back to "
+                    L"a %lu-minute staleness check",
+                    fileName.c_str(), kNoPidStaleMinutes);
+        }
+
+        // The pid check above only confirms the *session* is alive, not
+        // that this specific "working" snapshot is still accurate --
+        // background_tasks-derived "working" (see
+        // claude_status_hook.ps1) has no event to refresh it when the
+        // background task actually finishes, so it can go stale while the
+        // session itself keeps running. Downgrading what's *returned*
+        // here (not the file) means a real event later still overwrites
+        // it with a fresh, accurate snapshot either way.
+        if (viaBackgroundTasks && status.status == L"working" &&
+            IsOlderThanMinutes(fd.ftLastWriteTime, kBackgroundTasksStaleMinutes)) {
+            status.status = L"waiting";
         }
 
         result.push_back(status);
@@ -336,20 +402,4 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
     for (const std::wstring& path : toDelete) DeleteFileW(path.c_str());
 
     return result;
-}
-
-void ClaudeProvider::ClearStatus() {
-    std::wstring dir = GetStatusDir();
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir + L"\\*.ini").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-
-    int removed = 0;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (DeleteFileW((dir + L"\\" + fd.cFileName).c_str())) removed++;
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-
-    Log(L"claude_provider: cleared %d file(s) from %ls", removed, dir.c_str());
 }

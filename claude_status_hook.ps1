@@ -55,8 +55,19 @@ $status = switch ($data.hook_event_name) {
 # still happening even though the conversation itself is idle. Doesn't
 # override "attention": a pending permission/MCP prompt is more urgent
 # than "something's still running in the background".
+#
+# This is a weaker signal than a genuinely active turn (UserPromptSubmit),
+# though: it's a one-time snapshot with no equivalent "the background task
+# just finished" hook to refresh it later, so it can go stale -- e.g. the
+# background task finishes minutes later and nothing ever re-fires to
+# notice. Marked via_background_tasks so claude_provider.cpp can apply a
+# staleness bound to *this* specific reason for "working" without touching
+# the real UserPromptSubmit-driven case (which can legitimately stay
+# "working" for a long time and shouldn't be second-guessed by a timeout).
+$viaBackgroundTasks = $false
 if ($status -eq "waiting" -and $data.background_tasks -and $data.background_tasks.Count -gt 0) {
     $status = "working"
+    $viaBackgroundTasks = $true
 }
 
 if (-not (Test-Path $statusDir)) {
@@ -90,6 +101,7 @@ $claudePid = Find-ClaudeAncestorPid -StartPid $PID
 
 $content = "status=$status`ncwd=$($data.cwd)`n"
 if ($claudePid) { $content += "pid=$claudePid`n" }
+if ($viaBackgroundTasks) { $content += "via_background_tasks=1`n" }
 [System.IO.File]::WriteAllText($file, $content, [System.Text.UTF8Encoding]::new($false))
 
 exit 0
