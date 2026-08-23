@@ -53,11 +53,20 @@ If something unexpected happens during a run (e.g. a VS Code window's
 title doesn't match any recognized shape -- see [Getting the repo/branch
 label](#getting-the-repobranch-label-instead-of-just-the-folder-name)), the
 tray icon gets a small yellow "!" badge and its tooltip changes to say
-so. **Open Log Folder** jumps straight to `bin\vscode_border.log` (same
-folder as `config.ini`; set `verbose_logging=true` in `config.ini` for full
-per-event tracing on top of that). The log starts fresh on every launch,
-so the badge only ever reflects the current run -- restarting the app is
-what clears it.
+so. **Open Log Folder** jumps straight to the current session's log file
+under `bin\logs\` (set `verbose_logging=true` in `config.ini` for full
+per-event tracing on top of that). Every launch starts a new file rather
+than overwriting the last one -- so closing the app (even by accident) never
+loses whatever was already logged -- named
+`vscode_border_<session-start-timestamp>_<part>.log`; a long-running
+session gets a new part once a day (and, as a safety net, if a single part
+grows past 5 MB) without losing the rest of that session's history, and
+files sharing the same `<session-start-timestamp>` prefix are all part of
+the same run, in `part` order. Files older than 14 days are deleted
+automatically on the next startup. The warning badge only ever reflects
+the current run -- restarting the app is what clears it (past runs' logs
+are still there under `bin\logs\` to look at, they just don't affect the
+badge).
 
 ## Configuration
 
