@@ -133,20 +133,28 @@ Each HUD item can show a small status indicator in its top-right corner
 for an AI coding assistant running in that VS Code window's terminal(s):
 
 - **Working** -- amber, a small square chasing itself around an 8-position
-  ring -- actively generating a response or running a tool, *or* the main
-  turn has finished but a background task (a long-running dev server, a
-  log watcher, a background subagent) is still going. Claude Code's
-  `Stop`/`StopFailure`/`SubagentStop` payloads carry a live
-  `background_tasks` list, confirmed against a real session that showed 3
-  running shell tasks in its `Stop` payload despite the conversation being
-  idle -- a non-empty list here counts as still "working", not "waiting".
+  ring -- actively generating a response or running a tool (from
+  `UserPromptSubmit` until the turn's `Stop`/`StopFailure`/`SubagentStop`).
 - **Attention** -- red, a single pulsing square -- blocked mid-turn on a
   permission prompt or an MCP server asking the user something. This is
-  the state that most needs you to look at it, and takes priority over a
-  background task still running.
-- **Waiting** -- green, a single static square -- a finished turn, idle,
-  no background tasks either, ready for your next prompt.
+  the state that most needs you to look at it.
+- **Waiting** -- green, a single static square -- the turn has finished,
+  ready for your next prompt.
 - No indicator at all if nothing's running there.
+
+Claude Code's `Stop`/`StopFailure`/`SubagentStop` payloads also carry a live
+`background_tasks` list (anything still running in the background -- a dev
+server, a watcher, a subagent). An earlier version of this feature treated a
+non-empty list as still "Working", but real usage showed that doesn't work:
+a background task has no way to signal "about to finish" versus "started
+once and will just sit there running for the rest of the session" -- both
+report the same live status on every check, so a long-lived process (e.g. a
+dev server) pinned the indicator to "Working" indefinitely, long after the
+conversation itself was done. Rather than chase staleness thresholds that
+can't fix that (a window short enough to avoid the false positive provides
+no signal either way), this was removed -- `background_tasks` is still
+logged for visibility (`bin\logs\claude_hook_events.log`) but no longer
+affects the indicator.
 
 If a window has more than one session running (e.g. several terminals),
 the indicator reflects the aggregate, in that priority order: Attention
@@ -288,20 +296,6 @@ to pick up worktrees created after the app started.
   "working" for 30+ minutes and a short timeout would misfire on it there.
   Between the two, every case resolves on its own -- there's no manual
   clear/recovery action, by design, since one shouldn't be needed.
-- The "Working" status derived from a non-empty `background_tasks` list (see
-  "AI status indicator" above) is a one-time snapshot -- there's no hook that
-  fires when a background task later finishes, so on its own it could stay
-  "working" forever after the task actually ends. `claude_status_hook.ps1`
-  marks statuses reached this way (`via_background_tasks=1` in the status
-  file), and `claude_provider.cpp` applies a separate, shorter 30-minute
-  staleness bound to *only* that marked case -- if the status file hasn't
-  been refreshed by a new hook event within 30 minutes, it's treated as
-  "waiting" instead. This is deliberately scoped to just the
-  background-tasks-derived case: a genuinely active turn
-  (`UserPromptSubmit`-driven "working") gets no such timeout, since it can
-  legitimately run 30+ minutes on its own. No manual clear/recovery action
-  here either -- the next real hook event for that session overwrites the
-  file fresh regardless.
 - Claude Code status matching falls back to a plain folder-name comparison
   when VS Code hasn't recorded that folder's real path (e.g. multi-root
   workspaces aren't covered) -- two windows opened on different folders
