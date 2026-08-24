@@ -149,6 +149,72 @@ bool IsOlderThanMinutes(const FILETIME& ft, DWORD minutes) {
     return ageTicks > (ULONGLONG)minutes * 60ULL * 10000000ULL;
 }
 
+std::wstring GetProjectsDir() {
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return L"";
+    return std::wstring(buf) + L"\\.claude\\projects";
+}
+
+// Claude Code names each project's transcript directory after that
+// project's absolute path, with ':' and '\' (and '/', just in case) turned
+// into '-' and the drive letter lowercased -- confirmed against real
+// directories on disk, e.g. D:\Src\Personal\vscode-border became
+// d--Src-Personal-vscode-border (the colon and the leading backslash each
+// become their own '-', which is why there are two in a row right after
+// the drive letter).
+std::wstring EncodeProjectDirName(const std::wstring& cwd) {
+    std::wstring encoded = cwd;
+    if (!encoded.empty()) encoded[0] = towlower(encoded[0]);
+    for (wchar_t& c : encoded) {
+        if (c == L':' || c == L'\\' || c == L'/') c = L'-';
+    }
+    return encoded;
+}
+
+// How much more recently `newer` needs to have been written than `since`
+// to count as "real, additional activity" rather than two hook/transcript
+// writes that just happened to land within the same instant (the message
+// that makes Claude Code fire e.g. PermissionRequest is typically appended
+// to the transcript at essentially the same moment, so a zero-margin
+// comparison would spuriously fire right as that very status is set).
+const DWORD kTranscriptActivityMarginSeconds = 10;
+
+bool IsNewerByMargin(const FILETIME& newer, const FILETIME& older, DWORD marginSeconds) {
+    ULARGE_INTEGER a, b;
+    a.LowPart = newer.dwLowDateTime;
+    a.HighPart = newer.dwHighDateTime;
+    b.LowPart = older.dwLowDateTime;
+    b.HighPart = older.dwHighDateTime;
+    if (a.QuadPart <= b.QuadPart) return false;
+    return (a.QuadPart - b.QuadPart) > (ULONGLONG)marginSeconds * 10000000ULL;
+}
+
+// Cross-checks a status snapshot against independent evidence: Claude
+// Code's own transcript file for that session (see EncodeProjectDirName)
+// gets a new line appended for every message and tool call, regardless of
+// which hooks happen to be wired up -- so its last-write-time answers "has
+// anything actually happened in this session more recently than our last
+// hook-reported snapshot?" without guessing off a wall-clock timeout.
+//
+// This exists because some transitions have no hook to report them: there's
+// no "permission granted, resuming" event (unlike MCP elicitation, which
+// has ElicitationResult), so a session can sit on "attention" long after
+// the user has actually answered the prompt and Claude has gone back to
+// work, with nothing to correct it before the eventual Stop. Confirmed
+// against a real stuck case: PermissionRequest fired at 20:27, the
+// transcript kept growing until 20:41 when Stop finally fired -- for that
+// whole 14 minutes, this check would have correctly shown the transcript
+// was still moving, well past this margin.
+bool HasNewerTranscriptActivity(const std::wstring& cwd, const std::wstring& sessionId, const FILETIME& sinceFt) {
+    std::wstring projectsDir = GetProjectsDir();
+    if (projectsDir.empty()) return false;
+    std::wstring transcriptPath = projectsDir + L"\\" + EncodeProjectDirName(cwd) + L"\\" + sessionId + L".jsonl";
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExW(transcriptPath.c_str(), GetFileExInfoStandard, &data)) return false;
+    return IsNewerByMargin(data.ftLastWriteTime, sinceFt, kTranscriptActivityMarginSeconds);
+}
+
 struct HooksLocation {
     bool ok = false;
     JsonScan::Span root;
@@ -366,6 +432,24 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
             LogWarn(L"claude_provider: %ls has no pid recorded -- can't verify liveness for it, will fall back to "
                     L"a %lu-minute staleness check",
                     fileName.c_str(), kNoPidStaleMinutes);
+        }
+
+        // The hook-reported status can be stale in ways that have no hook
+        // to correct them -- most notably "attention": there's no
+        // "permission granted, resuming" event, so once a permission
+        // prompt fires, nothing updates the status again until the turn's
+        // eventual Stop, even though the user may have long since answered
+        // it and Claude gone back to work. Cross-checking against the
+        // session's own transcript file (see HasNewerTranscriptActivity)
+        // catches that with real evidence instead of a wall-clock guess:
+        // only "working" is missing from this check because it's already
+        // the most active state there is -- nothing to correct it toward.
+        if (status.status != L"working" &&
+            HasNewerTranscriptActivity(status.cwd, fileName.substr(0, fileName.size() - 4), fd.ftLastWriteTime)) {
+            Log(L"claude_provider: %ls's transcript has newer activity than its last %ls snapshot -- correcting to "
+                L"working",
+                fileName.c_str(), status.status.c_str());
+            status.status = L"working";
         }
 
         result.push_back(status);
