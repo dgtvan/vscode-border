@@ -156,6 +156,28 @@ no signal either way), this was removed -- `background_tasks` is still
 logged for visibility (`bin\logs\claude_hook_events.log`) but no longer
 affects the indicator.
 
+**Attention** can also go stale in a way `background_tasks` couldn't self-heal
+from at all: there's no "permission granted, resuming" hook (unlike MCP
+elicitation, which has `ElicitationResult`), so once a permission prompt
+fires, nothing updates the status again until the turn's eventual `Stop` --
+even if you answered it seconds later and Claude went right back to work.
+Rather than guess with a timeout (any guess is wrong either for a prompt
+you haven't actually answered yet, or for one you have), `claude_provider.cpp`
+cross-checks against real evidence: Claude Code writes a transcript file per
+session under `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, gaining
+a new line for every message and tool call regardless of which hooks are
+wired up. If that file has been written to more than 10 seconds after the
+status file's last hook-reported snapshot, that's independent proof
+something happened more recently than what the hooks told us -- so the
+status is corrected to "Working" instead of staying on a stale "Attention"
+(or "Waiting"). Confirmed against a real stuck case: a `PermissionRequest`
+fired and froze the status on "Attention" while the transcript kept growing
+for another 14 minutes until the turn's `Stop` finally arrived -- this check
+catches exactly that gap. Degrades harmlessly if the transcript file can't
+be found (e.g. a future Claude Code version changes this layout) -- the
+status just stays as last reported by the hooks, same as before this
+existed.
+
 If a window has more than one session running (e.g. several terminals),
 the indicator reflects the aggregate, in that priority order: Attention
 beats Working beats Waiting.
