@@ -43,6 +43,14 @@ struct ProjectListHudStyle {
     COLORREF claudeColorWaiting = RGB(52, 199, 89);
     bool claudeBorderColorAuto = true;
     COLORREF claudeBorderColor = RGB(255, 255, 255);
+    // A fixed square "+" button appended after the last entry -- opens a new
+    // VS Code window when clicked. Unlike the entries above, it can't be
+    // drag-reordered and never triggers activateOnHover. `newWindowButtonColor`
+    // is picked by the caller (e.g. the next color in tracking.cpp's
+    // round-robin palette allocation) since this module has no notion of a
+    // color palette of its own.
+    bool showNewWindowButton = false;
+    COLORREF newWindowButtonColor = RGB(0, 0, 0);
 };
 
 // `horizontal` is the style to start with (see ProjectListHudStyle) --

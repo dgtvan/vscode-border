@@ -66,6 +66,8 @@ static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
 
 static std::unordered_map<HWND, TrackedWindow> g_tracked; // target hwnd -> info
 static std::vector<bool> g_colorInUse;
+static int PeekNextColorIndex(); // defined below, alongside AllocateColorIndex -- forward-declared so
+                                  // SyncProjectListHud (which appears first in the file) can use it
 
 // True if `cwd` is `folderPath` itself, or somewhere underneath it (e.g. a
 // Claude Code session started from a subdirectory of the opened folder) --
@@ -195,6 +197,8 @@ static void SyncProjectListHud() {
     style.claudeColorWaiting = g_config.aiIndicatorColorWaiting;
     style.claudeBorderColorAuto = g_config.aiIndicatorBorderColorAuto;
     style.claudeBorderColor = g_config.aiIndicatorBorderColor;
+    style.showNewWindowButton = true;
+    style.newWindowButtonColor = g_config.palette[PeekNextColorIndex() % g_config.palette.size()];
     UpdateProjectListHud(g_projectListHud, entries, style);
 }
 
@@ -260,27 +264,49 @@ static int RandomColorOffset(size_t n) {
     return rand() % (int)n;
 }
 
+// offset/roundRobin used to be locals `static` inside AllocateColorIndex --
+// hoisted to file scope (same effective lifetime/visibility) so
+// PeekNextColorIndex below can read them too, without duplicating or
+// disturbing AllocateColorIndex's own cursor.
+static int g_colorOffset = -1;
+static int g_colorRoundRobin = 0;
+
 static int AllocateColorIndex() {
     size_t n = g_config.palette.size();
     if (g_colorInUse.size() != n) g_colorInUse.assign(n, false);
-    static int offset = -1;
-    if (offset < 0) offset = RandomColorOffset(n);
+    if (g_colorOffset < 0) g_colorOffset = RandomColorOffset(n);
 
     for (size_t i = 0; i < n; i++) {
-        size_t idx = (i + (size_t)offset) % n;
+        size_t idx = (i + (size_t)g_colorOffset) % n;
         if (!g_colorInUse[idx]) {
             g_colorInUse[idx] = true;
             return (int)idx;
         }
     }
-    static int roundRobin = 0;
-    int idx = (roundRobin + offset) % (int)n;
-    roundRobin++;
+    int idx = (g_colorRoundRobin + g_colorOffset) % (int)n;
+    g_colorRoundRobin++;
     return idx;
 }
 
 static void FreeColorIndex(int idx) {
     if (idx >= 0 && idx < (int)g_colorInUse.size()) g_colorInUse[idx] = false;
+}
+
+// Peeks whichever color AllocateColorIndex would hand out to the *next*
+// tracked window, without reserving it or advancing the round-robin cursor
+// -- used only to color the project list HUD's "+" new-window button so it
+// previews what a window opened via that button would get.
+static int PeekNextColorIndex() {
+    size_t n = g_config.palette.size();
+    if (n == 0) return 0;
+    int offset = g_colorOffset < 0 ? 0 : g_colorOffset;
+    if (g_colorInUse.size() == n) {
+        for (size_t i = 0; i < n; i++) {
+            size_t idx = (i + (size_t)offset) % n;
+            if (!g_colorInUse[idx]) return (int)idx;
+        }
+    }
+    return (g_colorRoundRobin + offset) % (int)n;
 }
 
 // Repositions/resizes/repaints/hides the overlay to match its target's

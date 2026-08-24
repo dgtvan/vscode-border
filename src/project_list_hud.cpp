@@ -2,9 +2,11 @@
 
 #include "label_alias.h"
 #include "layered_rendering.h"
+#include "logger.h"
 #include "monitor_scenario.h"
 #include "project_list_order.h"
 
+#include <shellapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -52,6 +54,11 @@ struct ProjectListHudState {
     COLORREF claudeColorWaiting = RGB(52, 199, 89);
     bool claudeBorderColorAuto = true;
     COLORREF claudeBorderColor = RGB(255, 255, 255);
+    bool showNewWindowButton = false;
+    COLORREF newWindowButtonColor = RGB(0, 0, 0);
+    RECT newWindowButtonRect = {}; // valid only while showNewWindowButton -- see Rebuild*ItemRects. Not
+                                    // part of itemRects/entries: fixed at the end, no drag-reorder. Its
+                                    // "index" for hover/click purposes is the sentinel entries.size().
     int hoverIndex = -1;
     bool trackingMouseLeave = false;
     bool hoverFocusActive = false;
@@ -94,11 +101,18 @@ static int ClampInt(int value, int minValue, int maxValue) {
     return std::max(minValue, std::min(value, maxValue));
 }
 
+// Returns an entry index for a hit within state->itemRects, or the sentinel
+// state->entries.size() for a hit on the fixed new-window button (see
+// newWindowButtonRect's comment), or -1 for no hit.
 static int ProjectListHitTest(const ProjectListHudState* state, int x, int y) {
     if (!state || x < 0 || x >= state->width || y < 0 || y >= state->height) return -1;
     for (size_t i = 0; i < state->itemRects.size(); i++) {
         const RECT& r = state->itemRects[i];
         if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return (int)i;
+    }
+    if (state->showNewWindowButton) {
+        const RECT& r = state->newWindowButtonRect;
+        if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return (int)state->entries.size();
     }
     return -1;
 }
@@ -145,6 +159,11 @@ static void RebuildVerticalItemRects(ProjectListHudState* state) {
         int y = (int)i * (state->rowHeight + kProjectListGap);
         state->itemRects[i] = {0, y, state->width, y + state->rowHeight};
     }
+    if (state->showNewWindowButton) {
+        int size = state->rowHeight;
+        int y = (int)state->entries.size() * (state->rowHeight + kProjectListGap);
+        state->newWindowButtonRect = {0, y, size, y + size};
+    }
 }
 
 // Divides state->width evenly across items, same width for every one
@@ -155,13 +174,22 @@ static void RebuildVerticalItemRects(ProjectListHudState* state) {
 static void RebuildHorizontalItemRects(ProjectListHudState* state) {
     size_t n = state->entries.size();
     state->itemRects.assign(n, RECT{});
-    if (n == 0) return;
 
-    int itemWidth = std::max(1, (state->width - (int)(n - 1) * kProjectListGap) / (int)n);
-    int x = 0;
-    for (size_t i = 0; i < n; i++) {
-        state->itemRects[i] = {x, 0, x + itemWidth, state->rowHeight};
-        x += itemWidth + kProjectListGap;
+    int buttonReserve = state->showNewWindowButton ? (state->rowHeight + kProjectListGap) : 0;
+    int itemsWidth = state->width - buttonReserve;
+
+    if (n > 0) {
+        int itemWidth = std::max(1, (itemsWidth - (int)(n - 1) * kProjectListGap) / (int)n);
+        int x = 0;
+        for (size_t i = 0; i < n; i++) {
+            state->itemRects[i] = {x, 0, x + itemWidth, state->rowHeight};
+            x += itemWidth + kProjectListGap;
+        }
+    }
+
+    if (state->showNewWindowButton) {
+        int size = state->rowHeight;
+        state->newWindowButtonRect = {state->width - size, 0, state->width, size};
     }
 }
 
@@ -222,8 +250,10 @@ static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
         if (state->horizontal) {
             state->manualItemWidth = std::max(1, saved.width);
             size_t n = state->entries.size();
-            state->width = n > 0 ? (int)n * state->manualItemWidth + (int)(n - 1) * kProjectListGap
-                                  : state->manualItemWidth;
+            int buttonReserve = state->showNewWindowButton ? (state->rowHeight + kProjectListGap) : 0;
+            state->width = (n > 0 ? (int)n * state->manualItemWidth + (int)(n - 1) * kProjectListGap
+                                   : state->manualItemWidth) +
+                           buttonReserve;
         } else {
             state->width = std::max(saved.width, kProjectListMinWidth);
         }
@@ -243,6 +273,60 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index) {
 
     if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
     SetForegroundWindow(target);
+}
+
+// Launches a new window of whichever VS Code build the tracked windows
+// belong to (stable vs. Insiders) -- resolved from an already-tracked
+// window's own process image, then delegated to that install's `code`/
+// `code-insiders` CLI shim (bin\*.cmd next to the exe).
+//
+// Passing -n to Code.exe directly does NOT work: the raw exe rejects it
+// ("bad option: -n") and exits immediately -- ShellExecuteW still reports
+// success (the process did launch), which is what made this silently no-op
+// rather than fail loudly. The CLI shim is what actually supports -n: it
+// sets ELECTRON_RUN_AS_NODE=1 and re-invokes Code.exe against its internal
+// cli.js (itself under a version-hash-named subfolder the shim resolves
+// relatively) to forward the request to the already-running instance over
+// IPC. Reusing the shim sidesteps reimplementing (and keeping in sync) that
+// internal path resolution here.
+static void OpenNewVSCodeWindow(const ProjectListHudState* state) {
+    if (!state || state->entries.empty()) return;
+    HWND target = state->entries[0].target;
+    if (!target || !IsWindow(target)) return;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(target, &pid);
+    if (!pid) return;
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProcess) return;
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD size = MAX_PATH;
+    bool ok = QueryFullProcessImageNameW(hProcess, 0, exePath, &size) != 0;
+    CloseHandle(hProcess);
+    if (!ok) return;
+
+    std::wstring installDir(exePath);
+    size_t slash = installDir.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return;
+    installDir.resize(slash);
+
+    std::wstring searchPattern = installDir + L"\\bin\\*.cmd";
+    WIN32_FIND_DATAW findData = {};
+    HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        Log(L"new-window button: no CLI shim (bin\\*.cmd) found under %ls", installDir.c_str());
+        return;
+    }
+    std::wstring cmdPath = installDir + L"\\bin\\" + findData.cFileName;
+    FindClose(hFind);
+
+    // SW_HIDE so the shim's own cmd.exe console doesn't flash on screen --
+    // it only forwards the request to the already-running instance over IPC
+    // and exits almost immediately either way.
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", cmdPath.c_str(), L"-n", nullptr, SW_HIDE);
+    if ((INT_PTR)result <= 32) {
+        Log(L"ShellExecuteW(open new vscode window via %ls) failed, code=%Id", cmdPath.c_str(), (INT_PTR)result);
+    }
 }
 
 static void EndProjectListHoverFocus(ProjectListHudState* state, bool restorePrevious) {
@@ -524,8 +608,10 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     // of a single drag) -- this, not state->width, is what
                     // gets remembered on WM_LBUTTONUP.
                     size_t n = state->entries.size();
+                    int buttonReserve = state->showNewWindowButton ? (state->rowHeight + kProjectListGap) : 0;
                     state->manualItemWidth =
-                        n > 0 ? std::max(1, (newWidth - (int)(n - 1) * kProjectListGap) / (int)n) : newWidth;
+                        n > 0 ? std::max(1, (newWidth - buttonReserve - (int)(n - 1) * kProjectListGap) / (int)n)
+                              : newWidth;
                 }
                 if (sizeChanged) {
                     if (state->horizontal) RebuildHorizontalItemRects(state);
@@ -570,8 +656,14 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 SetCapture(hwnd);
                 SetCursor(LoadCursorW(nullptr, state->dragMode == ProjectListHudState::DragMove ? IDC_SIZEALL : IDC_SIZEWE));
             } else if (state) {
+                // The new-window button (hit-tested as the sentinel index
+                // entries.size(), see ProjectListHitTest) is deliberately
+                // excluded here: it's fixed at the end and never
+                // reorder-draggable, so it needs no pending-drag tracking --
+                // its click is handled entirely on WM_LBUTTONUP via
+                // hoverIndex, same as a plain item click.
                 int index = ProjectListHitTest(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-                if (index >= 0) {
+                if (index >= 0 && index < (int)state->entries.size()) {
                     state->pendingDragIndex = index;
                     GetCursorPos(&state->dragStart);
                 }
@@ -590,12 +682,16 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (state && state->hoverIndex >= 0 && state->hoverIndex < (int)state->entries.size()) {
                 ActivateProjectListItem(state, state->hoverIndex);
                 EndProjectListHoverFocus(state, false);
+            } else if (state && state->showNewWindowButton && state->hoverIndex == (int)state->entries.size()) {
+                OpenNewVSCodeWindow(state);
             }
             return 0;
         case WM_RBUTTONUP:
             if (state) {
+                // Excludes the new-window button (sentinel index
+                // entries.size()) -- it has no alias to set.
                 int index = ProjectListHitTest(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-                if (index >= 0) {
+                if (index >= 0 && index < (int)state->entries.size()) {
                     POINT screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
                     ClientToScreen(hwnd, &screenPt);
                     ShowItemContextMenu(hwnd, state, index, screenPt);
@@ -862,6 +958,45 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
     }
 }
 
+// Draws the fixed new-window button: same chip fill / highlight-brighten /
+// opacity treatment as DrawHudItem, but a centered "+" glyph instead of a
+// left-aligned label, and no AI status indicator.
+static void DrawNewWindowButton(HDC screenDC, UINT32* pixels, int width, int height, const RECT& item,
+                                COLORREF color, bool highlighted, int opacity, HFONT font, HFONT hoverFont,
+                                bool labelTextColorAuto, COLORREF labelTextColor) {
+    BYTE r = GetRValue(color), g = GetGValue(color), b = GetBValue(color);
+    if (highlighted) {
+        r = (BYTE)std::min(255, (int)r + 32);
+        g = (BYTE)std::min(255, (int)g + 32);
+        b = (BYTE)std::min(255, (int)b + 32);
+    }
+    COLORREF chipColor = RGB(r, g, b);
+    UINT32 chipPx = (UINT32(255) << 24) | (UINT32(r) << 16) | (UINT32(g) << 8) | UINT32(b);
+
+    int rowStart = std::max((int)item.top, 0), rowEnd = std::min((int)item.bottom, height);
+    int colStart = std::max((int)item.left, 0), colEnd = std::min((int)item.right, width);
+    for (int row = rowStart; row < rowEnd; row++) {
+        for (int col = colStart; col < colEnd; col++) pixels[row * width + col] = chipPx;
+    }
+
+    COLORREF tx = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
+    BlendTextIntoPixels(screenDC, pixels, width, height, item.left, item.top, item.right - item.left,
+                        item.bottom - item.top, L"+", highlighted ? hoverFont : font, chipColor, tx,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    BYTE alpha = (BYTE)opacity;
+    for (int row = rowStart; row < rowEnd; row++) {
+        for (int col = colStart; col < colEnd; col++) {
+            UINT32 px = pixels[row * width + col];
+            BYTE pxR = (BYTE)((px >> 16) & 0xFF);
+            BYTE pxG = (BYTE)((px >> 8) & 0xFF);
+            BYTE pxB = (BYTE)(px & 0xFF);
+            pixels[row * width + col] = (UINT32(alpha) << 24) | (UINT32((pxR * alpha) / 255) << 16) |
+                                        (UINT32((pxG * alpha) / 255) << 8) | UINT32((pxB * alpha) / 255);
+        }
+    }
+}
+
 static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
     if (!state || state->width <= 0 || state->height <= 0 || state->entries.empty()) return;
 
@@ -908,6 +1043,14 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
                     highlighted, opacity, state->labelTextColorAuto, state->labelTextColor, font, hoverFont,
                     state->claudeColorWorking, state->claudeColorAttention, state->claudeColorWaiting,
                     state->claudeBorderColorAuto, state->claudeBorderColor);
+    }
+
+    if (state->showNewWindowButton) {
+        bool highlighted = state->hoverIndex == (int)state->entries.size();
+        int opacity = highlighted ? state->hoverOpacity : state->normalOpacity;
+        DrawNewWindowButton(screenDC, pixels, width, height, state->newWindowButtonRect,
+                            state->newWindowButtonColor, highlighted, opacity, font, hoverFont,
+                            state->labelTextColorAuto, state->labelTextColor);
     }
 
     DeleteObject(font);
@@ -1112,6 +1255,9 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
         state->manualItemWidth = 0;
     }
     state->horizontal = style.horizontal;
+    state->showNewWindowButton = style.showNewWindowButton;
+    state->newWindowButtonColor = style.newWindowButtonColor;
+    int buttonReserve = state->showNewWindowButton ? (rowHeight + kProjectListGap) : 0;
     int totalHeight;
 
     if (style.horizontal) {
@@ -1122,10 +1268,11 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
         // state->width happened to be -- state->width is a function of both
         // that and the current entry count, so re-deriving it here is what
         // keeps every item the same width no matter how many windows are
-        // currently tracked.
+        // currently tracked. The new-window button, when shown, gets a
+        // fixed square slot on top of that (see RebuildHorizontalItemRects).
         int itemWidth = !state->manualWidth ? MeasureRequiredWidth(sorted, style.fontSize)
                                              : std::max(1, state->manualItemWidth);
-        state->width = (int)sorted.size() * itemWidth + (int)(sorted.size() - 1) * kProjectListGap;
+        state->width = (int)sorted.size() * itemWidth + (int)(sorted.size() - 1) * kProjectListGap + buttonReserve;
         RebuildHorizontalItemRects(state);
         totalHeight = rowHeight;
     } else {
@@ -1135,7 +1282,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
             state->width = std::max(state->width, kProjectListMinWidth);
         }
         RebuildVerticalItemRects(state);
-        totalHeight = (int)sorted.size() * rowHeight + ((int)sorted.size() - 1) * kProjectListGap;
+        totalHeight = (int)sorted.size() * rowHeight + ((int)sorted.size() - 1) * kProjectListGap + buttonReserve;
     }
     state->height = totalHeight;
 
@@ -1158,7 +1305,11 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     state->hoverOpacity = ClampInt(style.hoverOpacity, 0, 255);
     state->activateOnHover = style.activateOnHover;
     if (!state->activateOnHover) EndProjectListHoverFocus(state, true);
-    if (state->hoverIndex >= (int)sorted.size()) state->hoverIndex = -1;
+    // The button's hover "index" is the sentinel sorted.size() (see
+    // ProjectListHitTest) -- one past the last valid entry index, not out of
+    // range, when it's shown.
+    int maxHoverIndex = (int)sorted.size() - 1 + (state->showNewWindowButton ? 1 : 0);
+    if (state->hoverIndex > maxHoverIndex) state->hoverIndex = -1;
 
     // Both the Working ring spinner and the Attention pulse need a repaint
     // every kClaudePulseIntervalMs to actually animate, but only while
