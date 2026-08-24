@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cwctype>
 #include <set>
 #include <vector>
 
@@ -157,17 +158,22 @@ std::wstring GetProjectsDir() {
 }
 
 // Claude Code names each project's transcript directory after that
-// project's absolute path, with ':' and '\' (and '/', just in case) turned
-// into '-' and the drive letter lowercased -- confirmed against real
-// directories on disk, e.g. D:\Src\Personal\vscode-border became
-// d--Src-Personal-vscode-border (the colon and the leading backslash each
-// become their own '-', which is why there are two in a row right after
-// the drive letter).
+// project's absolute path, with every non-alphanumeric character (':',
+// '\', '/', '.', ' ', an already-literal '-', etc.) turned into its own
+// '-' -- not collapsed, so a run of several non-alphanumeric characters in
+// the original path becomes the same number of consecutive '-' -- and the
+// drive letter lowercased. Confirmed against real directories on disk:
+// D:\Src\Personal\vscode-border became d--Src-Personal-vscode-border (the
+// colon and the leading backslash each become their own '-'), and a
+// worktree path with a literal '.' in it
+// (...\ciam-app-terraform.worktrees\...) became
+// ...-ciam-app-terraform-worktrees-... -- the '.' isn't special-cased,
+// it's just another non-alphanumeric character.
 std::wstring EncodeProjectDirName(const std::wstring& cwd) {
     std::wstring encoded = cwd;
     if (!encoded.empty()) encoded[0] = towlower(encoded[0]);
     for (wchar_t& c : encoded) {
-        if (c == L':' || c == L'\\' || c == L'/') c = L'-';
+        if (!iswalnum(c)) c = L'-';
     }
     return encoded;
 }
@@ -190,6 +196,41 @@ bool IsNewerByMargin(const FILETIME& newer, const FILETIME& older, DWORD marginS
     return (a.QuadPart - b.QuadPart) > (ULONGLONG)marginSeconds * 10000000ULL;
 }
 
+std::wstring GetTranscriptPath(const std::wstring& cwd, const std::wstring& sessionId) {
+    std::wstring projectsDir = GetProjectsDir();
+    if (projectsDir.empty()) return L"";
+    return projectsDir + L"\\" + EncodeProjectDirName(cwd) + L"\\" + sessionId + L".jsonl";
+}
+
+// Reads only the last `maxBytes` of a file, not the whole thing --
+// transcripts grow to multiple MB over a long session, and this runs on
+// every rescan, so re-reading the entire file each time just to look at
+// its last line would mean repeatedly re-reading megabytes for no reason.
+std::string ReadFileTail(const std::wstring& path, DWORD maxBytes) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return "";
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(h, &size)) {
+        CloseHandle(h);
+        return "";
+    }
+    LARGE_INTEGER offset;
+    offset.QuadPart = (size.QuadPart > (LONGLONG)maxBytes) ? size.QuadPart - maxBytes : 0;
+    if (!SetFilePointerEx(h, offset, nullptr, FILE_BEGIN)) {
+        CloseHandle(h);
+        return "";
+    }
+    DWORD toRead = (DWORD)std::min<LONGLONG>(maxBytes, size.QuadPart);
+    std::string buf(toRead, '\0');
+    DWORD bytesRead = 0;
+    bool ok = toRead == 0 || ReadFile(h, &buf[0], toRead, &bytesRead, nullptr) != 0;
+    CloseHandle(h);
+    if (!ok) return "";
+    buf.resize(bytesRead);
+    return buf;
+}
+
 // Cross-checks a status snapshot against independent evidence: Claude
 // Code's own transcript file for that session (see EncodeProjectDirName)
 // gets a new line appended for every message and tool call, regardless of
@@ -207,12 +248,44 @@ bool IsNewerByMargin(const FILETIME& newer, const FILETIME& older, DWORD marginS
 // whole 14 minutes, this check would have correctly shown the transcript
 // was still moving, well past this margin.
 bool HasNewerTranscriptActivity(const std::wstring& cwd, const std::wstring& sessionId, const FILETIME& sinceFt) {
-    std::wstring projectsDir = GetProjectsDir();
-    if (projectsDir.empty()) return false;
-    std::wstring transcriptPath = projectsDir + L"\\" + EncodeProjectDirName(cwd) + L"\\" + sessionId + L".jsonl";
+    std::wstring transcriptPath = GetTranscriptPath(cwd, sessionId);
+    if (transcriptPath.empty()) return false;
     WIN32_FILE_ATTRIBUTE_DATA data;
     if (!GetFileAttributesExW(transcriptPath.c_str(), GetFileExInfoStandard, &data)) return false;
     return IsNewerByMargin(data.ftLastWriteTime, sinceFt, kTranscriptActivityMarginSeconds);
+}
+
+// The literal marker Claude Code appends to the transcript, as a plain
+// user-role message, the moment the user interrupts a turn (Escape/Ctrl+C
+// mid-response) -- confirmed against a real interrupted session's
+// transcript. There's no hook for this at all (Stop does not fire on a
+// manual interrupt -- confirmed by the same real case: the last hook this
+// session ever fired was the UserPromptSubmit that started the turn, over
+// 20 minutes before this was written), so this is the only signal telling
+// us the turn actually ended.
+const char* kInterruptedMarker = "[Request interrupted by user]";
+
+// True if the transcript's last entry is that marker -- meaning nothing
+// has happened in this session since the interrupt, i.e. the turn that was
+// reported "working" is actually over. Deliberately checks only the very
+// last line (not "does this marker appear anywhere"), since an old
+// interrupt earlier in a long session that Claude has since resumed work
+// past is not still-relevant information.
+bool WasLastTranscriptEntryInterrupted(const std::wstring& cwd, const std::wstring& sessionId) {
+    std::wstring transcriptPath = GetTranscriptPath(cwd, sessionId);
+    if (transcriptPath.empty()) return false;
+    std::string tail = ReadFileTail(transcriptPath, 8192);
+    if (tail.empty()) return false;
+
+    // The read may start mid-line, and the file may end with a trailing
+    // newline -- walk back to the last non-blank line within the tail.
+    size_t end = tail.find_last_not_of("\r\n");
+    if (end == std::string::npos) return false;
+    size_t start = tail.find_last_of('\n', end);
+    start = (start == std::string::npos) ? 0 : start + 1;
+    std::string lastLine = tail.substr(start, end - start + 1);
+
+    return lastLine.find(kInterruptedMarker) != std::string::npos;
 }
 
 struct HooksLocation {
@@ -435,21 +508,31 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
         }
 
         // The hook-reported status can be stale in ways that have no hook
-        // to correct them -- most notably "attention": there's no
-        // "permission granted, resuming" event, so once a permission
-        // prompt fires, nothing updates the status again until the turn's
-        // eventual Stop, even though the user may have long since answered
-        // it and Claude gone back to work. Cross-checking against the
-        // session's own transcript file (see HasNewerTranscriptActivity)
-        // catches that with real evidence instead of a wall-clock guess:
-        // only "working" is missing from this check because it's already
-        // the most active state there is -- nothing to correct it toward.
-        if (status.status != L"working" &&
-            HasNewerTranscriptActivity(status.cwd, fileName.substr(0, fileName.size() - 4), fd.ftLastWriteTime)) {
+        // to correct them. Cross-checking against the session's own
+        // transcript file (see GetTranscriptPath and friends) catches both
+        // directions with real evidence instead of a wall-clock guess:
+        std::wstring sessionId = fileName.substr(0, fileName.size() - 4); // strip ".ini"
+        if (status.status != L"working" && HasNewerTranscriptActivity(status.cwd, sessionId, fd.ftLastWriteTime)) {
+            // "Attention" (or "Waiting"): there's no "permission granted,
+            // resuming" event, so once a permission prompt fires, nothing
+            // updates the status again until the turn's eventual Stop,
+            // even though the user may have long since answered it and
+            // Claude gone back to work.
             Log(L"claude_provider: %ls's transcript has newer activity than its last %ls snapshot -- correcting to "
                 L"working",
                 fileName.c_str(), status.status.c_str());
             status.status = L"working";
+        } else if (status.status == L"working" && WasLastTranscriptEntryInterrupted(status.cwd, sessionId)) {
+            // "Working": Stop does not fire on a manual interrupt
+            // (Escape/Ctrl+C mid-response) -- confirmed against a real
+            // session that stayed reported as "working" over 20 minutes
+            // after the user interrupted it, with no further hook ever
+            // firing. The transcript's own interrupt marker is the only
+            // signal that the turn actually ended.
+            Log(L"claude_provider: %ls's transcript shows the turn was interrupted by the user -- correcting to "
+                L"waiting",
+                fileName.c_str());
+            status.status = L"waiting";
         }
 
         result.push_back(status);
