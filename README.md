@@ -178,6 +178,24 @@ be found (e.g. a future Claude Code version changes this layout) -- the
 status just stays as last reported by the hooks, same as before this
 existed.
 
+**Working** has the opposite gap: `Stop` does not fire when the user
+manually interrupts a turn (Escape/Ctrl+C mid-response), confirmed against
+a real session that stayed reported as "Working" for over 20 minutes after
+being interrupted, with no hook ever firing again. Rather than another
+timeout, this uses an even more direct piece of evidence: Claude Code
+appends a literal `[Request interrupted by user]` marker to the transcript
+the moment an interrupt happens. If a session's status is "Working" and the
+transcript's very last entry is that exact marker (meaning nothing has
+happened since), it's corrected to "Waiting" -- an interrupted turn is over,
+same as a normal one.
+
+The transcript directory name is derived from the project's absolute path:
+every non-alphanumeric character (`:`, `\`, `.`, a space, an already-literal
+`-`, etc.) becomes its own `-`, not collapsed -- confirmed against real
+directories on disk, including a worktree path with a literal `.` in it
+(`...\repo.worktrees\...` became `...-repo-worktrees-...`, the `.` isn't
+special-cased).
+
 If a window has more than one session running (e.g. several terminals),
 the indicator reflects the aggregate, in that priority order: Attention
 beats Working beats Waiting.
