@@ -1,5 +1,6 @@
 #include "project_list_hud.h"
 
+#include "favourites.h"
 #include "label_alias.h"
 #include "layered_rendering.h"
 #include "logger.h"
@@ -275,10 +276,10 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index) {
     SetForegroundWindow(target);
 }
 
-// Launches a new window of whichever VS Code build the tracked windows
-// belong to (stable vs. Insiders) -- resolved from an already-tracked
-// window's own process image, then delegated to that install's `code`/
-// `code-insiders` CLI shim (bin\*.cmd next to the exe).
+// Resolves whichever VS Code build the tracked windows belong to (stable
+// vs. Insiders) -- from an already-tracked window's own process image -- to
+// that install's `code`/`code-insiders` CLI shim (bin\*.cmd next to the
+// exe). Shared by OpenNewVSCodeWindow and OpenFavouriteProject below.
 //
 // Passing -n to Code.exe directly does NOT work: the raw exe rejects it
 // ("bad option: -n") and exits immediately -- ShellExecuteW still reports
@@ -289,36 +290,44 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index) {
 // relatively) to forward the request to the already-running instance over
 // IPC. Reusing the shim sidesteps reimplementing (and keeping in sync) that
 // internal path resolution here.
-static void OpenNewVSCodeWindow(const ProjectListHudState* state) {
-    if (!state || state->entries.empty()) return;
+static bool ResolveVSCodeCliShim(const ProjectListHudState* state, std::wstring& outCmdPath) {
+    if (!state || state->entries.empty()) return false;
     HWND target = state->entries[0].target;
-    if (!target || !IsWindow(target)) return;
+    if (!target || !IsWindow(target)) return false;
 
     DWORD pid = 0;
     GetWindowThreadProcessId(target, &pid);
-    if (!pid) return;
+    if (!pid) return false;
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!hProcess) return;
+    if (!hProcess) return false;
     wchar_t exePath[MAX_PATH] = {};
     DWORD size = MAX_PATH;
     bool ok = QueryFullProcessImageNameW(hProcess, 0, exePath, &size) != 0;
     CloseHandle(hProcess);
-    if (!ok) return;
+    if (!ok) return false;
 
     std::wstring installDir(exePath);
     size_t slash = installDir.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) return;
+    if (slash == std::wstring::npos) return false;
     installDir.resize(slash);
 
     std::wstring searchPattern = installDir + L"\\bin\\*.cmd";
     WIN32_FIND_DATAW findData = {};
     HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &findData);
     if (hFind == INVALID_HANDLE_VALUE) {
-        Log(L"new-window button: no CLI shim (bin\\*.cmd) found under %ls", installDir.c_str());
-        return;
+        Log(L"vscode CLI shim: none found (bin\\*.cmd) under %ls", installDir.c_str());
+        return false;
     }
-    std::wstring cmdPath = installDir + L"\\bin\\" + findData.cFileName;
+    outCmdPath = installDir + L"\\bin\\" + findData.cFileName;
     FindClose(hFind);
+    return true;
+}
+
+// Launches a brand-new, empty VS Code window -- the project list HUD's "+"
+// button.
+static void OpenNewVSCodeWindow(const ProjectListHudState* state) {
+    std::wstring cmdPath;
+    if (!ResolveVSCodeCliShim(state, cmdPath)) return;
 
     // SW_HIDE so the shim's own cmd.exe console doesn't flash on screen --
     // it only forwards the request to the already-running instance over IPC
@@ -326,6 +335,21 @@ static void OpenNewVSCodeWindow(const ProjectListHudState* state) {
     HINSTANCE result = ShellExecuteW(nullptr, L"open", cmdPath.c_str(), L"-n", nullptr, SW_HIDE);
     if ((INT_PTR)result <= 32) {
         Log(L"ShellExecuteW(open new vscode window via %ls) failed, code=%Id", cmdPath.c_str(), (INT_PTR)result);
+    }
+}
+
+// Opens `path` as a folder in a brand-new VS Code window -- same CLI shim
+// as OpenNewVSCodeWindow, just with the favourite's path forwarded as the
+// folder to open (quoted, since it may contain spaces).
+static void OpenFavouriteProject(const ProjectListHudState* state, const std::wstring& path) {
+    std::wstring cmdPath;
+    if (!ResolveVSCodeCliShim(state, cmdPath)) return;
+
+    std::wstring args = L"-n \"" + path + L"\"";
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", cmdPath.c_str(), args.c_str(), nullptr, SW_HIDE);
+    if ((INT_PTR)result <= 32) {
+        Log(L"ShellExecuteW(open favourite [%ls] via %ls) failed, code=%Id", path.c_str(), cmdPath.c_str(),
+            (INT_PTR)result);
     }
 }
 
@@ -457,6 +481,18 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     bool hasAlias = index >= 0 && index < (int)state->entries.size() &&
                     state->entries[index].label != state->entries[index].rawLabel;
     if (hasAlias) AppendMenuW(menu, MF_STRING, 2, L"Reset Alias");
+
+    // No path means VS Code hasn't recorded this window's folder in its own
+    // workspaceStorage (e.g. a multi-root workspace) -- nothing a favourite
+    // could reopen later, so the option is left off entirely rather than
+    // shown disabled. Once a folder IS already a favourite, this menu has
+    // nothing further to offer it either -- removal lives solely on the
+    // "+" button's own menu (see ShowNewWindowButtonContextMenu), so there's
+    // exactly one place a favourite can be removed from.
+    bool hasPath = index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
+    bool alreadyFav = hasPath && IsFavourite(state->entries[index].path);
+    if (hasPath && !alreadyFav) AppendMenuW(menu, MF_STRING, 3, L"Add to Favourites");
+
     SetForegroundWindow(hud); // required so the menu dismisses correctly on an outside click
     // Deliberately no TPM_RIGHTBUTTON: that flag restricts item *selection*
     // to the right mouse button, but the universal convention (and the only
@@ -468,6 +504,53 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     DestroyMenu(menu);
     if (cmd == 1) BeginAliasEdit(hud, state, index);
     else if (cmd == 2) ResetAlias(hud, state, index);
+    else if (cmd == 3) {
+        const ProjectListHudEntry& entry = state->entries[index];
+        AddFavourite(entry.label, entry.path);
+    }
+}
+
+// Right-click on the fixed "+" new-window button: lists saved favourite
+// projects (see favourites.h), each as its own submenu -- hovering a
+// favourite's name expands it to "Open in New Window" (the default/bolded
+// action, see OpenFavouriteProject) and "Remove from Favourites". A plain
+// Win32 popup menu item can't both carry its own click action and expand a
+// submenu on hover, so nesting "open" one level down (rather than a bare
+// top-level click) is what buys room for "remove" to live right next to it,
+// without a separate top-level "Remove Favourite" list to keep in sync
+// with this one.
+static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
+    std::vector<FavouriteProject> favourites = LoadFavourites();
+
+    HMENU menu = CreatePopupMenu();
+    if (favourites.empty()) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"(No Favourites)");
+    } else {
+        // Command ids per favourite i: open = 1 + i*2, remove = 2 + i*2 --
+        // decoded back on return below.
+        for (size_t i = 0; i < favourites.size(); i++) {
+            UINT openId = (UINT)(1 + i * 2);
+            UINT removeId = (UINT)(2 + i * 2);
+            HMENU sub = CreatePopupMenu();
+            AppendMenuW(sub, MF_STRING, openId, L"Open in New Window");
+            AppendMenuW(sub, MF_STRING, removeId, L"Remove from Favourites");
+            SetMenuDefaultItem(sub, openId, FALSE);
+            AppendMenuW(menu, MF_POPUP, (UINT_PTR)sub, favourites[i].label.c_str());
+        }
+    }
+
+    SetForegroundWindow(hud);
+    state->contextMenuOpen = true; // see UpdateProjectListHud's guard
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
+    state->contextMenuOpen = false;
+    DestroyMenu(menu); // recursively destroys the per-favourite submenus too
+
+    if (cmd <= 0) return;
+    size_t i = (size_t)(cmd - 1) / 2;
+    bool isOpen = (cmd - 1) % 2 == 0;
+    if (i >= favourites.size()) return;
+    if (isOpen) OpenFavouriteProject(state, favourites[i].path);
+    else RemoveFavourite(favourites[i].path);
 }
 
 // Shared cleanup for ending a DragReorder, called both from a real
@@ -688,13 +771,18 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             return 0;
         case WM_RBUTTONUP:
             if (state) {
-                // Excludes the new-window button (sentinel index
-                // entries.size()) -- it has no alias to set.
                 int index = ProjectListHitTest(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
                 if (index >= 0 && index < (int)state->entries.size()) {
                     POINT screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
                     ClientToScreen(hwnd, &screenPt);
                     ShowItemContextMenu(hwnd, state, index, screenPt);
+                } else if (state->showNewWindowButton && index == (int)state->entries.size()) {
+                    // The new-window button (sentinel index entries.size(),
+                    // see ProjectListHitTest) has no alias to set -- its own
+                    // right-click menu is the favourites list instead.
+                    POINT screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                    ClientToScreen(hwnd, &screenPt);
+                    ShowNewWindowButtonContextMenu(hwnd, state, screenPt);
                 }
             }
             return 0;

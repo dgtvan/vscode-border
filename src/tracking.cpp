@@ -173,6 +173,7 @@ static void SyncProjectListHud() {
         entry.windowRect = rect;
         entry.label = kv.second.label;
         entry.rawLabel = kv.second.rawLabel;
+        entry.path = kv.second.folderName.empty() ? L"" : ResolveFolderPath(kv.second.folderName);
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
         entries.push_back(entry);
