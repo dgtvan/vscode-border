@@ -569,6 +569,7 @@ static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state,
             UINT removeId = (UINT)(2 + i * 2);
             HMENU sub = CreatePopupMenu();
             AppendMenuW(sub, MF_STRING, openId, L"Open in New Window");
+            AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(sub, MF_STRING, removeId, L"Remove from Favourites");
             SetMenuDefaultItem(sub, openId, FALSE);
             AppendMenuW(menu, MF_POPUP, (UINT_PTR)sub, favourites[i].label.c_str());
