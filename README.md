@@ -81,7 +81,7 @@ first build):
 | `colors` | Comma-separated `RRGGBB` hex colors, assigned round-robin to windows. |
 | `show_label` | Show the folder/repo name as a label chip inside the border's top-left corner (`true`/`false`). |
 | `show_project_list` | Show an interactive project list HUD at the bottom-right of the desktop, using the same labels/colors as the border chips; includes minimized windows so it doubles as a restore list (`true`/`false`). |
-| `project_list_style` | Project list HUD layout: `horizontal` (single strip, all items share one width) or `vertical` (stacked list, shared column width). Both are resizable by Ctrl+left-click-dragging either edge and movable by Ctrl+left-click-dragging the middle; a plain right-click opens a context menu (currently just **Set Alias**). Default `horizontal`. |
+| `project_list_style` | Project list HUD layout: `horizontal` (single strip, all items share one width) or `vertical` (stacked list, shared column width). Both are resizable by Ctrl+left-click-dragging either edge and movable by Ctrl+left-click-dragging the middle; a plain right-click opens a context menu (**Set Alias**, and **Add to Favourites** -- see below). Default `horizontal`. |
 | `project_list_order` | Item order: `auto` (sorted by window left edge) or `manual` (drag items with a plain left-click to arrange them yourself -- see below). Default `auto`. |
 | `project_list_opacity_normal` | Project list HUD opacity when no item is hovered: 0 (invisible) - 255 (fully opaque). |
 | `project_list_opacity_hover` | Project list HUD opacity for the currently hovered item: 0 (invisible) - 255 (fully opaque). |
@@ -126,6 +126,26 @@ the label's exact text, so if two windows ever happen to produce the
 identical label, aliasing one aliases both. Stored in `label_aliases.ini`
 next to `config.ini`, and re-read on **Reload Config** as well as at
 startup.
+
+### Project list HUD favourites
+
+The fixed "+" square at the end of the project list HUD opens a brand-new,
+empty VS Code window on a plain click. Right-clicking it instead opens a
+menu of saved favourite projects/folders, one submenu per favourite --
+hover a favourite's name to expand it to **Open in New Window** (bolded as
+the default action) and **Remove from Favourites**.
+
+To add a favourite, right-click any regular item (or its border label
+chip) and choose **Add to Favourites** -- this saves the window's currently
+open folder (resolved to a real absolute path via the same workspaceStorage
+lookup the AI status indicator and worktree name substitution use, so it
+only works for a folder VS Code has actually recorded there; a multi-root
+workspace, for instance, isn't covered, and the menu item is left off
+entirely when there's nothing to save, or when that folder is already a
+favourite). Removal only happens from the "+" button's own menu -- there's
+no "Remove from Favourites" on a regular item, so there's exactly one place
+to do it. Favourites are matched by folder path, not label text, and stored
+in `favourites.ini` next to `config.ini`.
 
 ### AI status indicator
 
@@ -357,6 +377,8 @@ to pick up worktrees created after the app started.
 - `src/label_alias.*` -- persists/recalls user-set label aliases (see "Project list HUD aliases" above).
 - `src/project_list_order.*` -- persists/recalls the manually-dragged item order (see "Project list HUD
   manual ordering" above).
+- `src/favourites.*` -- persists/recalls the "+" button's favourite projects list (see "Project list HUD
+  favourites" above).
 - `src/ai_provider.h` -- abstract interface an AI coding assistant integration implements (install/remove its
   config, read back its reported status, manual clear) -- see "AI status indicator" above.
 - `src/claude_provider.*` -- Claude Code's `AiProvider` implementation: installs/removes its hook

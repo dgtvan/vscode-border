@@ -19,6 +19,10 @@ struct ProjectListHudEntry {
     RECT windowRect = {}; // target's on-screen bounds -- used to order entries to match window layout
     std::wstring label;    // display text (an alias, if the user set one for rawLabel -- see label_alias.h)
     std::wstring rawLabel; // the un-aliased label, i.e. the alias map's key
+    std::wstring path;     // absolute folder path this window has open, resolved via worktree_resolver's
+                            // ResolveFolderPath -- empty if VS Code hasn't recorded it (e.g. a plain
+                            // folder it's never logged to workspaceStorage, or a multi-root workspace).
+                            // Used only for the "Add to Favourites" context-menu action -- see favourites.h.
     COLORREF color = RGB(0, 0, 0);
     ClaudeStatus claudeStatus = ClaudeStatus::None;
 };
