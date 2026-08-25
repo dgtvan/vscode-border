@@ -519,8 +519,11 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     // for a favourite that isn't currently open as a hub item.
     bool hasPath = index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
     bool alreadyFav = hasPath && IsFavourite(state->entries[index].path);
-    if (hasPath && !alreadyFav) AppendMenuW(menu, MF_STRING, 3, L"Add to Favourites");
-    else if (hasPath && alreadyFav) AppendMenuW(menu, MF_STRING, 4, L"Remove from Favourites");
+    if (hasPath) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr); // divides the alias group above from the favourites
+                                                       // group below
+        AppendMenuW(menu, MF_STRING, alreadyFav ? 4 : 3, alreadyFav ? L"Remove from Favourites" : L"Add to Favourites");
+    }
 
     SetForegroundWindow(hud); // required so the menu dismisses correctly on an outside click
     // Deliberately no TPM_RIGHTBUTTON: that flag restricts item *selection*
