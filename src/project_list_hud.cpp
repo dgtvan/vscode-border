@@ -140,6 +140,34 @@ static int ProjectListDragCandidate(const ProjectListHudState* state, int x, int
     return (int)state->itemRects.size() - 1;
 }
 
+// True if `entry` is a saved favourite (see favourites.h) -- entries always
+// end up favourites-first (see PinFavouritesToFront), so hover/drag logic
+// elsewhere locates the boundary via FavouriteZoneCount rather than calling
+// this per item.
+static bool EntryIsFavourite(const ProjectListHudEntry& entry) {
+    return !entry.path.empty() && IsFavourite(entry.path);
+}
+
+// Moves every favourite entry ahead of every non-favourite one, preserving
+// relative order within each group (i.e. whatever ApplyManualOrder/the
+// window-position sort already produced) -- applied unconditionally,
+// regardless of style.manualOrder, so favourites stay pinned to the front
+// of the hub item list either way. Drag-and-drop reordering (see
+// FavouriteZoneCount) then confines a dragged item to its own group, so
+// this front-pinning can't be undone by a drag.
+static void PinFavouritesToFront(std::vector<ProjectListHudEntry>& entries) {
+    std::stable_partition(entries.begin(), entries.end(), EntryIsFavourite);
+}
+
+// Count of leading favourite entries in `entries` -- the boundary between
+// the favourites zone and the regular zone. Relies on entries already being
+// favourites-first (see PinFavouritesToFront); state->entries always is.
+static int FavouriteZoneCount(const std::vector<ProjectListHudEntry>& entries) {
+    int count = 0;
+    while (count < (int)entries.size() && EntryIsFavourite(entries[count])) count++;
+    return count;
+}
+
 static bool IsProjectListResizeEdge(const ProjectListHudState* state, int x) {
     return state && state->width > 0 && (x < kProjectListEdgeGrip || x >= state->width - kProjectListEdgeGrip);
 }
@@ -485,13 +513,14 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     // No path means VS Code hasn't recorded this window's folder in its own
     // workspaceStorage (e.g. a multi-root workspace) -- nothing a favourite
     // could reopen later, so the option is left off entirely rather than
-    // shown disabled. Once a folder IS already a favourite, this menu has
-    // nothing further to offer it either -- removal lives solely on the
-    // "+" button's own menu (see ShowNewWindowButtonContextMenu), so there's
-    // exactly one place a favourite can be removed from.
+    // shown disabled. Once a folder IS already a favourite, this toggles to
+    // "Remove from Favourites" instead -- same removal is also still offered
+    // from the "+" button's own menu (see ShowNewWindowButtonContextMenu),
+    // for a favourite that isn't currently open as a hub item.
     bool hasPath = index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
     bool alreadyFav = hasPath && IsFavourite(state->entries[index].path);
     if (hasPath && !alreadyFav) AppendMenuW(menu, MF_STRING, 3, L"Add to Favourites");
+    else if (hasPath && alreadyFav) AppendMenuW(menu, MF_STRING, 4, L"Remove from Favourites");
 
     SetForegroundWindow(hud); // required so the menu dismisses correctly on an outside click
     // Deliberately no TPM_RIGHTBUTTON: that flag restricts item *selection*
@@ -507,6 +536,8 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     else if (cmd == 3) {
         const ProjectListHudEntry& entry = state->entries[index];
         AddFavourite(entry.label, entry.path);
+    } else if (cmd == 4) {
+        RemoveFavourite(state->entries[index].path);
     }
 }
 
@@ -518,7 +549,9 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // submenu on hover, so nesting "open" one level down (rather than a bare
 // top-level click) is what buys room for "remove" to live right next to it,
 // without a separate top-level "Remove Favourite" list to keep in sync
-// with this one.
+// with this one. This is the only way to open (or remove) a favourite that
+// isn't currently open as a hub item -- ShowItemContextMenu's own "Remove
+// from Favourites" only reaches a favourite while it's a live entry.
 static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
     std::vector<FavouriteProject> favourites = LoadFavourites();
 
@@ -634,6 +667,15 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (state->dragMode == ProjectListHudState::DragReorder) {
                 state->reorderCursorClient = {mouseX, mouseY};
                 int candidate = ProjectListDragCandidate(state, mouseX, mouseY);
+                // Confine the drop target to the dragged item's own zone
+                // (favourite vs. regular) so a drag can reorder within
+                // either group but can never cross the boundary -- that's
+                // what keeps favourites pinned to the front (see
+                // PinFavouritesToFront) even while drag-and-drop is live.
+                int favZone = FavouriteZoneCount(state->entries);
+                bool draggedIsFavourite = state->reorderIndex < favZone;
+                candidate = draggedIsFavourite ? std::min(candidate, favZone - 1)
+                                                : std::max(candidate, favZone);
                 if (candidate >= 0 && candidate < (int)state->entries.size() && candidate != state->reorderIndex) {
                     ProjectListHudEntry dragged = state->entries[state->reorderIndex];
                     state->entries.erase(state->entries.begin() + state->reorderIndex);
@@ -916,6 +958,63 @@ HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal) {
     return hwnd;
 }
 
+// Fills a 5-point star, centered at (cx, cy) with the given outer radius,
+// into `pixels` -- rasterized via ray-casting point-in-polygon against the
+// star's 10 vertices (5 outer, 5 inner, alternating), rather than drawn as
+// a text glyph. Raw GDI's Segoe UI -- the exact font/params DrawHudItem
+// uses, via BlendTextIntoPixels's DrawTextW -- has no star glyph at all
+// (verified with GetGlyphIndicesW against U+2605/2606/2B50, all reported
+// missing); DrawTextW doesn't do the Uniscribe-style font-fallback that'd
+// otherwise paper over that, so it would render as a tofu box. Hand
+// rasterizing sidesteps needing any particular font to have the glyph.
+static void FillStar(UINT32* pixels, int width, int height, int cx, int cy, int outerRadius, UINT32 colorPx) {
+    const double kPi = 3.14159265358979323846;
+    double vx[10], vy[10];
+    for (int i = 0; i < 10; i++) {
+        double angle = -kPi / 2 + i * kPi / 5; // vertex 0 points straight up
+        double r = (i % 2 == 0) ? outerRadius : outerRadius * 0.42; // inner points ~42% of outer
+        vx[i] = cx + r * cos(angle);
+        vy[i] = cy + r * sin(angle);
+    }
+    int top = std::max(0, cy - outerRadius), bottom = std::min(height, cy + outerRadius + 1);
+    int left = std::max(0, cx - outerRadius), right = std::min(width, cx + outerRadius + 1);
+    for (int py = top; py < bottom; py++) {
+        double sy = py + 0.5;
+        for (int px = left; px < right; px++) {
+            double sx = px + 0.5;
+            bool inside = false;
+            for (int i = 0, j = 9; i < 10; j = i++) {
+                if (((vy[i] > sy) != (vy[j] > sy)) &&
+                    (sx < (vx[j] - vx[i]) * (sy - vy[i]) / (vy[j] - vy[i]) + vx[i])) {
+                    inside = !inside;
+                }
+            }
+            if (inside) pixels[py * width + px] = colorPx;
+        }
+    }
+}
+
+// Left margin (from item.left) reserved for the favourites star marker,
+// including the gap before the label text -- see DrawFavouriteMarker.
+static const int kFavouriteMarkerLeftPad = 19;
+
+// Draws the favourites star marker at an item's left edge, vertically
+// centered -- a filled gold star with a 1px auto-contrast border (same
+// ContrastTextColor logic as the Claude status indicator's border, since
+// the chip's background color is user-configurable and a fixed fill can
+// end up low-contrast against it otherwise).
+static void DrawFavouriteMarker(UINT32* pixels, int width, int height, const RECT& item, COLORREF chipBaseColor) {
+    const int kMargin = 3, kBorderRadius = 6, kFillRadius = 5;
+    int cx = (int)item.left + kMargin + kBorderRadius;
+    int cy = (int)(item.top + item.bottom) / 2;
+    COLORREF borderColor = ContrastTextColor(chipBaseColor);
+    UINT32 borderPx = (UINT32(255) << 24) | (UINT32(GetRValue(borderColor)) << 16) |
+                      (UINT32(GetGValue(borderColor)) << 8) | UINT32(GetBValue(borderColor));
+    const UINT32 kFillColorPx = (UINT32(255) << 24) | (UINT32(255) << 16) | (UINT32(199) << 8) | UINT32(44); // gold
+    FillStar(pixels, width, height, cx, cy, kBorderRadius, borderPx);
+    FillStar(pixels, width, height, cx, cy, kFillRadius, kFillColorPx);
+}
+
 // Draws one entry's chip (background + label text, alpha-blended by
 // `opacity`) into `pixels` at `item`. `item` may fall partly or entirely
 // outside [0,width)x[0,height) -- used for the floating dragged item
@@ -924,10 +1023,11 @@ HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal) {
 // internally).
 static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int rowHeight,
                         const ProjectListHudEntry& entry, const RECT& item, bool highlighted, int opacity,
-                        bool labelTextColorAuto, COLORREF labelTextColor, HFONT font, HFONT hoverFont,
-                        COLORREF claudeColorWorking, COLORREF claudeColorAttention, COLORREF claudeColorWaiting,
-                        bool claudeBorderColorAuto, COLORREF claudeBorderColor) {
+                        bool isFavourite, bool labelTextColorAuto, COLORREF labelTextColor, HFONT font,
+                        HFONT hoverFont, COLORREF claudeColorWorking, COLORREF claudeColorAttention,
+                        COLORREF claudeColorWaiting, bool claudeBorderColorAuto, COLORREF claudeBorderColor) {
     const int paddingX = 12;
+    int leftTextPad = isFavourite ? kFavouriteMarkerLeftPad : paddingX;
     int itemWidth = item.right - item.left;
     COLORREF color = entry.color;
     BYTE r = GetRValue(color), g = GetGValue(color), b = GetBValue(color);
@@ -945,9 +1045,14 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
         for (int col = colStart; col < colEnd; col++) pixels[row * width + col] = chipPx;
     }
 
+    // Favourites star marker, left edge -- drawn before the opacity pass
+    // below so it fades with the rest of the chip on hover/normal opacity,
+    // same reasoning as the Claude status indicator's placement.
+    if (isFavourite) DrawFavouriteMarker(pixels, width, height, item, color);
+
     COLORREF tx = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
-    BlendTextIntoPixels(screenDC, pixels, width, height, item.left + paddingX, item.top,
-                        itemWidth - paddingX * 2, rowHeight, entry.label, highlighted ? hoverFont : font,
+    BlendTextIntoPixels(screenDC, pixels, width, height, item.left + leftTextPad, item.top,
+                        itemWidth - leftTextPad - paddingX, rowHeight, entry.label, highlighted ? hoverFont : font,
                         chipColor, tx, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Claude Code status indicator, top-right corner -- drawn before the
@@ -1128,9 +1233,9 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
         bool highlighted = (int)i == state->hoverIndex;
         int opacity = highlighted ? state->hoverOpacity : state->normalOpacity;
         DrawHudItem(screenDC, pixels, width, height, rowHeight, state->entries[i], state->itemRects[i],
-                    highlighted, opacity, state->labelTextColorAuto, state->labelTextColor, font, hoverFont,
-                    state->claudeColorWorking, state->claudeColorAttention, state->claudeColorWaiting,
-                    state->claudeBorderColorAuto, state->claudeBorderColor);
+                    highlighted, opacity, EntryIsFavourite(state->entries[i]), state->labelTextColorAuto,
+                    state->labelTextColor, font, hoverFont, state->claudeColorWorking, state->claudeColorAttention,
+                    state->claudeColorWaiting, state->claudeBorderColorAuto, state->claudeBorderColor);
     }
 
     if (state->showNewWindowButton) {
@@ -1228,9 +1333,10 @@ static void PaintDragGhost(ProjectListHudState* state) {
     // Drawn "highlighted" (brightened + bold, like a hovered item) so the
     // item you're actively moving reads as visually active.
     DrawHudItem(screenDC, pixels, itemW, itemH, state->rowHeight, state->entries[state->reorderIndex],
-                localRect, true, state->hoverOpacity, state->labelTextColorAuto, state->labelTextColor, font,
-                hoverFont, state->claudeColorWorking, state->claudeColorAttention, state->claudeColorWaiting,
-                state->claudeBorderColorAuto, state->claudeBorderColor);
+                localRect, true, state->hoverOpacity, EntryIsFavourite(state->entries[state->reorderIndex]),
+                state->labelTextColorAuto, state->labelTextColor, font, hoverFont, state->claudeColorWorking,
+                state->claudeColorAttention, state->claudeColorWaiting, state->claudeBorderColorAuto,
+                state->claudeBorderColor);
     DeleteObject(font);
     DeleteObject(hoverFont);
 
@@ -1273,8 +1379,14 @@ static int MeasureRequiredWidth(const std::vector<ProjectListHudEntry>& entries,
     int width = 0;
     for (const ProjectListHudEntry& entry : entries) {
         SIZE textSz = {0, 0};
+        // A favourite reserves extra room on the left for its star marker
+        // (see kFavouriteMarkerLeftPad vs. the plain paddingX every other
+        // item uses) -- added on top of the usual measure padding so a
+        // favourite's label isn't truncated any more than a non-favourite's
+        // would be at the same text width.
+        int reserve = kProjectListMeasurePaddingX + (EntryIsFavourite(entry) ? (kFavouriteMarkerLeftPad - 12) : 0);
         GetTextExtentPoint32W(screenDC, entry.label.c_str(), (int)entry.label.size(), &textSz);
-        width = std::max(width, (int)textSz.cx + kProjectListMeasurePaddingX);
+        width = std::max(width, (int)textSz.cx + reserve);
     }
     SelectObject(screenDC, oldFont);
     DeleteObject(font);
@@ -1328,6 +1440,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     });
     state->manualOrderMode = style.manualOrder;
     if (style.manualOrder) ApplyManualOrder(sorted, state->manualOrder);
+    PinFavouritesToFront(sorted);
 
     int rowHeight = std::max(18, style.rowHeight);
     state->rowHeight = rowHeight;

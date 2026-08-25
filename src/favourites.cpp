@@ -1,7 +1,11 @@
 #include "favourites.h"
 
 #include "file_util.h"
+#include "logger.h"
 #include "text_util.h"
+
+#include <shellapi.h>
+#include <windows.h>
 
 #include <algorithm>
 #include <cwctype>
@@ -10,6 +14,52 @@ namespace {
 
 std::wstring GetFavouritesFilePath() {
     return GetExeDir() + L"\\favourites.ini";
+}
+
+std::wstring GetEnvVar(const wchar_t* name) {
+    wchar_t buf[MAX_PATH] = {};
+    DWORD len = GetEnvironmentVariableW(name, buf, MAX_PATH);
+    return (len > 0 && len < MAX_PATH) ? std::wstring(buf) : std::wstring();
+}
+
+// Same shim project_list_hud.cpp's ResolveVSCodeCliShim resolves (see its
+// comment for why the CLI shim, not Code.exe directly, is required for -n
+// to work) -- but found without a running window's process path to start
+// from, since this runs at app startup before any VS Code window is
+// necessarily tracked yet. Tries the shim's directory on PATH first (the
+// common case: VS Code's installer offers "Add to PATH", on by default),
+// then the well-known per-user and machine-wide install locations. Stable
+// build is tried before Insiders at each step, since there's no
+// running-window signal here to know which the user actually favours.
+bool ResolveVSCodeCliShimStandalone(std::wstring& outCmdPath) {
+    const wchar_t* kShimNames[] = {L"code.cmd", L"code-insiders.cmd"};
+    for (const wchar_t* name : kShimNames) {
+        wchar_t found[MAX_PATH] = {};
+        if (SearchPathW(nullptr, name, nullptr, MAX_PATH, found, nullptr) > 0) {
+            outCmdPath = found;
+            return true;
+        }
+    }
+
+    std::wstring localAppData = GetEnvVar(L"LOCALAPPDATA");
+    std::wstring programFiles = GetEnvVar(L"ProgramFiles");
+    std::vector<std::wstring> candidates;
+    if (!localAppData.empty()) {
+        candidates.push_back(localAppData + L"\\Programs\\Microsoft VS Code\\bin\\code.cmd");
+        candidates.push_back(localAppData + L"\\Programs\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd");
+    }
+    if (!programFiles.empty()) {
+        candidates.push_back(programFiles + L"\\Microsoft VS Code\\bin\\code.cmd");
+        candidates.push_back(programFiles + L"\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd");
+    }
+    for (const std::wstring& candidate : candidates) {
+        DWORD attrs = GetFileAttributesW(candidate.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            outCmdPath = candidate;
+            return true;
+        }
+    }
+    return false;
 }
 
 std::wstring ToLowerCopy(const std::wstring& s) {
@@ -89,4 +139,26 @@ void RemoveFavourite(const std::wstring& path) {
     if (it == g_favourites.end()) return;
     g_favourites.erase(it, g_favourites.end());
     SaveAll(g_favourites);
+}
+
+void OpenAllFavouritesAtStartup() {
+    EnsureLoaded();
+    if (g_favourites.empty()) return;
+
+    std::wstring cmdPath;
+    if (!ResolveVSCodeCliShimStandalone(cmdPath)) {
+        LogWarn(L"favourites: could not locate the VS Code CLI shim (code.cmd/code-insiders.cmd) on PATH or in "
+                L"the usual install locations -- skipping startup auto-open of %zu favourite(s)",
+                g_favourites.size());
+        return;
+    }
+
+    for (const FavouriteProject& f : g_favourites) {
+        std::wstring args = L"-n \"" + f.path + L"\"";
+        HINSTANCE result = ShellExecuteW(nullptr, L"open", cmdPath.c_str(), args.c_str(), nullptr, SW_HIDE);
+        if ((INT_PTR)result <= 32) {
+            LogWarn(L"favourites: startup auto-open failed for [%ls] via %ls, code=%Id", f.path.c_str(),
+                    cmdPath.c_str(), (INT_PTR)result);
+        }
+    }
 }

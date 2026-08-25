@@ -36,6 +36,7 @@
 
 #include "ai_provider.h"
 #include "config.h"
+#include "favourites.h"
 #include "label_alias.h"
 #include "logger.h"
 #include "overlay.h"
@@ -261,7 +262,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     AddTrayIcon(hwnd);
     RescanAllWindows();
     Log(L"initial rescan complete, tracked=%zu", TrackedWindowCount());
-    UpdateTrayIconWarningState(); // picks up any warnings from config load / rescan above
+    OpenAllFavouritesAtStartup();
+    UpdateTrayIconWarningState(); // picks up any warnings from config load / rescan above / favourites auto-open
 
     g_hookCreate = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_CREATE,
                                     nullptr, WinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT);
