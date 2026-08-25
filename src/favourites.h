@@ -27,3 +27,12 @@ void AddFavourite(const std::wstring& label, const std::wstring& path);
 // Removes the favourite at `path` (case-insensitive match) and persists
 // immediately. No-op if not present.
 void RemoveFavourite(const std::wstring& path);
+
+// Opens every saved favourite in its own new VS Code window. Called once
+// from vscode_border.cpp's wWinMain, so -- unlike OpenFavouriteProject --
+// this can't lean on an already-tracked window's process path to find the
+// VS Code CLI shim: no VS Code window is necessarily running yet this
+// early. Resolves the shim independently instead (PATH, then well-known
+// install locations -- see favourites.cpp); logs a warning and no-ops if
+// none can be found.
+void OpenAllFavouritesAtStartup();

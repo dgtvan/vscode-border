@@ -69,21 +69,27 @@ void HideProjectListHud(HWND hud);
 // Sorts `entries` to match window layout (left-to-right, top-to-bottom) --
 // or, if `style.manualOrder` is set, to the last order the user dragged
 // them into (see project_list_order.h), with any entries never seen before
-// appended at the end in their window-layout order -- measures/sizes the
-// HUD to fit them -- as a single horizontal strip or a vertical list, per
-// `style.horizontal` -- with every item sharing one width, and shows it
-// anchored to the bottom-right of the work area, unless the user has
-// manually moved/resized it (Ctrl+left-click-drag either edge to resize,
-// the middle to move; plain right-click opens a context menu instead, e.g.
-// to set an alias for an item's label). Once manually placed/sized, that
-// placement is kept on later calls instead of being recomputed. Does
-// nothing if `entries` is empty; call HideProjectListHud in that case
-// instead.
+// appended at the end in their window-layout order -- then moves every
+// favourite entry (see favourites.h) ahead of the non-favourites,
+// preserving each group's relative order, so favourites always sit at the
+// front of the list regardless of window layout or manual order --
+// measures/sizes the HUD to fit them -- as a single horizontal strip or a
+// vertical list, per `style.horizontal` -- with every item sharing one
+// width, and shows it anchored to the bottom-right of the work area, unless
+// the user has manually moved/resized it (Ctrl+left-click-drag either edge
+// to resize, the middle to move; plain right-click opens a context menu
+// instead, e.g. to set an alias for an item's label). Once manually
+// placed/sized, that placement is kept on later calls instead of being
+// recomputed. Does nothing if `entries` is empty; call HideProjectListHud
+// in that case instead.
 //
 // When style.manualOrder is set, plain left-click-and-drag on an item (as
 // opposed to a plain click, which activates it) reorders it: other items
 // shift live to open a gap at the candidate drop position as the dragged
 // item, shown floating, follows the cursor. The result is persisted
-// immediately on drop.
+// immediately on drop. A dragged item is confined to its own favourite/
+// non-favourite group -- it can be reordered within that group, but can't
+// be dropped across the boundary into the other one, so the favourites-
+// always-in-front rule above can't be dragged away.
 void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entries,
                           const ProjectListHudStyle& style);
