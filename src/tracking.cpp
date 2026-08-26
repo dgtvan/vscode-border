@@ -41,7 +41,14 @@ struct TrackedWindow {
     RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized -- lets a minimized
                               // window's project-list HUD entry keep sorting where it normally sits
                               // instead of jumping around (see SyncProjectListHud)
+    long long trackSeq = 0; // this window's position in track order (see g_nextTrackSeq) -- lets manual
+                             // mode append a project the user has never dragged (so it has no saved
+                             // position) after the ones that do, instead of falling back to sorting it
+                             // by on-screen position among other not-yet-ordered entries (see
+                             // ApplyManualOrder)
 };
+
+static long long g_nextTrackSeq = 0;
 
 // Single choke point for computing a tracked window's label fields, so
 // every call site (initial track, name-change debounce, RefreshAllLabels)
@@ -171,6 +178,7 @@ static void SyncProjectListHud() {
         ProjectListHudEntry entry;
         entry.target = kv.first;
         entry.windowRect = rect;
+        entry.trackSeq = kv.second.trackSeq;
         entry.label = kv.second.label;
         entry.rawLabel = kv.second.rawLabel;
         entry.path = kv.second.folderName.empty() ? L"" : ResolveFolderPath(kv.second.folderName);
@@ -459,6 +467,7 @@ static void TrackWindow(HWND hwnd) {
     tw.overlay = CreateOverlay(g_hInstance);
     tw.colorIndex = AllocateColorIndex();
     tw.pid = pid;
+    tw.trackSeq = g_nextTrackSeq++;
     ApplyLabelForTitle(tw, title);
     g_tracked[hwnd] = tw;
     SyncOverlay(hwnd, g_tracked[hwnd]);

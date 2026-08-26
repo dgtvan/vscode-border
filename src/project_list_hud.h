@@ -17,6 +17,9 @@ enum class ClaudeStatus { None, Attention, Working, Waiting };
 struct ProjectListHudEntry {
     HWND target = nullptr;
     RECT windowRect = {}; // target's on-screen bounds -- used to order entries to match window layout
+    long long trackSeq = 0; // this window's track order, oldest first -- the append order for a manual-mode
+                             // entry that has no saved position yet (see ApplyManualOrder in
+                             // project_list_hud.cpp)
     std::wstring label;    // display text (an alias, if the user set one for rawLabel -- see label_alias.h)
     std::wstring rawLabel; // the un-aliased label, i.e. the alias map's key
     std::wstring path;     // absolute folder path this window has open, resolved via worktree_resolver's
