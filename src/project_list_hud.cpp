@@ -1398,13 +1398,12 @@ static int MeasureRequiredWidth(const std::vector<ProjectListHudEntry>& entries,
     return ClampInt(width, kProjectListMinWidth, kProjectListAutoMaxWidth);
 }
 
-// Rearranges `entries` (already in window-left-edge order) to match
-// `order` (a list of rawLabels in the user's last-dragged order): entries
-// whose rawLabel appears in `order` come first, in that relative order;
-// any not found (e.g. a window that appeared since the last drag) are
-// appended afterward, keeping their existing (left-edge) relative order --
-// std::stable_sort is what makes that "keep existing order" guarantee hold
-// for entries that compare equal (i.e. both not found).
+// Rearranges `entries` to match `order` (a list of rawLabels in the user's
+// last-dragged order): entries whose rawLabel appears in `order` come
+// first, in that relative order; any not found (e.g. a project the user
+// has never dragged, so it has no saved position) are appended afterward,
+// oldest-tracked first (trackSeq) -- i.e. plain append order, not wherever
+// Windows happened to put that window on screen.
 static void ApplyManualOrder(std::vector<ProjectListHudEntry>& entries, const std::vector<std::wstring>& order) {
     std::stable_sort(entries.begin(), entries.end(),
                      [&order](const ProjectListHudEntry& a, const ProjectListHudEntry& b) {
@@ -1413,7 +1412,7 @@ static void ApplyManualOrder(std::vector<ProjectListHudEntry>& entries, const st
         bool aFound = ia != order.end(), bFound = ib != order.end();
         if (aFound != bFound) return aFound;
         if (aFound) return (ia - ib) < 0;
-        return false;
+        return a.trackSeq < b.trackSeq;
     });
 }
 
@@ -1444,6 +1443,18 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     });
     state->manualOrderMode = style.manualOrder;
     if (style.manualOrder) ApplyManualOrder(sorted, state->manualOrder);
+
+    // Keep a favourite's stored label in sync with its live hub item
+    // whenever that project is actually open -- otherwise the favourites
+    // menu (ShowNewWindowButtonContextMenu) would keep showing whatever
+    // label happened to be captured back when "Add to Favourites" was
+    // clicked, even after the hub item's own label later changes (e.g. the
+    // window title reparses differently once VS Code picks up this app's
+    // window.title setting, or the user sets/changes an alias).
+    for (const ProjectListHudEntry& e : sorted) {
+        if (!e.path.empty()) RefreshFavouriteLabel(e.path, e.label);
+    }
+
     PinFavouritesToFront(sorted);
 
     int rowHeight = std::max(18, style.rowHeight);

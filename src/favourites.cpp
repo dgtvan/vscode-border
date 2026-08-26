@@ -131,6 +131,19 @@ void AddFavourite(const std::wstring& label, const std::wstring& path) {
     SaveAll(g_favourites);
 }
 
+void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label) {
+    EnsureLoaded();
+    std::wstring key = ToLowerCopy(path);
+    for (FavouriteProject& f : g_favourites) {
+        if (ToLowerCopy(f.path) != key) continue;
+        if (f.label != label) {
+            f.label = label;
+            SaveAll(g_favourites);
+        }
+        return;
+    }
+}
+
 void RemoveFavourite(const std::wstring& path) {
     EnsureLoaded();
     std::wstring key = ToLowerCopy(path);
