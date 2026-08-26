@@ -186,6 +186,20 @@ std::wstring EncodeProjectDirName(const std::wstring& cwd) {
 // comparison would spuriously fire right as that very status is set).
 const DWORD kTranscriptActivityMarginSeconds = 10;
 
+// How recently the transcript itself must have been written, relative to
+// *now*, to still count as "working" -- without this, a session whose
+// transcript gets exactly one write after its last hook-reported snapshot
+// (e.g. a metadata-only line like custom-title/bridge-session appended
+// moments after the real Stop, before the hook script itself finishes and
+// updates the status file) gets pinned to "working" forever: both
+// timestamps are then frozen in the past, so "transcript newer than
+// snapshot" stays true indefinitely with nothing left to ever re-touch
+// either file and clear it. Confirmed against a real stuck case: transcript
+// last written 08:53:20, status file last written 08:52:xx, both still
+// exactly that an hour and 40+ minutes later -- every sync in between kept
+// re-deriving "working" from those same two frozen timestamps.
+const DWORD kTranscriptActivityRecentSeconds = 30;
+
 bool IsNewerByMargin(const FILETIME& newer, const FILETIME& older, DWORD marginSeconds) {
     ULARGE_INTEGER a, b;
     a.LowPart = newer.dwLowDateTime;
@@ -252,7 +266,14 @@ bool HasNewerTranscriptActivity(const std::wstring& cwd, const std::wstring& ses
     if (transcriptPath.empty()) return false;
     WIN32_FILE_ATTRIBUTE_DATA data;
     if (!GetFileAttributesExW(transcriptPath.c_str(), GetFileExInfoStandard, &data)) return false;
-    return IsNewerByMargin(data.ftLastWriteTime, sinceFt, kTranscriptActivityMarginSeconds);
+    if (!IsNewerByMargin(data.ftLastWriteTime, sinceFt, kTranscriptActivityMarginSeconds)) return false;
+
+    // Also require the transcript write itself to be recent -- see
+    // kTranscriptActivityRecentSeconds' comment. Without this, the check
+    // above never expires on its own once true.
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    return !IsNewerByMargin(now, data.ftLastWriteTime, kTranscriptActivityRecentSeconds);
 }
 
 // The literal marker Claude Code appends to the transcript, as a plain
