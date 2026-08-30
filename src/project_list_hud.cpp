@@ -507,50 +507,12 @@ static void ResetAlias(HWND hud, ProjectListHudState* state, int index) {
     RenderProjectListHud(hud, state);
 }
 
-// Explicitly locks the HUD's current on-screen width as the user's chosen
-// size (same end state as a successful Ctrl+drag resize, see
-// ProjectListDragModeForPoint) -- a reliable alternative to that gesture,
-// which requires landing the cursor within kProjectListEdgeGrip pixels of
-// the strip's outer edge and is easy to miss with no visible feedback,
-// silently leaving manualWidth false and the width auto-fitting to
-// whatever the widest current label is (e.g. growing right back open the
-// moment a longer alias is set). Persisted immediately, same as a drag's
-// own WM_LBUTTONUP (see EndMoveResizeDrag), so it survives a restart too.
-static void FixCurrentWidth(ProjectListHudState* state) {
-    if (!state) return;
-    state->manualWidth = true;
-    if (state->horizontal) {
-        size_t n = state->entries.size();
-        int buttonReserve = state->showNewWindowButton ? (state->rowHeight + kProjectListGap) : 0;
-        state->manualItemWidth = n > 0
-            ? std::max(1, (state->width - buttonReserve - (int)(n - 1) * kProjectListGap) / (int)n)
-            : state->width;
-    }
-    int savedWidth = state->horizontal ? state->manualItemWidth : state->width;
-    SaveHudPlacement(state->scenarioKey, state->x, state->y, savedWidth);
-}
-
-// Reverts to auto-fit: the width will go back to tracking the widest
-// current label (see MeasureRequiredWidth) from the next sync onward. Note
-// this only clears the in-memory flag -- a placement previously saved by
-// FixCurrentWidth/a drag-resize is left on disk (this codebase has no
-// "clear saved placement" path for position either), so a fixed width set
-// earlier would reassert itself after a restart in the same monitor
-// scenario. Fine in practice: reverting back to auto-fit is a rare, deliberate
-// action, not something done and undone repeatedly.
-static void AutoFitWidth(ProjectListHudState* state) {
-    if (state) state->manualWidth = false;
-}
-
 static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, 1, L"Set Alias...");
     bool hasAlias = index >= 0 && index < (int)state->entries.size() &&
                     state->entries[index].label != state->entries[index].rawLabel;
     if (hasAlias) AppendMenuW(menu, MF_STRING, 2, L"Reset Alias");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr); // divides the alias group above from the width toggle
-                                                  // below
-    AppendMenuW(menu, MF_STRING, 5, state->manualWidth ? L"Auto-Fit Hub Width" : L"Fix Current Hub Width");
 
     // No path means VS Code hasn't recorded this window's folder in its own
     // workspaceStorage (e.g. a multi-root workspace) -- nothing a favourite
@@ -583,9 +545,6 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         AddFavourite(entry.label, entry.path);
     } else if (cmd == 4) {
         RemoveFavourite(state->entries[index].path);
-    } else if (cmd == 5) {
-        if (state->manualWidth) AutoFitWidth(state);
-        else FixCurrentWidth(state);
     }
 }
 
