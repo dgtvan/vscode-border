@@ -45,7 +45,11 @@ struct TrackedWindow {
                              // mode append a project the user has never dragged (so it has no saved
                              // position) after the ones that do, instead of falling back to sorting it
                              // by on-screen position among other not-yet-ordered entries (see
-                             // ApplyManualOrder)
+                             // ApplyManualOrder). NOT a reliable "when was this actually opened" signal --
+                             // e.g. multiple VS Code windows commonly share one OS process, so process
+                             // creation time can't tell them apart either; see project_list_hud.cpp's
+                             // ShowNewWindowButtonContextMenu for how the favourites menu instead derives
+                             // open order from each entry's live position in the HUD.
 };
 
 static long long g_nextTrackSeq = 0;

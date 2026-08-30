@@ -603,6 +603,34 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
     std::vector<FavouriteProject> favourites = LoadFavourites();
 
+    // Reorder currently-open favourites to match their live position in the
+    // HUD itself (state->entries -- already window-layout- or, in manual-
+    // order mode, drag-order-sorted, see UpdateProjectListHud), while
+    // leaving closed favourites exactly where they already sit. A
+    // stable_sort whose comparator only orders a pair when *both* sides are
+    // open achieves that in one pass: a closed favourite compares equal to
+    // everything (open or closed) and so keeps its existing position via
+    // stable_sort's tie-breaking, while two open favourites get reordered
+    // against each other by HUD index. E.g. saved order A,B,C with only C
+    // and B currently open, in that HUD order, becomes A,C,B -- A never
+    // moves, C/B swap into their own two slots. This is deliberately tied
+    // to the HUD's own live order (not some independent "when was this
+    // opened" timestamp) so dragging an entry in manual-order mode is
+    // immediately reflected here too.
+    auto findOpenHudIndex = [&](const std::wstring& path) -> int {
+        for (size_t i = 0; i < state->entries.size(); i++) {
+            const ProjectListHudEntry& e = state->entries[i];
+            if (!e.path.empty() && _wcsicmp(e.path.c_str(), path.c_str()) == 0) return (int)i;
+        }
+        return -1;
+    };
+    std::stable_sort(favourites.begin(), favourites.end(),
+                     [&](const FavouriteProject& a, const FavouriteProject& b) {
+        int ia = findOpenHudIndex(a.path), ib = findOpenHudIndex(b.path);
+        if (ia < 0 || ib < 0) return false;
+        return ia < ib;
+    });
+
     HMENU menu = CreatePopupMenu();
     if (favourites.empty()) {
         AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"(No Favourites)");
