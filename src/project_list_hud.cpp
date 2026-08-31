@@ -1060,7 +1060,7 @@ static void DrawFavouriteMarker(UINT32* pixels, int width, int height, const REC
 static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int rowHeight,
                         const ProjectListHudEntry& entry, const RECT& item, bool highlighted, int opacity,
                         bool isFavourite, bool labelTextColorAuto, COLORREF labelTextColor, HFONT font,
-                        HFONT hoverFont, COLORREF claudeColorWorking, COLORREF claudeColorAttention,
+                        COLORREF claudeColorWorking, COLORREF claudeColorAttention,
                         COLORREF claudeColorWaiting, bool claudeBorderColorAuto, COLORREF claudeBorderColor) {
     const int paddingX = 12;
     int leftTextPad = isFavourite ? kFavouriteMarkerLeftPad : paddingX;
@@ -1088,7 +1088,7 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
 
     COLORREF tx = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
     BlendTextIntoPixels(screenDC, pixels, width, height, item.left + leftTextPad, item.top,
-                        itemWidth - leftTextPad - paddingX, rowHeight, entry.label, highlighted ? hoverFont : font,
+                        itemWidth - leftTextPad - paddingX, rowHeight, entry.label, font,
                         chipColor, tx, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Claude Code status indicator, top-right corner -- drawn before the
@@ -1191,7 +1191,7 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
 // opacity treatment as DrawHudItem, but a centered "+" glyph instead of a
 // left-aligned label, and no AI status indicator.
 static void DrawNewWindowButton(HDC screenDC, UINT32* pixels, int width, int height, const RECT& item,
-                                COLORREF color, bool highlighted, int opacity, HFONT font, HFONT hoverFont,
+                                COLORREF color, bool highlighted, int opacity, HFONT font,
                                 bool labelTextColorAuto, COLORREF labelTextColor) {
     BYTE r = GetRValue(color), g = GetGValue(color), b = GetBValue(color);
     if (highlighted) {
@@ -1210,7 +1210,7 @@ static void DrawNewWindowButton(HDC screenDC, UINT32* pixels, int width, int hei
 
     COLORREF tx = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
     BlendTextIntoPixels(screenDC, pixels, width, height, item.left, item.top, item.right - item.left,
-                        item.bottom - item.top, L"+", highlighted ? hoverFont : font, chipColor, tx,
+                        item.bottom - item.top, L"+", font, chipColor, tx,
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     BYTE alpha = (BYTE)opacity;
@@ -1257,7 +1257,6 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
     for (int i = 0; i < width * height; i++) pixels[i] = 0x01000000u;
 
     HFONT font = CreateHudFont(state->fontSize, FW_SEMIBOLD);
-    HFONT hoverFont = CreateHudFont(state->fontSize, FW_BLACK);
 
     // While reorder-dragging, the dragged item's own slot is left empty --
     // PaintDragGhost/MoveDragGhost draw it separately, in its own
@@ -1270,7 +1269,7 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
         int opacity = highlighted ? state->hoverOpacity : state->normalOpacity;
         DrawHudItem(screenDC, pixels, width, height, rowHeight, state->entries[i], state->itemRects[i],
                     highlighted, opacity, EntryIsFavourite(state->entries[i]), state->labelTextColorAuto,
-                    state->labelTextColor, font, hoverFont, state->claudeColorWorking, state->claudeColorAttention,
+                    state->labelTextColor, font, state->claudeColorWorking, state->claudeColorAttention,
                     state->claudeColorWaiting, state->claudeBorderColorAuto, state->claudeBorderColor);
     }
 
@@ -1278,12 +1277,11 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
         bool highlighted = state->hoverIndex == (int)state->entries.size();
         int opacity = highlighted ? state->hoverOpacity : state->normalOpacity;
         DrawNewWindowButton(screenDC, pixels, width, height, state->newWindowButtonRect,
-                            state->newWindowButtonColor, highlighted, opacity, font, hoverFont,
+                            state->newWindowButtonColor, highlighted, opacity, font,
                             state->labelTextColorAuto, state->labelTextColor);
     }
 
     DeleteObject(font);
-    DeleteObject(hoverFont);
 
     POINT ptSrc = {0, 0};
     SIZE sz = {width, height};
@@ -1363,18 +1361,16 @@ static void PaintDragGhost(ProjectListHudState* state) {
     for (int i = 0; i < itemW * itemH; i++) pixels[i] = 0x01000000u;
 
     HFONT font = CreateHudFont(state->fontSize, FW_SEMIBOLD);
-    HFONT hoverFont = CreateHudFont(state->fontSize, FW_BLACK);
     RECT localRect = {0, 0, itemW, itemH}; // ghost's own bitmap -- always local-origin, unlike the
                                             // screen-position SetWindowPos call below
-    // Drawn "highlighted" (brightened + bold, like a hovered item) so the
-    // item you're actively moving reads as visually active.
+    // Drawn "highlighted" (brightened, like a hovered item) so the item
+    // you're actively moving reads as visually active.
     DrawHudItem(screenDC, pixels, itemW, itemH, state->rowHeight, state->entries[state->reorderIndex],
                 localRect, true, state->hoverOpacity, EntryIsFavourite(state->entries[state->reorderIndex]),
-                state->labelTextColorAuto, state->labelTextColor, font, hoverFont, state->claudeColorWorking,
+                state->labelTextColorAuto, state->labelTextColor, font, state->claudeColorWorking,
                 state->claudeColorAttention, state->claudeColorWaiting, state->claudeBorderColorAuto,
                 state->claudeBorderColor);
     DeleteObject(font);
-    DeleteObject(hoverFont);
 
     int screenX = state->x + state->reorderCursorClient.x - state->reorderGrabOffset.x;
     int screenY = state->y + state->reorderCursorClient.y - state->reorderGrabOffset.y;
