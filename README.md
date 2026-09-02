@@ -98,6 +98,16 @@ After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
 next launch (windows already tracked keep the color they were assigned).
 
+## Project list HUD
+
+An interactive list of your open VS Code windows, docked at the
+bottom-right of the desktop by default -- using the same labels and colors
+as the border chips, so you can find and switch between windows at a
+glance. It includes minimized windows, so it doubles as a restore list.
+Enable it with `show_project_list=true`.
+
+![Project list HUD showing three open windows and a "+" button to open a new one](assets/hub.png)
+
 ### Project list HUD manual ordering
 
 With `project_list_order=manual`, plain left-click-and-hold on an item (as
