@@ -114,19 +114,112 @@ if (-not (Test-Path $statusDir)) {
 # trusting this snapshot -- whether that process is still actually
 # running, closing the "terminal force-closed, SessionEnd never fired"
 # gap. Left blank (see claude_provider.cpp's handling) if not found.
+#
+# Each hop is a WMI query, which can transiently fail -- rather than answer
+# "no such process" -- when several sessions start at once and all run this
+# hook within a second or two of each other. That was observed once as a
+# lone SessionStart writing no pid at all while the sixteen sessions around
+# it wrote theirs fine, so a failed query is retried before the walk gives
+# up, and the reason the walk stopped is reported back so a future blank
+# pid says *why* in claude_hook_events.log instead of just "pid=".
 function Find-ClaudeAncestorPid {
-    param([int]$StartPid, [int]$MaxHops = 6)
+    param([int]$StartPid, [int]$MaxHops = 6, [int]$AttemptsPerHop = 3)
     $currentPid = $StartPid
     for ($i = 0; $i -lt $MaxHops; $i++) {
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction SilentlyContinue
-        if (-not $proc) { return $null }
+        $proc = $null
+        $queryError = $null
+        for ($attempt = 0; $attempt -lt $AttemptsPerHop; $attempt++) {
+            try {
+                # -ErrorAction Stop (overriding this script's
+                # SilentlyContinue default) is what makes a genuinely
+                # failed query distinguishable from an empty result: "the
+                # query broke" is worth retrying, "that process is gone" is
+                # a real answer and isn't.
+                $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction Stop
+                $queryError = $null
+                break
+            } catch {
+                $queryError = $_.Exception.Message
+                Start-Sleep -Milliseconds 150
+            }
+        }
+        if ($queryError) {
+            $script:pidLookupNote = "query failed at hop $i (pid $currentPid) after $AttemptsPerHop attempts: $queryError"
+            return $null
+        }
+        if (-not $proc) { $script:pidLookupNote = "pid $currentPid not found at hop $i"; return $null }
         if ($proc.Name -ieq "claude.exe") { return $proc.ProcessId }
-        if (-not $proc.ParentProcessId) { return $null }
+        if (-not $proc.ParentProcessId) {
+            $script:pidLookupNote = "no parent above $($proc.Name) (pid $currentPid) at hop $i"
+            return $null
+        }
         $currentPid = $proc.ParentProcessId
     }
+    $script:pidLookupNote = "no claude.exe within $MaxHops hops of pid $StartPid"
     return $null
 }
+# Second route to the same pid, used only when the ancestry walk comes up
+# empty. Every failure ever observed has been a SessionStart (4 of 332;
+# zero across 1176 Stop/UserPromptSubmit/PermissionRequest/SubagentStop
+# events), where an intermediate shell had already exited by the time this
+# hook walked up -- the walk reports "pid N not found at hop 2" and there
+# is no chain left to follow. SessionStart is also the one event with no
+# earlier pid on file to fall back to, so without this those sessions stay
+# pid-less for their whole life.
+#
+# A resumed session carries its own id on claude.exe's command line
+# (--resume=<session_id>), which is an unambiguous identification -- the id
+# is unique, so a match is the right process by definition. Two known
+# limits: it does nothing for a *fresh* session (no --resume on the command
+# line at all -- 3 of 9 live processes, when this was checked), and it
+# leans on an undocumented command-line shape layered on top of the already
+# undocumented ancestry assumption, so it is written to fail quietly and
+# leave a note rather than to be relied on.
+function Find-ClaudePidBySessionId {
+    param([string]$SessionId)
+    if (-not $SessionId) { return $null }
+    try {
+        $candidates = @(Get-CimInstance Win32_Process -Filter "Name='claude.exe'" -ErrorAction Stop |
+            Where-Object { $_.CommandLine -and $_.CommandLine.Contains("--resume=$SessionId") })
+    } catch {
+        $script:pidLookupNote += "; --resume scan failed: $($_.Exception.Message)"
+        return $null
+    }
+    if ($candidates.Count -eq 1) { return $candidates[0].ProcessId }
+    if ($candidates.Count -gt 1) {
+        # Can't happen with unique session ids, so if it ever does the
+        # assumption above is wrong -- say so instead of picking one.
+        $script:pidLookupNote += "; --resume matched $($candidates.Count) processes, too ambiguous to use"
+        return $null
+    }
+    $script:pidLookupNote += "; no live claude.exe with --resume=$SessionId (fresh session, or already exited)"
+    return $null
+}
+
+$script:pidLookupNote = ""
 $claudePid = Find-ClaudeAncestorPid -StartPid $PID
+
+# Tried before the recorded-pid fallback below: this is a live, positive
+# identification of a running process, where that one is only a snapshot
+# from an earlier invocation.
+if (-not $claudePid) {
+    $claudePid = Find-ClaudePidBySessionId -SessionId $data.session_id
+    if ($claudePid) { $script:pidLookupNote += " (recovered pid $claudePid via --resume match)" }
+}
+
+# A lookup that failed for a session we already recorded a pid for is a
+# transient blip, not evidence the process went away -- carrying the known
+# pid forward keeps that session on the precise liveness check instead of
+# silently demoting it to the 24-hour staleness fallback for the rest of
+# its life. Nothing is taken on trust here: claude_provider.cpp re-verifies
+# the pid is still a live claude.exe every time it reads statuses.
+if ((-not $claudePid) -and (Test-Path $file)) {
+    $priorPid = [regex]::Match([System.IO.File]::ReadAllText($file), '(?m)^pid=(\d+)\s*$')
+    if ($priorPid.Success) {
+        $claudePid = [int]$priorPid.Groups[1].Value
+        $script:pidLookupNote += " (reusing pid $claudePid recorded earlier for this session)"
+    }
+}
 
 $content = "status=$status`ncwd=$($data.cwd)`n"
 if ($claudePid) { $content += "pid=$claudePid`n" }
@@ -138,6 +231,7 @@ if ($bgCount -gt 0) {
     $parts = $data.background_tasks | ForEach-Object { "$($_.id):$($_.status):$($_.description)" }
     $bgDetail = " bgDetail=[" + ($parts -join "; ") + "]"
 }
-Write-HookEventLog "event=$($data.hook_event_name) session=$($data.session_id) status=$status pid=$claudePid cwd=$($data.cwd)$bgDetail"
+$pidNote = if ($script:pidLookupNote) { " pidLookup=[$($script:pidLookupNote.Trim())]" } else { "" }
+Write-HookEventLog "event=$($data.hook_event_name) session=$($data.session_id) status=$status pid=$claudePid$pidNote cwd=$($data.cwd)$bgDetail"
 
 exit 0

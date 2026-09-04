@@ -357,8 +357,16 @@ to pick up worktrees created after the app started.
   relies on undocumented internals (specifically, that Claude Code's hook
   processes are descended from the main `claude.exe` process a small,
   bounded number of hops up) that could change in a future Claude Code
-  update; if the ancestry walk ever fails to find `claude.exe`, that
-  session's status is logged (`claude_provider: ... has no pid recorded`)
+  update. The walk has two backstops, since in practice it fails only on
+  `SessionStart` -- where an intermediate shell has already exited, leaving
+  no chain to follow, and where there is also no earlier pid on file. A
+  resumed session carries its own id on `claude.exe`'s command line
+  (`--resume=<session_id>`), which identifies the process unambiguously, so
+  that is tried next; failing that, any pid already recorded for the
+  session is carried forward rather than dropped. Neither helps a *fresh*
+  session that dies immediately, and whichever way the lookup ends it
+  records why in `bin\logs\claude_hook_events.log` (`pidLookup=[...]`).
+  If it does come up empty, that session's status is logged (`claude_provider: ... has no pid recorded`)
   and falls back to a much coarser, generous 24-hour staleness check
   instead (a status with no pid that hasn't been updated in over a day is
   treated as abandoned) -- deliberately not applied to the normal, precise
@@ -417,6 +425,7 @@ to pick up worktrees created after the app started.
 - `install-autostart.ps1` / `uninstall-autostart.ps1` -- autostart management, see [docs/AUTOSTART.md](docs/AUTOSTART.md).
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) -- design decisions and why.
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md) -- measured resource usage and optimizations.
+- [docs/INVESTIGATING-WARNINGS.md](docs/INVESTIGATING-WARNINGS.md) -- how to chase down a `[WARN]` line in `bin\logs\`.
 
 ## Credits
 
