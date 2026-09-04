@@ -221,6 +221,41 @@ if ((-not $claudePid) -and (Test-Path $file)) {
     }
 }
 
+# Last resort, SessionStart only: every route above has come up empty, which
+# on this event means either a genuinely fresh session whose ancestry chain
+# was momentarily unwalkable, or -- the only case actually observed -- a
+# session that was already being torn down before this hook got to look. One
+# more --resume scan after a short pause tells those apart: a live process
+# is still there to be found a moment later, a dead one never comes back.
+if ((-not $claudePid) -and ($data.hook_event_name -eq "SessionStart")) {
+    $noteBeforeRetry = $script:pidLookupNote
+    Start-Sleep -Milliseconds 250
+    $claudePid = Find-ClaudePidBySessionId -SessionId $data.session_id
+    if ($claudePid) {
+        $script:pidLookupNote += " (recovered pid $claudePid via --resume match on retry)"
+    } else {
+        # The scan appends its own "no live claude.exe" note again; keep the
+        # first one and say it was retried rather than logging it twice.
+        $script:pidLookupNote = $noteBeforeRetry + "; still absent 250ms later"
+    }
+}
+
+# A SessionStart that cannot locate its own process by any route describes a
+# session that isn't running -- observed when several VS Code windows reload
+# at once and their sessions fire SessionStart on the way out (chain already
+# severed at hop 2, claude.exe already gone). Writing a file for it creates a
+# pid-less orphan that no later event ever corrects (there are no later
+# events) and that claude_provider.cpp must then carry, and warn about, for a
+# full kNoPidStaleMinutes day. SessionStart is uniquely safe to skip here: it
+# is the one event with no prior state worth preserving, and a session that
+# is genuinely alive re-announces itself on its next event with a pid
+# attached. Every other event still writes unconditionally.
+if ((-not $claudePid) -and ($data.hook_event_name -eq "SessionStart")) {
+    $skipNote = if ($script:pidLookupNote) { " pidLookup=[$($script:pidLookupNote.Trim())]" } else { "" }
+    Write-HookEventLog "event=$($data.hook_event_name) session=$($data.session_id) status=$status pid=$skipNote cwd=$($data.cwd) (no status file written -- session process not locatable, treating as already ended)"
+    exit 0
+}
+
 $content = "status=$status`ncwd=$($data.cwd)`n"
 if ($claudePid) { $content += "pid=$claudePid`n" }
 [System.IO.File]::WriteAllText($file, $content, [System.Text.UTF8Encoding]::new($false))
