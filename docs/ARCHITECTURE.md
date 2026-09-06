@@ -187,3 +187,135 @@ directory from disk on every call instead, which is acceptable because
 every relevant WinEvent for a tracked window, plus the periodic rescan --
 so this doesn't introduce a new I/O cadence, just adds a bit of work to one
 that already exists.
+
+## Focus tracing: why every activation goes through one wrapper
+
+Reported symptom: "all the VS Code taskbar thumbnails are highlighted at
+once". That state is Windows' *flashing* / wants-attention highlight, and
+there is no Win32 call that asks a window whether it is currently in it --
+so it can only be diagnosed from the conditions that produce it, recorded
+as they happen. `focus_trace.*` exists for that. Every `SetForegroundWindow`
+in this app goes through `RequestForeground`, and every desktop foreground
+change (from the global `EVENT_SYSTEM_FOREGROUND` hook) goes through
+`NoteForegroundChange`.
+
+Three things can produce the symptom, and the trace distinguishes them:
+
+1. **A denied `SetForegroundWindow`.** Documented behaviour: when the caller
+   does not hold the foreground-activation right, the system highlights the
+   target's taskbar button instead of activating it. One denial highlights
+   one window; several denials highlight several. Logged as `[WARN] focus
+   denied` with the target, the window that held the foreground instead, and
+   whether this app held it. The highlight is then cancelled -- see below.
+2. **A burst of activation requests from this app.** Sweeping the cursor
+   across the project-list HUD with `project_list_activate_on_hover=true`
+   asks to activate every item it crosses. Logged as `[WARN] focus storm`
+   with reason `hud-hover`.
+3. **Several VS Code windows activating themselves.** Nothing here calls
+   `SetForegroundWindow` on this path, so without `NoteWindowLaunchRequest`
+   recording the launch it would look like an unexplained storm.
+
+Case 3 is what the trace caught on its very first run, and the mechanism is
+worth stating plainly because it is not obvious: `code -n <path>` on a folder
+VS Code already has open does **not** create a second window. It activates
+the existing one. `OpenAllFavouritesAtStartup` used to run that for every saved
+favourite unconditionally, so on a desktop where the favourites were
+already open it fired several activation requests at several existing
+windows back to back, and every window that lost the race was left
+highlighted. Confirmed from the log: 4 windows tracked before the launch,
+still 4 after, with the foreground bouncing across 3 of them inside about
+1.7s.
+
+The fix is that startup auto-open now takes the list of folder paths that
+are already open (`GetTrackedFolderPaths`, resolved exactly the way the
+project-list HUD resolves an entry path) and launches only the favourites
+missing from it. The list is best-effort: a window whose path cannot be
+resolved is simply absent, so its favourite is still launched, which is the
+old behaviour rather than a silent skip.
+
+### A denied request cancels the highlight it caused
+
+The project-list HUD is `WS_EX_NOACTIVATE`, so clicking it never makes this
+process the foreground one -- every `hud-click` activation runs with
+`weHeldForeground=0` and rides the other rule that grants the right: *the
+calling process received the last input event*. That normally holds (the
+click went to the HUD), which is why the overwhelming majority of HUD clicks
+are granted.
+
+It stops holding when a shell flyout is up. Hovering a taskbar button opens
+the thumbnail preview (`XamlExplorerHostIslandWindow`), which takes the
+foreground and holds the foreground lock while it is open; a HUD click
+landing in that moment is refused. The user-visible result is a VS Code
+taskbar thumbnail pulsing a few times and then settling, seconds after a
+click that appeared to do nothing -- one denial, not a burst, because the
+taskbar repeats the pulse on its own.
+
+`RequestForeground` now clears that state with `FlashWindowEx(FLASHW_STOP)`
+whenever an `ExternalWindow` request is refused: once inline, and once more
+after 250 ms via a thread timer, because the system does not guarantee the
+highlight is applied before `SetForegroundWindow` returns and an inline-only
+cancel can lose that race. The settle pass logs a line of its own -- there
+is no Win32 call that reports whether a taskbar button is flashing, so that
+line is the only evidence it ran.
+
+What this deliberately does **not** do is retry the activation. A denial
+usually means the user is busy elsewhere -- that is what holding the
+foreground lock means -- so re-asking would be this app fighting the user
+for the foreground. The click is dropped; only the misleading pulse is
+taken back. The `[WARN]` stays, because a click that silently did nothing is
+still worth knowing about.
+
+The storm detector deliberately only *warns* about foreground churn inside a
+"suspect period" opened by something this app did (a launch, or an external
+activation request). Three VS Code windows taking the foreground in five
+seconds is also what fast alt-tabbing looks like; warning on that would
+badge the tray icon during ordinary use and bury the real signal. Churn
+outside a suspect period is still logged, just not raised.
+
+### Only denials are evidence; granted activations are not
+
+Both detectors were originally willing to warn about bursts in which every
+single request had been *granted*, and that is never right. The warning's own
+text is "several VS Code windows may now be showing the highlighted
+wants-attention state" -- and a granted `SetForegroundWindow` activates the
+window rather than highlighting it. Only a denial produces the highlight.
+
+This mattered in practice, because clicking through the project-list HUD is
+exactly the shape that tripped it:
+
+- **Foreground churn.** `NoteForegroundChange` recorded *every* foreground
+  change to a tracked window, including the ones that were simply this app's
+  own granted request arriving. Clicking four HUD items at roughly one per
+  second gave four granted activations, four attributed foreground changes,
+  three distinct windows inside the 5s window, and a fresh 2s suspect period
+  from every click -- a guaranteed false storm on an ordinary gesture. The
+  queue now skips changes attributable to one of our own granted requests,
+  which is what its comment always claimed it did. Denied requests and
+  changes with no request behind them are still recorded: those are the
+  launch case this queue was written for, where new windows activate
+  themselves and the losers flash.
+- **Request bursts.** `RequestForeground` now raises `[WARN] focus storm`
+  only when the burst contains at least one denial. An all-granted burst is
+  still dumped in full, as `focus burst ... all granted, so no window was
+  left highlighted` -- diagnosable, but no warning and no tray badge.
+
+One consequence of the exclusion is worth knowing when reading a log. It
+keys off the same 400 ms proximity heuristic that labels the `foreground ->`
+line's `source=`, so a genuinely external activation that lands within 400 ms
+of one of our granted requests is now *dropped* from the churn queue rather
+than merely mislabelled. Found while testing this: three external
+activations fired 300 ms after a granted HUD click produced no storm,
+because the first of them was attributed to the click. Moving them past
+400 ms reported the storm normally. The blind spot is accepted -- inside
+that window our own request really is the dominant explanation -- and it
+does not touch the launch case, where `NoteWindowLaunchRequest` opens a 15 s
+suspect period with no `RequestForeground` involved at all, so nothing is
+ever attributed to us.
+
+One related reporting bug is worth recording because it actively misleads.
+The foreground-change queue reuses `FocusAttempt` without filling in its
+`granted` field, and `ReportStorm` printed that field unconditionally -- so a
+churn dump described a run of perfectly successful activations as three
+`granted=0` lines, i.e. as three denials, which is the exact signature of the
+bug being hunted. `ReportStorm` now takes a `showGranted` flag and omits the
+column where it means nothing.

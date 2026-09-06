@@ -1,6 +1,7 @@
 #include "project_list_hud.h"
 
 #include "favourites.h"
+#include "focus_trace.h"
 #include "label_alias.h"
 #include "layered_rendering.h"
 #include "logger.h"
@@ -294,7 +295,12 @@ static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
     return true;
 }
 
-static void ActivateProjectListItem(ProjectListHudState* state, int index) {
+// `reason` is a short stable tag naming the gesture that got here (see
+// focus_trace.h) -- hover and click both land in this one function, and
+// telling them apart in the log is the difference between "the user clicked
+// three items" and "one mouse sweep asked to activate every item it
+// crossed", which look identical otherwise.
+static void ActivateProjectListItem(ProjectListHudState* state, int index, const wchar_t* reason) {
     if (!state || index < 0 || index >= (int)state->entries.size()) return;
     HWND target = state->entries[index].target;
     if (!target || !IsWindow(target)) return;
@@ -304,8 +310,15 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index) {
         state->hoverFocusActive = true;
     }
 
-    if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
-    SetForegroundWindow(target);
+    // Logged for every activation, not just the minimized ones: when the
+    // focus request that follows is refused, the trace otherwise identifies
+    // the target by hwnd alone, and which *item* was clicked then can't be
+    // recovered from the log at all.
+    bool minimized = IsIconic(target) != 0;
+    Log(L"hud activate reason=[%ls] index=%d label=[%ls]%ls", reason, index,
+        state->entries[index].label.c_str(), minimized ? L" -- restoring minimized target first" : L"");
+    if (minimized) ShowWindow(target, SW_RESTORE);
+    RequestForeground(target, FocusTargetKind::ExternalWindow, reason);
 }
 
 // Resolves whichever VS Code build the tracked windows belong to (stable
@@ -364,6 +377,7 @@ static void OpenNewVSCodeWindow(const ProjectListHudState* state) {
     // SW_HIDE so the shim's own cmd.exe console doesn't flash on screen --
     // it only forwards the request to the already-running instance over IPC
     // and exits almost immediately either way.
+    NoteWindowLaunchRequest(L"hud-new-window-button", 1);
     HINSTANCE result = ShellExecuteW(nullptr, L"open", cmdPath.c_str(), L"-n", nullptr, SW_HIDE);
     if ((INT_PTR)result <= 32) {
         Log(L"ShellExecuteW(open new vscode window via %ls) failed, code=%Id", cmdPath.c_str(), (INT_PTR)result);
@@ -378,6 +392,7 @@ static void OpenFavouriteProject(const ProjectListHudState* state, const std::ws
     if (!ResolveVSCodeCliShim(state, cmdPath)) return;
 
     std::wstring args = L"-n \"" + path + L"\"";
+    NoteWindowLaunchRequest(L"hud-favourite-open", 1);
     HINSTANCE result = ShellExecuteW(nullptr, L"open", cmdPath.c_str(), args.c_str(), nullptr, SW_HIDE);
     if ((INT_PTR)result <= 32) {
         Log(L"ShellExecuteW(open favourite [%ls] via %ls) failed, code=%Id", path.c_str(), cmdPath.c_str(),
@@ -393,7 +408,7 @@ static void EndProjectListHoverFocus(ProjectListHudState* state, bool restorePre
 
     if (restorePrevious && previous && IsWindow(previous)) {
         if (IsIconic(previous)) ShowWindow(previous, SW_RESTORE);
-        SetForegroundWindow(previous);
+        RequestForeground(previous, FocusTargetKind::ExternalWindow, L"hud-hover-restore-previous");
     }
 }
 
@@ -487,7 +502,7 @@ static void BeginAliasEdit(HWND hud, ProjectListHudState* state, int index) {
 
     WNDPROC origProc = (WNDPROC)SetWindowLongPtrW(edit, GWLP_WNDPROC, (LONG_PTR)AliasEditSubclassProc);
     SetWindowLongPtrW(edit, GWLP_USERDATA, (LONG_PTR)origProc);
-    SetForegroundWindow(edit);
+    RequestForeground(edit, FocusTargetKind::OwnUi, L"alias-edit-box");
     SetFocus(edit);
 
     state->editControl = edit;
@@ -529,7 +544,8 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         AppendMenuW(menu, MF_STRING, alreadyFav ? 4 : 3, alreadyFav ? L"Remove from Favourites" : L"Add to Favourites");
     }
 
-    SetForegroundWindow(hud); // required so the menu dismisses correctly on an outside click
+    RequestForeground(hud, FocusTargetKind::OwnUi,
+                      L"item-context-menu"); // required so the menu dismisses correctly on an outside click
     // Deliberately no TPM_RIGHTBUTTON: that flag restricts item *selection*
     // to the right mouse button, but the universal convention (and the only
     // thing a user would naturally try) is right-click to open, then
@@ -608,7 +624,7 @@ static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state,
         }
     }
 
-    SetForegroundWindow(hud);
+    RequestForeground(hud, FocusTargetKind::OwnUi, L"favourites-context-menu");
     state->contextMenuOpen = true; // see UpdateProjectListHud's guard
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
     state->contextMenuOpen = false;
@@ -788,7 +804,14 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (hoverIndex != state->hoverIndex) {
                 state->hoverIndex = hoverIndex;
                 RenderProjectListHud(hwnd, state);
-                if (state->activateOnHover && hoverIndex >= 0) ActivateProjectListItem(state, hoverIndex);
+                // The highest-risk activation path in the app: one mouse
+                // sweep across the strip crosses every item and asks to
+                // activate each in turn, which is exactly the shape that
+                // leaves a row of VS Code windows highlighted in the
+                // taskbar (see focus_trace.h). Tagged distinctly so the log
+                // shows that immediately.
+                if (state->activateOnHover && hoverIndex >= 0)
+                    ActivateProjectListItem(state, hoverIndex, L"hud-hover");
             }
             SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, mouseX, mouseY)));
             if (!state->trackingMouseLeave) {
@@ -841,7 +864,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             }
             if (state) state->pendingDragIndex = -1;
             if (state && state->hoverIndex >= 0 && state->hoverIndex < (int)state->entries.size()) {
-                ActivateProjectListItem(state, state->hoverIndex);
+                ActivateProjectListItem(state, state->hoverIndex, L"hud-click");
                 EndProjectListHoverFocus(state, false);
             } else if (state && state->showNewWindowButton && state->hoverIndex == (int)state->entries.size()) {
                 OpenNewVSCodeWindow(state);
