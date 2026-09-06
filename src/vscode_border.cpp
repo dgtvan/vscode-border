@@ -26,6 +26,7 @@
 //   project_list_order.* - persists/recalls the manually-dragged project-list item order
 //   project_list_hud.*  - the draggable/resizable project-list HUD window
 //   tray_icon.*         - tray icon warning-badge compositing
+//   focus_trace.*       - traces every focus-moving call + detects activation storms
 //   ai_provider.*        - abstract interface an AI coding assistant integration implements
 //   claude_provider.*   - Claude Code's AiProvider implementation (hooks + status file reading)
 //   tracking.*          - tracked-window bookkeeping, WinEvent hooks, sync
@@ -37,6 +38,7 @@
 #include "ai_provider.h"
 #include "config.h"
 #include "favourites.h"
+#include "focus_trace.h"
 #include "label_alias.h"
 #include "logger.h"
 #include "overlay.h"
@@ -137,7 +139,8 @@ static void ShowTrayMenu(HWND hwnd) {
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_LOG_FOLDER, L"Open Log Folder");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Exit");
-    SetForegroundWindow(hwnd); // required so the menu dismisses correctly
+    RequestForeground(hwnd, FocusTargetKind::OwnUi,
+                      L"tray-menu"); // required so the menu dismisses correctly
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
     DestroyMenu(menu);
 }
@@ -262,7 +265,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     AddTrayIcon(hwnd);
     RescanAllWindows();
     Log(L"initial rescan complete, tracked=%zu", TrackedWindowCount());
-    OpenAllFavouritesAtStartup();
+    // After RescanAllWindows above, so the already-open list it is given
+    // reflects the VS Code windows that were up before this app started.
+    OpenAllFavouritesAtStartup(GetTrackedFolderPaths());
     UpdateTrayIconWarningState(); // picks up any warnings from config load / rescan above / favourites auto-open
 
     g_hookCreate = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_CREATE,

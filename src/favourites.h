@@ -38,11 +38,28 @@ void RemoveFavourite(const std::wstring& path);
 // label's comment.
 void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label);
 
-// Opens every saved favourite in its own new VS Code window. Called once
-// from vscode_border.cpp's wWinMain, so -- unlike OpenFavouriteProject --
-// this can't lean on an already-tracked window's process path to find the
-// VS Code CLI shim: no VS Code window is necessarily running yet this
-// early. Resolves the shim independently instead (PATH, then well-known
-// install locations -- see favourites.cpp); logs a warning and no-ops if
-// none can be found.
-void OpenAllFavouritesAtStartup();
+// Opens every saved favourite that isn't already open in its own new VS
+// Code window. Called once from vscode_border.cpp's wWinMain, so -- unlike
+// OpenFavouriteProject -- this can't lean on an already-tracked window's
+// process path to find the VS Code CLI shim: no VS Code window is
+// necessarily running yet this early. Resolves the shim independently
+// instead (PATH, then well-known install locations -- see favourites.cpp);
+// logs a warning and no-ops if none can be found.
+//
+// `alreadyOpenFolderPaths` is what tracking.h's GetTrackedFolderPaths
+// returns. Skipping those matters for more than saving a redundant launch:
+// `code -n <path>` on a folder VS Code already has open does NOT create a
+// second window, it *activates the existing one*. Firing that at several
+// already-open favourites in a row makes them fight over the foreground,
+// and every window that loses the race is left showing the highlighted
+// wants-attention state on its taskbar button -- i.e. the whole row of VS
+// Code windows lights up at startup. That was a real, reproducible bug
+// (see docs/ARCHITECTURE.md's "Focus tracing" section); this parameter is
+// the fix, not an optimisation.
+//
+// The list is best-effort: a window whose folder path could not be resolved
+// is not in it, so its favourite is still launched, which is exactly the
+// pre-existing behaviour. Erring that way keeps the feature working (the
+// project does open) instead of silently skipping something the user
+// expects to see.
+void OpenAllFavouritesAtStartup(const std::vector<std::wstring>& alreadyOpenFolderPaths);

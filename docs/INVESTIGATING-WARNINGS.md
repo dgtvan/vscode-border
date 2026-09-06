@@ -227,3 +227,71 @@ than "fixed the warning".
 Then state the verified end state plainly -- app running, current run's log,
 zero `[WARN]` -- or say clearly that it is still warning and why. Do not
 describe work as complete while a warning is still firing.
+
+## Appendix: the focus warnings
+
+Two `[WARN]` families come from `focus_trace.cpp` and need a different
+first move than the file-state warnings above -- they are about *timing*,
+so the surrounding log lines are the evidence, not any file on disk.
+
+- **`[WARN] focus denied`** -- a `SetForegroundWindow` this app made was
+  refused. Windows puts that window's taskbar button into the flashing
+  wants-attention state instead of activating it, so one of these equals one
+  VS Code window pulsing in the taskbar. The line carries the call site
+  (`reason=[...]`), the window that held the foreground instead, and
+  `weHeldForeground`, which together are usually the whole answer.
+
+  The app now cancels that highlight (`FlashWindowEx(FLASHW_STOP)`, inline
+  plus a 250 ms settle pass that logs `taskbar highlight cancelled again`),
+  so the pulse should no longer reach you -- but the warning still fires,
+  because the click itself was dropped and never retried. **Treat it as a
+  report, not as a leftover defect to re-fix.** Deliberately re-asking for
+  the foreground would mean fighting the user for it; see the "A denied
+  request cancels the highlight it caused" section in
+  `docs/ARCHITECTURE.md`.
+
+  The known benign trigger is a shell flyout holding the foreground lock:
+  hovering a taskbar button opens the thumbnail preview
+  (`XamlExplorerHostIslandWindow`), and a HUD click landing while it is up
+  is refused. Check the `before:` window on the `focus request` line -- if
+  it is that class, this is the known case and nothing in this app is
+  broken.
+- **`[WARN] focus storm`** -- three or more distinct windows were activated,
+  or took the foreground, in quick succession. This is the "all the VS Code
+  taskbar thumbnails are highlighted" report. The warning is followed by the
+  whole burst (one `focus storm:` line per event, newest at `-0ms`) and then
+  a full `tracked-window snapshot`.
+
+  **A storm now requires at least one denial in the burst**, because only a
+  denied request highlights anything -- a granted one activates the window.
+  An all-granted burst is logged as `focus burst ... all granted` with the
+  same full dump, and raises nothing. So if you are looking at a `focus
+  storm`, some request in it really was refused: find the `granted=0` line
+  and treat it as the `focus denied` case above.
+
+  Note the `granted=` column only appears on request bursts. It is
+  deliberately absent from foreground-churn dumps, where the field was never
+  populated -- it used to print a hardcoded `granted=0` on every line, which
+  read as a run of denials when nothing had been denied at all. If you are
+  reading an old log from before that fix, ignore `granted=` on any storm
+  whose headline says "the foreground bounced between".
+
+To pull the whole picture for one incident:
+
+```bash
+grep -E "focus |foreground |window launch|snapshot" bin/logs/vscode_border_<session>_*.log
+```
+
+Read it backwards from the warning. The `reason=[...]` tag on each line
+names the gesture that caused it (`hud-hover`, `hud-click`,
+`favourites-startup-autoopen`, ...), and `source=external (not this app)` on
+a `foreground ->` line means something other than this app moved the focus.
+
+One instance has already been found and fixed:
+`favourites-startup-autoopen` used to fire on every launch, because startup
+auto-open ran `code -n <path>` for every favourite without checking whether
+that folder was already open, and VS Code answers that by activating the
+existing window. See `docs/ARCHITECTURE.md`'s "Focus tracing" section. If it
+reappears, the check in `OpenAllFavouritesAtStartup` is where to look: a
+favourite whose path cannot be resolved is deliberately still launched, so a
+project VS Code has never recorded in workspaceStorage can re-trigger it.

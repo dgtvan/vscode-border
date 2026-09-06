@@ -2,6 +2,7 @@
 
 #include "ai_provider.h"
 #include "config.h"
+#include "focus_trace.h"
 #include "label_alias.h"
 #include "logger.h"
 #include "overlay.h"
@@ -505,10 +506,29 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM) {
     return TRUE;
 }
 
+// Dumps every VS Code window this app currently knows about, one line
+// each, plus which of them (if any) holds the foreground. Wired to
+// focus_trace's storm detector: a warning saying "several windows were
+// asked to activate" is only actionable next to the list of what existed
+// at that moment, since the interesting part is usually a window that is
+// in the list and shouldn't be, or one whose state (minimized, hidden)
+// explains why activating it was refused.
+static void LogTrackedWindowsSnapshot(const wchar_t* reason) {
+    HWND fg = GetForegroundWindow();
+    Log(L"tracked-window snapshot (%ls): %zu window(s)", reason, g_tracked.size());
+    for (const auto& kv : g_tracked) {
+        wchar_t desc[400] = {};
+        DescribeWindowForLog(kv.first, desc, 400);
+        Log(L"tracked-window snapshot:   %ls label=[%ls] colorIndex=%d%ls", desc, kv.second.label.c_str(),
+            kv.second.colorIndex, kv.first == fg ? L" <-- FOREGROUND" : L"");
+    }
+}
+
 void TrackingInit(HINSTANCE hInstance, HWND ownerWnd) {
     g_hInstance = hInstance;
     g_ownerWnd = ownerWnd;
     g_projectListHud = CreateProjectListHud(hInstance, g_config.projectListHorizontal);
+    SetFocusStormSnapshotHook(LogTrackedWindowsSnapshot);
 }
 
 void RescanAllWindows() {
@@ -567,6 +587,16 @@ size_t TrackedWindowCount() {
     return g_tracked.size();
 }
 
+std::vector<std::wstring> GetTrackedFolderPaths() {
+    std::vector<std::wstring> paths;
+    for (const auto& kv : g_tracked) {
+        if (kv.second.folderName.empty()) continue;
+        std::wstring path = ResolveFolderPath(kv.second.folderName);
+        if (!path.empty()) paths.push_back(path);
+    }
+    return paths;
+}
+
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
     if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF || !hwnd) return;
 
@@ -604,6 +634,14 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
             TrackWindow(hwnd);
         }
     } else if (event == EVENT_OBJECT_LOCATIONCHANGE || event == EVENT_SYSTEM_FOREGROUND) {
+        // Record every foreground switch on the desktop, not just switches
+        // onto a VS Code window -- this hook is registered globally (see
+        // vscode_border.cpp) precisely so the log can show what focus did
+        // *around* an incident, including whichever other app it bounced
+        // through on the way. See focus_trace.h for what that buys.
+        if (event == EVENT_SYSTEM_FOREGROUND) {
+            NoteForegroundChange(hwnd, g_tracked.find(hwnd) != g_tracked.end());
+        }
         // FOREGROUND matters because bringing a window to the front is a
         // pure z-order change with no move/resize -- LOCATIONCHANGE isn't
         // reliably fired for that, so without this the overlay would only

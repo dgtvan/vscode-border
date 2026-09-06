@@ -1,6 +1,7 @@
 #include "favourites.h"
 
 #include "file_util.h"
+#include "focus_trace.h"
 #include "logger.h"
 #include "text_util.h"
 
@@ -100,6 +101,28 @@ void SaveAll(const std::vector<FavouriteProject>& all) {
     WriteFileBytes(GetFavouritesFilePath(), out);
 }
 
+// Case-insensitive path comparison, tolerant of a trailing separator on
+// either side: favourites.ini holds whatever path the window reported when
+// the user saved it, while the tracked-window paths come back from VS
+// Code's own workspaceStorage records, and the two do not necessarily
+// agree about a trailing backslash.
+bool SamePath(const std::wstring& a, const std::wstring& b) {
+    auto trimmed = [](const std::wstring& p) {
+        size_t end = p.size();
+        while (end > 0 && (p[end - 1] == L'\\' || p[end - 1] == L'/')) end--;
+        return p.substr(0, end);
+    };
+    std::wstring ta = trimmed(a), tb = trimmed(b);
+    return !ta.empty() && ta.size() == tb.size() && _wcsicmp(ta.c_str(), tb.c_str()) == 0;
+}
+
+bool IsPathAlreadyOpen(const std::wstring& path, const std::vector<std::wstring>& openPaths) {
+    for (const std::wstring& open : openPaths) {
+        if (SamePath(path, open)) return true;
+    }
+    return false;
+}
+
 std::vector<FavouriteProject> g_favourites;
 bool g_loaded = false;
 
@@ -154,23 +177,50 @@ void RemoveFavourite(const std::wstring& path) {
     SaveAll(g_favourites);
 }
 
-void OpenAllFavouritesAtStartup() {
+void OpenAllFavouritesAtStartup(const std::vector<std::wstring>& alreadyOpenFolderPaths) {
     EnsureLoaded();
     if (g_favourites.empty()) return;
+
+    // Decide what actually needs launching before resolving the shim or
+    // announcing anything, so a startup where every favourite is already
+    // open does nothing at all and says so in one line.
+    std::vector<const FavouriteProject*> toOpen;
+    for (const FavouriteProject& f : g_favourites) {
+        if (IsPathAlreadyOpen(f.path, alreadyOpenFolderPaths)) {
+            Log(L"favourites: [%ls] is already open -- not relaunching it (a redundant `code -n` would "
+                L"only re-activate that window, leaving the others highlighted in the taskbar)",
+                f.path.c_str());
+            continue;
+        }
+        toOpen.push_back(&f);
+    }
+    if (toOpen.empty()) {
+        Log(L"favourites: all %zu favourite(s) already open, nothing to launch", g_favourites.size());
+        return;
+    }
 
     std::wstring cmdPath;
     if (!ResolveVSCodeCliShimStandalone(cmdPath)) {
         LogWarn(L"favourites: could not locate the VS Code CLI shim (code.cmd/code-insiders.cmd) on PATH or in "
                 L"the usual install locations -- skipping startup auto-open of %zu favourite(s)",
-                g_favourites.size());
+                toOpen.size());
         return;
     }
 
-    for (const FavouriteProject& f : g_favourites) {
-        std::wstring args = L"-n \"" + f.path + L"\"";
+    // Logged as one batch before the loop, not per favourite: the whole
+    // point of the record is that N windows are about to race each other
+    // for the foreground, which is a property of the batch (see
+    // focus_trace.h's reason 3), not of any single ShellExecuteW. Counts
+    // only what is actually being launched, so a startup with nothing to
+    // do never opens a suspect period and so can never attribute someone
+    // alt-tabbing to this app.
+    NoteWindowLaunchRequest(L"favourites-startup-autoopen", toOpen.size());
+
+    for (const FavouriteProject* f : toOpen) {
+        std::wstring args = L"-n \"" + f->path + L"\"";
         HINSTANCE result = ShellExecuteW(nullptr, L"open", cmdPath.c_str(), args.c_str(), nullptr, SW_HIDE);
         if ((INT_PTR)result <= 32) {
-            LogWarn(L"favourites: startup auto-open failed for [%ls] via %ls, code=%Id", f.path.c_str(),
+            LogWarn(L"favourites: startup auto-open failed for [%ls] via %ls, code=%Id", f->path.c_str(),
                     cmdPath.c_str(), (INT_PTR)result);
         }
     }
