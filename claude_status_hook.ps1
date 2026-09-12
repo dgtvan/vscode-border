@@ -258,6 +258,39 @@ if ((-not $claudePid) -and ($data.hook_event_name -eq "SessionStart")) {
 
 $content = "status=$status`ncwd=$($data.cwd)`n"
 if ($claudePid) { $content += "pid=$claudePid`n" }
+
+# The session's transcript, as Claude Code itself reports it. Recorded
+# rather than left for claude_provider.cpp to derive from cwd, because cwd
+# is not the project root: it follows the session's shell, so after a `cd`
+# into a subfolder the derived path names a transcript directory that does
+# not exist -- observed with cwd=...\proplyst\src\web\app\src, whose
+# transcript is under the directory for ...\proplyst.
+if ($data.transcript_path) { $content += "transcript=$($data.transcript_path)`n" }
+
+# Which tool call this "attention" is blocked on. There is no hook for "the
+# permission was answered" (PostToolUse does not fire until the tool has
+# also *finished*, which for an approved long command can be minutes later),
+# but the answer always lands in the transcript as that tool call's
+# tool_result, keyed by this id -- claude_provider.cpp watches for it
+# there. Recorded with the file the result will be written to (a subagent's
+# tool calls go to its own transcript, not the session's) and that file's
+# length right now: the result cannot exist before this hook returns, so
+# the reader only ever needs to look past this point.
+$pendingNote = ""
+if ($data.hook_event_name -eq "PermissionRequest" -and $data.tool_use_id) {
+    $pendingTranscript = $data.transcript_path
+    if ($data.agent_id -and $pendingTranscript -and $pendingTranscript -notmatch '[\\/]subagents[\\/]') {
+        $agentTranscript = Join-Path ($pendingTranscript -replace '\.jsonl$', '') "subagents\agent-$($data.agent_id).jsonl"
+        if (Test-Path -LiteralPath $agentTranscript) { $pendingTranscript = $agentTranscript }
+    }
+    $pendingOffset = 0
+    if ($pendingTranscript -and (Test-Path -LiteralPath $pendingTranscript)) {
+        $pendingOffset = (Get-Item -LiteralPath $pendingTranscript).Length
+    }
+    $content += "pending_tool=$($data.tool_use_id)`npending_transcript=$pendingTranscript`npending_offset=$pendingOffset`n"
+    $pendingNote = " tool=$($data.tool_name) toolUseId=$($data.tool_use_id)"
+    if ($data.agent_id) { $pendingNote += " agent=$($data.agent_id)" }
+}
 [System.IO.File]::WriteAllText($file, $content, [System.Text.UTF8Encoding]::new($false))
 
 $bgCount = if ($data.background_tasks) { $data.background_tasks.Count } else { 0 }
@@ -267,6 +300,6 @@ if ($bgCount -gt 0) {
     $bgDetail = " bgDetail=[" + ($parts -join "; ") + "]"
 }
 $pidNote = if ($script:pidLookupNote) { " pidLookup=[$($script:pidLookupNote.Trim())]" } else { "" }
-Write-HookEventLog "event=$($data.hook_event_name) session=$($data.session_id) status=$status pid=$claudePid$pidNote cwd=$($data.cwd)$bgDetail"
+Write-HookEventLog "event=$($data.hook_event_name) session=$($data.session_id) status=$status pid=$claudePid$pidNote cwd=$($data.cwd)$pendingNote$bgDetail"
 
 exit 0

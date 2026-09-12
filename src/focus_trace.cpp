@@ -43,6 +43,13 @@ struct FocusAttempt {
     HWND target = nullptr;
     bool granted = false;
     const wchar_t* reason = L"";
+    // Foreground-change queue only: whether a *denied* request of ours is
+    // behind this change, which is the only thing that makes a churn burst
+    // evidence of a highlighted window (see NoteForegroundChange).
+    // `granted` is the equivalent for the request queue. Each queue leaves
+    // the other's field at its default, which is why neither dump prints
+    // the field it did not populate.
+    bool deniedRequestBehind = false;
 };
 
 static std::deque<FocusAttempt> g_attempts;
@@ -147,20 +154,31 @@ static void ReportStorm(const wchar_t* what, const std::deque<FocusAttempt>& q, 
 // the case where the burst provably did *not* produce the reported symptom
 // (see the granted-only check in RequestForeground). Keeping the full dump
 // means a sweep is still reconstructable from the log afterwards.
-static void LogBenignBurst(const wchar_t* what, const std::deque<FocusAttempt>& q, DWORD now, DWORD windowMs) {
-    Log(L"focus burst: %ls -- %zu event(s) across %zu distinct window(s) within %lums, all granted, so no window "
-        L"was left highlighted; not reporting it as a storm.",
-        what, q.size(), DistinctTargets(q), windowMs);
+static void LogBenignBurst(const wchar_t* what, const wchar_t* why, const std::deque<FocusAttempt>& q, DWORD now,
+                           DWORD windowMs, bool showGranted) {
+    Log(L"focus burst: %ls -- %zu event(s) across %zu distinct window(s) within %lums, %ls; not reporting it as a "
+        L"storm.",
+        what, q.size(), DistinctTargets(q), windowMs, why);
     for (const FocusAttempt& a : q) {
         wchar_t desc[400] = {};
         DescribeWindowForLog(a.target, desc, 400);
-        Log(L"focus burst:   -%lums reason=[%ls] granted=%d %ls", now - a.tick, a.reason, a.granted ? 1 : 0, desc);
+        if (showGranted)
+            Log(L"focus burst:   -%lums reason=[%ls] granted=%d %ls", now - a.tick, a.reason, a.granted ? 1 : 0,
+                desc);
+        else
+            Log(L"focus burst:   -%lums reason=[%ls] %ls", now - a.tick, a.reason, desc);
     }
 }
 
 static bool AnyDenied(const std::deque<FocusAttempt>& q) {
     for (const FocusAttempt& a : q)
         if (!a.granted) return true;
+    return false;
+}
+
+static bool AnyDeniedRequestBehind(const std::deque<FocusAttempt>& q) {
+    for (const FocusAttempt& a : q)
+        if (a.deniedRequestBehind) return true;
     return false;
 }
 
@@ -192,12 +210,17 @@ static void CancelTaskbarFlash(HWND target) {
 // second time once the dust has settled covers that ordering and costs
 // nothing when the first one already worked.
 //
-// Note what this deliberately is *not*: a retry of the focus request. A
-// denial normally means the user is busy elsewhere -- a shell flyout (the
-// taskbar's thumbnail preview, XamlExplorerHostIslandWindow) holds the
-// foreground lock while it is up -- so re-asking would be this app fighting
-// the user for the foreground. Stopping a flash takes nothing away from
-// anyone, so it is safe to repeat; stealing the foreground is not.
+// Note what this deliberately is *not*: a retry of the focus request.
+// Re-asking for the foreground behind the user's back would be this app
+// fighting them for it; stopping a flash takes nothing away from anyone, so
+// it is safe to repeat. A retry would not even help with the one denial
+// that was ever common here -- a HUD click while the taskbar's thumbnail
+// flyout (XamlExplorerHostIslandWindow) held the foreground: while that
+// flyout is up, *nothing* aimed at another window is granted, however it is
+// asked. That case is now avoided before the request is made, by letting
+// the click activate the HUD and dismiss the flyout (project_list_hud.cpp,
+// SetHudClickActivates), so a denial reaching this point is back to being
+// the exception it is reported as.
 static const UINT kFlashStopSettleDelayMs = 250;
 static std::unordered_map<UINT_PTR, HWND> g_flashStopTimers;
 
@@ -283,7 +306,9 @@ bool RequestForeground(HWND target, FocusTargetKind kind, const wchar_t* reason)
         // the warning when it is real. The burst is still logged either way.
         const wchar_t* what = L"this app asked to activate several different windows in quick succession";
         if (AnyDenied(g_attempts)) ReportStorm(what, g_attempts, now, kRequestBurstWindowMs, true);
-        else LogBenignBurst(what, g_attempts, now, kRequestBurstWindowMs);
+        else
+            LogBenignBurst(what, L"all granted, so no window was left highlighted", g_attempts, now,
+                           kRequestBurstWindowMs, true);
     }
     return ok != 0;
 }
@@ -315,14 +340,18 @@ void NoteForegroundChange(HWND hwnd, bool isTrackedVSCodeWindow) {
     //
     // Denied requests are deliberately still recorded: those do not move
     // the foreground, so a change arriving after one came from somewhere
-    // else and is exactly what this detector is for. So is anything with no
-    // request behind it -- the launch case (favourites auto-open), where
-    // the new windows activate themselves and the losers flash, which is
-    // what this queue was written for in the first place.
+    // else and is exactly what this detector is for. Changes with no
+    // request behind them -- the launch case (favourites auto-open) -- are
+    // recorded too, so the burst is still dumped in full, but they no
+    // longer warn on their own: see the evidence check further down.
     if (ours && g_lastRequestGranted) return;
 
+    // Having survived that early return, an attributed change is by
+    // construction one whose request was *denied* -- which is the one thing
+    // in this queue that proves a window really was left highlighted. An
+    // unattributed one carries no such evidence; see the check below.
     PruneOlderThanWindow(g_foregroundChanges, now, kForegroundChurnWindowMs);
-    g_foregroundChanges.push_back({now, hwnd, false, ours ? g_lastRequestReason : L"external"});
+    g_foregroundChanges.push_back({now, hwnd, false, ours ? g_lastRequestReason : L"external", ours});
     if (DistinctTargets(g_foregroundChanges) < kStormDistinctTargets) return;
 
     // Only warn while something this app did could still explain it.
@@ -340,6 +369,35 @@ void NoteForegroundChange(HWND hwnd, bool isTrackedVSCodeWindow) {
     wchar_t what[300] = {};
     _snwprintf_s(what, 300, _TRUNCATE, L"the foreground bounced between several VS Code windows after [%ls]",
                  g_suspectReason);
+
+    // The same rule the request burst above applies, and for the same
+    // reason: only a *denied* activation highlights anything. It matters
+    // more here, because of what this queue is made of. Every entry is an
+    // EVENT_SYSTEM_FOREGROUND notification, and that event fires when a
+    // window *becomes* the foreground -- so each entry is, by definition, an
+    // activation that succeeded. A window that lost the race never becomes
+    // foreground and therefore never appears here at all. The queue is a
+    // list of the windows that provably did *not* flash, which makes churn
+    // on its own incapable of evidencing the symptom, however fast it is.
+    //
+    // Left unchecked that warned on every startup with several favourites:
+    // opening five windows had them take the foreground one after another,
+    // all five granted, no request of ours involved and nothing denied
+    // anywhere in the run -- and the app then reported the very windows it
+    // had just watched come forward as "may now be showing the highlighted
+    // wants-attention state", badging the tray on an ordinary launch.
+    //
+    // What is deliberately given up: a launched window that really was
+    // refused the foreground stays invisible, because nothing observable
+    // reaches this app when that happens. That is a blind spot either way --
+    // warning unconditionally is not detection of it, just a constant. The
+    // burst is still dumped in full, so the log is no less reconstructable.
+    if (!AnyDeniedRequestBehind(g_foregroundChanges)) {
+        LogBenignBurst(what, L"every one of them was a window successfully taking the foreground, so none of them "
+                             L"was left highlighted",
+                       g_foregroundChanges, now, kForegroundChurnWindowMs, false);
+        return;
+    }
     ReportStorm(what, g_foregroundChanges, now, kForegroundChurnWindowMs, false);
 }
 

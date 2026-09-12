@@ -208,6 +208,30 @@ be found (e.g. a future Claude Code version changes this layout) -- the
 status just stays as last reported by the hooks, same as before this
 existed.
 
+That activity check turned out to be too loose in one direction and too
+short-lived in the other, so a permission prompt now uses something exact
+instead. The `PermissionRequest` hook records which tool call is blocked
+(`pending_tool=<tool_use_id>`), and the answer to that prompt always lands in
+the transcript as that same call's `tool_result` -- the approved tool's
+output, your `AskUserQuestion` answers, or the rejection. Checked across 131
+real transcripts: every one of 15,043 occurrences of `"tool_use_id":"<id>"`
+was that call's own result. So "Attention" clears the moment that line
+appears, with no timing window to expire (a session that answers a prompt and
+then writes one long response can go ten minutes without touching its
+transcript, which the 30-second activity window read as "back to
+Attention"), and unrelated writes while the prompt is still open -- a
+parallel tool's result, a title update -- no longer clear it early. A
+subagent's prompt is watched in the subagent's own transcript
+(`<session>/subagents/agent-<id>.jsonl`), where its result is written.
+
+The hook also records Claude Code's own `transcript_path` for every event
+rather than leaving the app to derive it from `cwd`. `cwd` follows the
+session's shell, so once Claude `cd`s into a subfolder the derived path
+names a transcript directory that doesn't exist -- which is how a session
+sat on a pulsing "Attention" for over half an hour after its question had
+been answered: its status file said `cwd=...\proplyst\src\web\app\src`, and
+every transcript check silently found nothing.
+
 **Working** has the opposite gap: `Stop` does not fire when the user
 manually interrupts a turn (Escape/Ctrl+C mid-response), confirmed against
 a real session that stayed reported as "Working" for over 20 minutes after
