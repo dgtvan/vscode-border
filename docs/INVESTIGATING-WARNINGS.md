@@ -244,30 +244,52 @@ so the surrounding log lines are the evidence, not any file on disk.
   The app now cancels that highlight (`FlashWindowEx(FLASHW_STOP)`, inline
   plus a 250 ms settle pass that logs `taskbar highlight cancelled again`),
   so the pulse should no longer reach you -- but the warning still fires,
-  because the click itself was dropped and never retried. **Treat it as a
-  report, not as a leftover defect to re-fix.** Deliberately re-asking for
-  the foreground would mean fighting the user for it; see the "A denied
-  request cancels the highlight it caused" section in
-  `docs/ARCHITECTURE.md`.
+  because the click itself was dropped. **That dropped click is a real
+  defect, not a report to file away.** This doc once said otherwise, and
+  seven of these went by in a single day before anyone checked what they
+  meant for the user: every one was followed a second later by a
+  `hud activate` for the *same item* -- the user clicking again because
+  nothing happened. Look for that repeat; it is the tell that a "benign"
+  warning is costing someone something. The fix is never a blind retry
+  (re-asking behind the user's back fights them for the foreground), it is
+  removing whatever made the request unwinnable -- see "A click past a
+  taskbar flyout" in `docs/ARCHITECTURE.md`.
 
-  The known benign trigger is a shell flyout holding the foreground lock:
-  hovering a taskbar button opens the thumbnail preview
-  (`XamlExplorerHostIslandWindow`), and a HUD click landing while it is up
-  is refused. Check the `before:` window on the `focus request` line -- if
-  it is that class, this is the known case and nothing in this app is
-  broken.
+  The one trigger ever seen in practice was the taskbar's thumbnail flyout
+  (`XamlExplorerHostIslandWindow`, opened by clicking VS Code's grouped
+  taskbar button) holding the foreground when a HUD click landed. That is
+  **no longer benign and no longer expected**: the HUD now dismisses the
+  flyout with the click itself (`SetHudClickActivates`, see "A click past a
+  taskbar flyout" in `docs/ARCHITECTURE.md`), and a working instance logs
+  `hud: taskbar flyout holds the foreground -- ...` followed by a request
+  with `before:` the HUD and `granted=1`. So a `focus denied` whose `before:`
+  is that class means the workaround did not engage -- look for that `hud:`
+  line just above it. Absent means the HUD never saw a mouse move before the
+  click; present means the click did not activate the HUD, i.e. the style
+  change did not take.
+
+  Clicks on the part of the HUD above the taskbar band never reach this app
+  while the flyout is up (the flyout's full-screen window takes them), so
+  those produce no log line at all -- if the user reports a dead click and
+  the log has nothing, that is the case.
 - **`[WARN] focus storm`** -- three or more distinct windows were activated,
   or took the foreground, in quick succession. This is the "all the VS Code
   taskbar thumbnails are highlighted" report. The warning is followed by the
   whole burst (one `focus storm:` line per event, newest at `-0ms`) and then
   a full `tracked-window snapshot`.
 
-  **A storm now requires at least one denial in the burst**, because only a
-  denied request highlights anything -- a granted one activates the window.
-  An all-granted burst is logged as `focus burst ... all granted` with the
-  same full dump, and raises nothing. So if you are looking at a `focus
-  storm`, some request in it really was refused: find the `granted=0` line
-  and treat it as the `focus denied` case above.
+  **A storm requires at least one denial in the burst**, on both paths,
+  because only a denied request highlights anything -- a granted one
+  activates the window. A burst with no denial behind it is logged as
+  `focus burst ...` with the same full dump, and raises nothing. So if you
+  are looking at a `focus storm`, some request in it really was refused:
+  on a request burst find the `granted=0` line, on a churn burst find the
+  `focus denied` warning next to it, and treat it as the case above.
+
+  This is why a `focus storm` and a `focus denied` should now always appear
+  together. A run containing churn but no `focus denied` line anywhere had
+  nothing highlighted -- that is the shape of a false positive, and if you
+  see one warn on its own, that is the bug.
 
   Note the `granted=` column only appears on request bursts. It is
   deliberately absent from foreground-churn dumps, where the field was never
@@ -287,11 +309,24 @@ names the gesture that caused it (`hud-hover`, `hud-click`,
 `favourites-startup-autoopen`, ...), and `source=external (not this app)` on
 a `foreground ->` line means something other than this app moved the focus.
 
-One instance has already been found and fixed:
-`favourites-startup-autoopen` used to fire on every launch, because startup
-auto-open ran `code -n <path>` for every favourite without checking whether
-that folder was already open, and VS Code answers that by activating the
-existing window. See `docs/ARCHITECTURE.md`'s "Focus tracing" section. If it
-reappears, the check in `OpenAllFavouritesAtStartup` is where to look: a
-favourite whose path cannot be resolved is deliberately still launched, so a
-project VS Code has never recorded in workspaceStorage can re-trigger it.
+Two instances have already been found and fixed, both under
+`favourites-startup-autoopen`, and it is worth knowing which is which before
+concluding anything about a third:
+
+1. **Auto-open activating windows that were already open.** Startup auto-open
+   ran `code -n <path>` for every favourite without checking whether that
+   folder was already open, and VS Code answers that by activating the
+   existing window. If it reappears, the check in
+   `OpenAllFavouritesAtStartup` is where to look: a favourite whose path
+   cannot be resolved is deliberately still launched, so a project VS Code
+   has never recorded in workspaceStorage can re-trigger it.
+2. **The churn detector treating success as evidence.** Even with genuinely
+   new windows, the foreground-churn queue warned on every multi-favourite
+   launch. Its entries are `EVENT_SYSTEM_FOREGROUND` events, which only fire
+   for windows that *succeeded* in taking the foreground, so the queue could
+   never contain a window that flashed. It now warns only when a denied
+   request is behind the burst.
+
+Both are in `docs/ARCHITECTURE.md`'s "Focus tracing" section. The general
+lesson for the next one: check for a `focus denied` line in the same run
+before believing a storm at all.

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <map>
 #include <set>
 #include <vector>
 
@@ -210,7 +211,17 @@ bool IsNewerByMargin(const FILETIME& newer, const FILETIME& older, DWORD marginS
     return (a.QuadPart - b.QuadPart) > (ULONGLONG)marginSeconds * 10000000ULL;
 }
 
-std::wstring GetTranscriptPath(const std::wstring& cwd, const std::wstring& sessionId) {
+// `recorded` is the transcript_path Claude Code itself passed to the hook
+// (the status file's transcript= line) and wins whenever present. Deriving
+// the path from cwd is only the fallback for status files written before
+// that line existed, and it is wrong whenever the session has cd'd out of
+// the project root: cwd follows the session's shell, so the derived
+// directory may not exist at all. Observed on a session whose status file
+// said cwd=...\proplyst\src\web\app\src -- every transcript check below
+// silently found no file and did nothing for that session, which is how it
+// sat on "attention" for 10+ minutes after the prompt was answered.
+std::wstring GetTranscriptPath(const std::wstring& recorded, const std::wstring& cwd, const std::wstring& sessionId) {
+    if (!recorded.empty()) return recorded;
     std::wstring projectsDir = GetProjectsDir();
     if (projectsDir.empty()) return L"";
     return projectsDir + L"\\" + EncodeProjectDirName(cwd) + L"\\" + sessionId + L".jsonl";
@@ -261,8 +272,7 @@ std::string ReadFileTail(const std::wstring& path, DWORD maxBytes) {
 // transcript kept growing until 20:41 when Stop finally fired -- for that
 // whole 14 minutes, this check would have correctly shown the transcript
 // was still moving, well past this margin.
-bool HasNewerTranscriptActivity(const std::wstring& cwd, const std::wstring& sessionId, const FILETIME& sinceFt) {
-    std::wstring transcriptPath = GetTranscriptPath(cwd, sessionId);
+bool HasNewerTranscriptActivity(const std::wstring& transcriptPath, const FILETIME& sinceFt) {
     if (transcriptPath.empty()) return false;
     WIN32_FILE_ATTRIBUTE_DATA data;
     if (!GetFileAttributesExW(transcriptPath.c_str(), GetFileExInfoStandard, &data)) return false;
@@ -292,8 +302,7 @@ const char* kInterruptedMarker = "[Request interrupted by user]";
 // last line (not "does this marker appear anywhere"), since an old
 // interrupt earlier in a long session that Claude has since resumed work
 // past is not still-relevant information.
-bool WasLastTranscriptEntryInterrupted(const std::wstring& cwd, const std::wstring& sessionId) {
-    std::wstring transcriptPath = GetTranscriptPath(cwd, sessionId);
+bool WasLastTranscriptEntryInterrupted(const std::wstring& transcriptPath) {
     if (transcriptPath.empty()) return false;
     std::string tail = ReadFileTail(transcriptPath, 8192);
     if (tail.empty()) return false;
@@ -307,6 +316,67 @@ bool WasLastTranscriptEntryInterrupted(const std::wstring& cwd, const std::wstri
     std::string lastLine = tail.substr(start, end - start + 1);
 
     return lastLine.find(kInterruptedMarker) != std::string::npos;
+}
+
+// Reads up to `maxBytes` starting at `offset` (clamped to the file's end).
+std::string ReadFileRange(const std::wstring& path, ULONGLONG offset, DWORD maxBytes) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return "";
+    LARGE_INTEGER size;
+    std::string buf;
+    if (GetFileSizeEx(h, &size) && (ULONGLONG)size.QuadPart > offset) {
+        LARGE_INTEGER pos;
+        pos.QuadPart = (LONGLONG)offset;
+        DWORD toRead = (DWORD)std::min<ULONGLONG>(maxBytes, (ULONGLONG)size.QuadPart - offset);
+        buf.assign(toRead, '\0');
+        DWORD bytesRead = 0;
+        if (!SetFilePointerEx(h, pos, nullptr, FILE_BEGIN) || !ReadFile(h, &buf[0], toRead, &bytesRead, nullptr))
+            bytesRead = 0;
+        buf.resize(bytesRead);
+    }
+    CloseHandle(h);
+    return buf;
+}
+
+// Enough to span the answer to a prompt plus whatever landed alongside it
+// (parallel tool results, a long command's output); the result is written the
+// moment the prompt is answered, so it sits near the start of this window.
+const DWORD kPendingToolScanBytes = 4 * 1024 * 1024;
+
+// Whether the tool call a PermissionRequest was blocked on (the status
+// file's pending_tool=, see claude_status_hook.ps1) has been answered.
+//
+// This is what actually clears "attention". There is no hook for "the user
+// answered the prompt"; PostToolUse only fires once the tool has also run to
+// completion, which for an approved long command can be minutes later.
+// But the answer always reaches the transcript as that exact call's
+// tool_result -- the approved tool's output, the user's AskUserQuestion
+// answers, or the rejection -- carrying `"tool_use_id":"<id>"`. Checked
+// across 131 real transcripts: all 15,043 occurrences of that string were
+// on the tool_result for that id and nowhere else, so its presence is proof
+// the prompt was answered, not a heuristic. Unlike HasNewerTranscriptActivity
+// it has no recency window to expire, which matters: a session that answers
+// a prompt and then spends ten minutes writing one long response writes
+// nothing to its transcript in the meantime.
+//
+// Only the bytes after pending_offset are read (the result cannot predate
+// the hook), and a hit is remembered per session so the file is not read
+// again on every sync once answered.
+bool IsPendingToolAnswered(const std::wstring& sessionId, const std::string& toolUseId,
+                           const std::wstring& transcriptPath, ULONGLONG offset) {
+    static std::map<std::wstring, std::string> answered; // sessionId -> last answered tool_use_id
+    auto it = answered.find(sessionId);
+    if (it != answered.end() && it->second == toolUseId) return true;
+    if (transcriptPath.empty()) return false;
+
+    std::string region = ReadFileRange(transcriptPath, offset, kPendingToolScanBytes);
+    if (region.find("\"tool_use_id\":\"" + toolUseId + "\"") == std::string::npos) return false;
+    answered[sessionId] = toolUseId;
+    Log(L"claude_provider: %ls's pending tool call %ls has its result in the transcript -- the prompt was "
+        L"answered, correcting attention to working",
+        sessionId.c_str(), Utf8ToWide(toolUseId).c_str());
+    return true;
 }
 
 struct HooksLocation {
@@ -470,6 +540,9 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
         std::string content = ReadFileBytes(path);
         AiSessionStatus status;
         DWORD pid = 0;
+        std::wstring recordedTranscript, pendingTranscript;
+        std::string pendingTool;
+        ULONGLONG pendingOffset = 0;
         size_t pos = 0;
         while (pos < content.size()) {
             size_t eol = content.find('\n', pos);
@@ -484,6 +557,10 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
             if (key == "status") status.status = Utf8ToWide(rawValue);
             else if (key == "cwd") status.cwd = Utf8ToWide(rawValue);
             else if (key == "pid") pid = (DWORD)atol(rawValue.c_str());
+            else if (key == "transcript") recordedTranscript = Utf8ToWide(rawValue);
+            else if (key == "pending_tool") pendingTool = rawValue;
+            else if (key == "pending_transcript") pendingTranscript = Utf8ToWide(rawValue);
+            else if (key == "pending_offset") pendingOffset = _strtoui64(rawValue.c_str(), nullptr, 10);
         }
         if (status.status.empty() || status.cwd.empty()) continue;
 
@@ -533,7 +610,18 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
         // transcript file (see GetTranscriptPath and friends) catches both
         // directions with real evidence instead of a wall-clock guess:
         std::wstring sessionId = fileName.substr(0, fileName.size() - 4); // strip ".ini"
-        if (status.status != L"working" && HasNewerTranscriptActivity(status.cwd, sessionId, fd.ftLastWriteTime)) {
+        std::wstring transcriptPath = GetTranscriptPath(recordedTranscript, status.cwd, sessionId);
+        if (status.status == L"attention" && !pendingTool.empty()) {
+            // A permission prompt whose tool call is known: its own result
+            // is the exact answer (see IsPendingToolAnswered), so the
+            // looser activity check below is deliberately not consulted --
+            // unrelated transcript writes while the prompt is still open
+            // (a parallel tool's result, a title update) must not hide a
+            // session that genuinely needs the user.
+            if (IsPendingToolAnswered(sessionId, pendingTool,
+                                      pendingTranscript.empty() ? transcriptPath : pendingTranscript, pendingOffset))
+                status.status = L"working";
+        } else if (status.status != L"working" && HasNewerTranscriptActivity(transcriptPath, fd.ftLastWriteTime)) {
             // "Attention" (or "Waiting"): there's no "permission granted,
             // resuming" event, so once a permission prompt fires, nothing
             // updates the status again until the turn's eventual Stop,
@@ -543,7 +631,12 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
                 L"working",
                 fileName.c_str(), status.status.c_str());
             status.status = L"working";
-        } else if (status.status == L"working" && WasLastTranscriptEntryInterrupted(status.cwd, sessionId)) {
+        }
+        // Deliberately not chained to the corrections above: a session one
+        // of them just moved to "working" can equally have been interrupted
+        // since (answering a prompt and then pressing Escape leaves exactly
+        // that shape), and the marker is still the last word on it.
+        if (status.status == L"working" && WasLastTranscriptEntryInterrupted(transcriptPath)) {
             // "Working": Stop does not fire on a manual interrupt
             // (Escape/Ctrl+C mid-response) -- confirmed against a real
             // session that stayed reported as "working" over 20 minutes

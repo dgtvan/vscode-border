@@ -242,13 +242,15 @@ calling process received the last input event*. That normally holds (the
 click went to the HUD), which is why the overwhelming majority of HUD clicks
 are granted.
 
-It stops holding when a shell flyout is up. Hovering a taskbar button opens
-the thumbnail preview (`XamlExplorerHostIslandWindow`), which takes the
-foreground and holds the foreground lock while it is open; a HUD click
+It stops holding when a taskbar flyout is up. Clicking VS Code's taskbar
+button -- one grouped button for all its windows -- opens the thumbnail list
+(`XamlExplorerHostIslandWindow`), which takes the foreground; a HUD click
 landing in that moment is refused. The user-visible result is a VS Code
 taskbar thumbnail pulsing a few times and then settling, seconds after a
 click that appeared to do nothing -- one denial, not a burst, because the
-taskbar repeats the pulse on its own.
+taskbar repeats the pulse on its own. That was once the whole source of
+`focus denied` warnings; it is now avoided up front -- see *A click past a
+taskbar flyout* below.
 
 `RequestForeground` now clears that state with `FlashWindowEx(FLASHW_STOP)`
 whenever an `ExternalWindow` request is refused: once inline, and once more
@@ -258,12 +260,65 @@ cancel can lose that race. The settle pass logs a line of its own -- there
 is no Win32 call that reports whether a taskbar button is flashing, so that
 line is the only evidence it ran.
 
-What this deliberately does **not** do is retry the activation. A denial
-usually means the user is busy elsewhere -- that is what holding the
-foreground lock means -- so re-asking would be this app fighting the user
-for the foreground. The click is dropped; only the misleading pulse is
-taken back. The `[WARN]` stays, because a click that silently did nothing is
-still worth knowing about.
+What this deliberately does **not** do is retry the activation. Re-asking
+behind the user's back would be this app fighting them for the foreground,
+and for the flyout case it would not work anyway (below). The click is
+dropped; only the misleading pulse is taken back. The `[WARN]` stays,
+because a click that silently did nothing is still worth knowing about.
+
+### A click past a taskbar flyout
+
+Cancelling the pulse left the click itself lost, and in practice that was
+not rare: the log showed seven denials in one day, every one of them a HUD
+click with the thumbnail flyout holding the foreground, and every one
+followed a second later by the same click again -- the user retrying,
+because nothing had happened. The gesture is natural: click VS Code's
+taskbar button to pick a window, then use the HUD instead of a thumbnail.
+
+What does not work was established with a test harness (a
+`WS_EX_NOACTIVATE` topmost window standing in for the HUD, clicked via
+`SendInput` after the harness itself had opened the flyout, targeting a plain
+window in a separate process). With the flyout up, every one of these was
+refused: plain `SetForegroundWindow`; a dummy `SendInput` first;
+`SwitchToThisWindow`; an injected Alt tap; an injected Escape (which does not
+even close the flyout); minimize + restore; and `AttachThreadInput` to the
+flyout's thread -- which did make the harness the foreground process, and the
+request was *still* refused. Nothing aimed at another window is granted while
+the flyout is up, so waiting and retrying is no fix either; the flyout stayed
+up for 3 s untouched. Control: the same click with no flyout was granted.
+
+What does work is letting the flyout be deactivated, which a
+`WS_EX_NOACTIVATE` click can never do. So while the flyout holds the
+foreground and the cursor is over the HUD, `SetHudClickActivates` lifts
+`WS_EX_NOACTIVATE`: the click activates the HUD the ordinary way (a system
+activation, always allowed), which dismisses the flyout and makes this
+process the foreground one, and the item's activation on button-up is then
+granted. 5 of 5 in the harness; confirmed in the real app, where the trace
+reads `before:` the HUD, `weHeldForeground=1`, `after: (== target)`. The
+style goes back on button-up, on mouse-leave, and on the first mouse move
+after the flyout is gone -- a click with no flyout involved behaves exactly
+as before. It has to be done on hover rather than on the click: the style is
+consulted before any message reaches the HUD, and no `WM_MOUSEACTIVATE`
+arrives for a no-activate window to change its mind in.
+
+`project_list_activate_on_hover` gets the matching treatment: while a flyout
+is up, hover activation is skipped (logged as `hud-hover: skipped`), since
+without a click there is nothing to dismiss the flyout with and every request
+would be a guaranteed denial.
+
+One limit, found while verifying: the flyout's window covers the whole
+screen, with only the taskbar band cut out of its hit area. While it is up,
+the part of the HUD that sits above the taskbar receives no mouse input at
+all -- those clicks go to the flyout, not to this app, and nothing is logged.
+Only the HUD's pixels over the taskbar band (or a HUD placed elsewhere and
+clear of the flyout) are reachable. That is the shell's z-order, which a
+topmost window does not outrank; it is not something this app can fix.
+
+A lesson from the harness worth keeping: validate the target. The first
+round of results was void because the target window had closed without
+notice, so every strategy was measured against a dead handle and "failed".
+The harness now refuses to run unless the target is a live, visible window,
+and a no-flyout control run has to succeed before any flyout result counts.
 
 The storm detector deliberately only *warns* about foreground churn inside a
 "suspect period" opened by something this app did (a launch, or an external
@@ -291,9 +346,9 @@ exactly the shape that tripped it:
   from every click -- a guaranteed false storm on an ordinary gesture. The
   queue now skips changes attributable to one of our own granted requests,
   which is what its comment always claimed it did. Denied requests and
-  changes with no request behind them are still recorded: those are the
-  launch case this queue was written for, where new windows activate
-  themselves and the losers flash.
+  changes with no request behind them are still recorded, so the burst is
+  still dumped in full -- but recording is no longer the same as warning;
+  see *Churn alone is never evidence* below.
 - **Request bursts.** `RequestForeground` now raises `[WARN] focus storm`
   only when the burst contains at least one denial. An all-granted burst is
   still dumped in full, as `focus burst ... all granted, so no window was
@@ -307,10 +362,10 @@ than merely mislabelled. Found while testing this: three external
 activations fired 300 ms after a granted HUD click produced no storm,
 because the first of them was attributed to the click. Moving them past
 400 ms reported the storm normally. The blind spot is accepted -- inside
-that window our own request really is the dominant explanation -- and it
-does not touch the launch case, where `NoteWindowLaunchRequest` opens a 15 s
-suspect period with no `RequestForeground` involved at all, so nothing is
-ever attributed to us.
+that window our own request really is the dominant explanation. It does not
+apply to the launch case at all, where `NoteWindowLaunchRequest` opens a 15 s
+suspect period with no `RequestForeground` involved, so nothing is ever
+attributed to us there.
 
 One related reporting bug is worth recording because it actively misleads.
 The foreground-change queue reuses `FocusAttempt` without filling in its
@@ -319,3 +374,44 @@ churn dump described a run of perfectly successful activations as three
 `granted=0` lines, i.e. as three denials, which is the exact signature of the
 bug being hunted. `ReportStorm` now takes a `showGranted` flag and omits the
 column where it means nothing.
+
+### Churn alone is never evidence
+
+Excluding our own granted requests fixed the HUD-click false storm but left
+the launch case warning on **every** startup that opened several favourites.
+The reason it had to go is structural, not a matter of tuning thresholds.
+
+Every entry in the foreground-change queue is an `EVENT_SYSTEM_FOREGROUND`
+notification, and that event fires when a window *becomes* the foreground --
+so every entry is an activation that **succeeded**. A window refused the
+foreground never becomes foreground, so it never generates the event and
+never lands in the queue at all. The queue is therefore a list of precisely
+the windows that did *not* flash, and no amount of churn in it can evidence a
+window that did. The detector was reporting the windows it had just watched
+come forward as ones that "may now be showing the highlighted wants-attention
+state".
+
+Confirmed against the logs before the fix: three separate runs raised this
+storm, two of them opening five favourites. In each, every launched window
+was observed taking the foreground in turn -- five launched, five distinct
+`foreground ->` events -- and **not one run contained a single `focus denied`
+line anywhere**. Nothing had been denied, so nothing had been highlighted.
+VS Code opens the windows sequentially rather than simultaneously, so each
+one takes the foreground as it appears; the "last one wins and the rest
+flash" story in the original header comment did not survive contact with the
+log.
+
+So `NoteForegroundChange` now applies the same rule `RequestForeground`
+already did: warn only if a *denied* request is behind some entry in the
+burst. That is tracked explicitly (`FocusAttempt::deniedRequestBehind`)
+rather than inferred, though by construction it equals "attributed to one of
+our requests" -- the granted ones having already returned early above it.
+An all-successful burst is logged as `focus burst ... every one of them was a
+window successfully taking the foreground`, with the full dump and no tray
+badge.
+
+What this gives up: a launched window genuinely refused the foreground stays
+invisible, since nothing observable reaches this app when that happens. That
+was already true -- warning unconditionally on every launch was not detection
+of it, only a constant that badged the tray on ordinary startup and devalued
+the warning for the cases that are real.

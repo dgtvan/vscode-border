@@ -69,6 +69,7 @@ struct ProjectListHudState {
     bool trackingMouseLeave = false;
     bool hoverFocusActive = false;
     HWND previousForeground = nullptr;
+    bool clickActivates = false; // WS_EX_NOACTIVATE temporarily lifted -- see SetHudClickActivates
     bool manualPosition = false;
     bool manualWidth = false;
     int manualItemWidth = 0; // horizontal style only: the user's chosen per-item width, independent of
@@ -293,6 +294,54 @@ static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
         }
     }
     return true;
+}
+
+// True while one of the taskbar's own flyouts holds the foreground -- the
+// thumbnail list that clicking a grouped taskbar button opens (several VS
+// Code windows -> one grouped button -> this flyout), which is exactly the
+// moment someone reaches for this HUD instead of picking a thumbnail.
+//
+// While it is up, *no* SetForegroundWindow aimed at another window is
+// granted, from anyone. Measured with a stand-in for this HUD against a
+// throwaway target window: refused with a plain request, after a dummy
+// SendInput, via SwitchToThisWindow, after an injected Alt tap, after an
+// injected Escape (which does not even close it), and after minimize +
+// restore -- and still refused when this process had been made the
+// foreground one by AttachThreadInput. The same stand-in with the flyout
+// closed was granted every time. The flyout gives the foreground back only
+// when it is itself deactivated, and a WS_EX_NOACTIVATE click never
+// deactivates anything -- see SetHudClickActivates for the way out.
+static bool ForegroundIsTaskbarFlyout() {
+    HWND fg = GetForegroundWindow();
+    if (!fg || !IsWindowVisible(fg)) return false; // Alt+Tab's switcher shares the class but is invisible
+    wchar_t cls[64] = {};
+    GetClassNameW(fg, cls, 64);
+    return wcscmp(cls, L"XamlExplorerHostIslandWindow") == 0;
+}
+
+// The HUD is WS_EX_NOACTIVATE so that using it never takes focus away from
+// the editor. That is also why a HUD click cannot get past a taskbar flyout
+// (see ForegroundIsTaskbarFlyout): only a *system* activation deactivates
+// the flyout, and a no-activate window never causes one.
+//
+// So while a flyout holds the foreground and the cursor is over the HUD, the
+// style is lifted: the click then activates the HUD the ordinary way, which
+// dismisses the flyout and makes this process the foreground one, and the
+// item's activation that follows on button-up is granted. Measured with the
+// same stand-in: 5 of 5 granted, the target foreground immediately, where
+// every attempt without this was refused. Put back as soon as the cursor
+// leaves or the flyout is gone, so everyday clicks stay exactly as before.
+static void SetHudClickActivates(HWND hud, ProjectListHudState* state, bool activates) {
+    if (!state || state->clickActivates == activates) return;
+    LONG_PTR ex = GetWindowLongPtrW(hud, GWL_EXSTYLE);
+    SetWindowLongPtrW(hud, GWL_EXSTYLE, activates ? (ex & ~WS_EX_NOACTIVATE) : (ex | WS_EX_NOACTIVATE));
+    state->clickActivates = activates;
+    // Logged because the HUD then shows up in the trace as a foreground
+    // change with no request of ours behind it (source=external), which is
+    // otherwise unexplained.
+    Log(L"hud: %ls", activates ? L"taskbar flyout holds the foreground -- a click on the HUD will activate the "
+                                 L"HUD itself to dismiss it, so the item's activation can be granted"
+                               : L"back to no-activate clicks");
 }
 
 // `reason` is a short stable tag naming the gesture that got here (see
@@ -800,6 +849,12 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 return 0;
             }
 
+            // Re-evaluated on every move rather than once on entry: the
+            // flyout can open or close while the cursor sits on the HUD.
+            // Cheap -- one GetForegroundWindow and one GetClassNameW.
+            bool flyoutUp = ForegroundIsTaskbarFlyout();
+            SetHudClickActivates(hwnd, state, flyoutUp);
+
             int hoverIndex = ProjectListHitTest(state, mouseX, mouseY);
             if (hoverIndex != state->hoverIndex) {
                 state->hoverIndex = hoverIndex;
@@ -810,8 +865,16 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 // leaves a row of VS Code windows highlighted in the
                 // taskbar (see focus_trace.h). Tagged distinctly so the log
                 // shows that immediately.
-                if (state->activateOnHover && hoverIndex >= 0)
-                    ActivateProjectListItem(state, hoverIndex, L"hud-hover");
+                //
+                // Not attempted at all while a taskbar flyout is up: hover
+                // has no click to dismiss it with, so every one of these
+                // would be refused (see ForegroundIsTaskbarFlyout) -- a
+                // sweep would just be a burst of denials. Clicking still
+                // works, via SetHudClickActivates.
+                if (state->activateOnHover && hoverIndex >= 0) {
+                    if (flyoutUp) Log(L"hud-hover: skipped index=%d -- a taskbar flyout holds the foreground", hoverIndex);
+                    else ActivateProjectListItem(state, hoverIndex, L"hud-hover");
+                }
             }
             SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, mouseX, mouseY)));
             if (!state->trackingMouseLeave) {
@@ -854,6 +917,9 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             }
             return 0;
         case WM_LBUTTONUP:
+            // The activation SetHudClickActivates allowed has already
+            // happened, at button-down -- nothing left for the style to do.
+            SetHudClickActivates(hwnd, state, false);
             if (state && state->dragMode == ProjectListHudState::DragReorder) {
                 EndReorderDrag(hwnd, state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
                 return 0;
@@ -905,6 +971,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (wParam == kClaudePulseTimerId && state) RenderProjectListHud(hwnd, state);
             return 0;
         case WM_MOUSELEAVE:
+            SetHudClickActivates(hwnd, state, false);
             if (state) {
                 if (state->dragMode != ProjectListHudState::DragNone) return 0;
                 state->trackingMouseLeave = false;
