@@ -196,6 +196,74 @@ function Find-ClaudePidBySessionId {
     return $null
 }
 
+# Finds the id of the tool call a PermissionRequest is blocked on, from the
+# transcript. Needed because the payload does not carry it: the hook docs
+# show tool_use_id on PermissionRequest, but Claude Code 2.1.270 builds that
+# input as {common fields, hook_event_name, tool_name, tool_input,
+# permission_suggestions} -- read from its own bundled source, and confirmed
+# by the first real PermissionRequest after pending_tool was introduced,
+# which arrived without one. (PermissionDenied, built right next to it, does
+# include it.) Payload's own id still wins if a later version adds it.
+#
+# The call's tool_use block is already in the transcript by the time the
+# hook runs (written ~1.5s earlier in both cases looked at), so this parses
+# the transcript's tail properly -- a text match is not safe: ~2% of
+# "tool_use" occurrences are inside escaped strings, e.g. a transcript
+# quoted in a message -- and picks among the calls with this tool_name that
+# have no tool_result yet:
+#   exact-input     one whose input equals the payload's tool_input;
+#   latest-message  else the first unanswered one in the newest assistant
+#                   message. Calls within a message run in order, so the
+#                   earlier ones are answered by now; and anchoring to the
+#                   newest message keeps clear of calls from killed or
+#                   interrupted turns that never got a result at all (37 of
+#                   ~16,000 across the transcripts on this machine).
+# The transcript is "written asynchronously and may lag" per the docs, so a
+# miss is retried briefly before giving up; giving up just leaves the old
+# activity-based fallback in claude_provider.cpp in charge.
+function Resolve-PendingToolUseId {
+    param([string]$TranscriptPath, [string]$ToolName, $ToolInput)
+    $want = if ($null -ne $ToolInput) { $ToolInput | ConvertTo-Json -Compress -Depth 50 } else { "" }
+    for ($attempt = 0; $attempt -lt 6; $attempt++) {
+        if ($attempt -gt 0) { Start-Sleep -Milliseconds 150 }
+        try {
+            $fs = [System.IO.File]::Open($TranscriptPath, 'Open', 'Read', 'ReadWrite, Delete')
+            try {
+                $start = [Math]::Max(0, $fs.Length - 1MB)
+                [void]$fs.Seek($start, 'Begin')
+                $buf = New-Object byte[] ($fs.Length - $start)
+                $read = $fs.Read($buf, 0, $buf.Length)
+            } finally { $fs.Close() }
+        } catch { return @{ Note = "transcript unreadable: $($_.Exception.Message)" } }
+        $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
+        $lines = $text -split "`n"
+        if ($start -gt 0 -and $lines.Count -gt 0) { $lines = $lines[1..($lines.Count - 1)] } # first one is partial
+
+        $answered = @{}
+        foreach ($m in [regex]::Matches($text, '"tool_use_id":"(toolu_[A-Za-z0-9_]+)"')) { $answered[$m.Groups[1].Value] = $true }
+
+        $candidates = @()
+        $nameNeedle = '"name":"' + $ToolName + '"'
+        foreach ($line in $lines) {
+            if (-not $line.Contains('"tool_use"') -or -not $line.Contains($nameNeedle)) { continue }
+            try { $o = $line | ConvertFrom-Json } catch { continue }
+            if ($o.type -ne "assistant" -or -not ($o.message.content -is [array])) { continue }
+            foreach ($b in $o.message.content) {
+                if ($b.type -ne "tool_use" -or $b.name -ne $ToolName -or $answered[$b.id]) { continue }
+                $candidates += @{ Id = $b.id; Msg = $o.message.id; Input = ($b.input | ConvertTo-Json -Compress -Depth 50) }
+            }
+        }
+        if ($candidates.Count -eq 0) { continue } # not written yet, or lagging -- retry
+
+        $exact = @($candidates | Where-Object { $want -and $_.Input -eq $want })
+        if ($exact.Count -gt 0) { return @{ Id = $exact[0].Id; Rule = "exact-input"; Note = "" } }
+        $latestMsg = $candidates[-1].Msg
+        $pick = @($candidates | Where-Object { $_.Msg -eq $latestMsg })[0]
+        return @{ Id = $pick.Id; Rule = "latest-message"; Note = "$($candidates.Count) unanswered $ToolName call(s)" }
+    }
+    return @{ Note = "no unanswered $ToolName call in the transcript tail after 6 tries" }
+}
+
 $script:pidLookupNote = ""
 $claudePid = Find-ClaudeAncestorPid -StartPid $PID
 
@@ -271,13 +339,14 @@ if ($data.transcript_path) { $content += "transcript=$($data.transcript_path)`n"
 # permission was answered" (PostToolUse does not fire until the tool has
 # also *finished*, which for an approved long command can be minutes later),
 # but the answer always lands in the transcript as that tool call's
-# tool_result, keyed by this id -- claude_provider.cpp watches for it
-# there. Recorded with the file the result will be written to (a subagent's
-# tool calls go to its own transcript, not the session's) and that file's
-# length right now: the result cannot exist before this hook returns, so
-# the reader only ever needs to look past this point.
+# tool_result, keyed by its id -- claude_provider.cpp watches for it there.
+# Recorded with the file the result will be written to (a subagent's tool
+# calls go to its own transcript, not the session's) and that file's length
+# right now: the result cannot exist before this hook returns, so the reader
+# only ever needs to look past this point. The id itself has to be dug out
+# of the transcript -- see Resolve-PendingToolUseId.
 $pendingNote = ""
-if ($data.hook_event_name -eq "PermissionRequest" -and $data.tool_use_id) {
+if ($data.hook_event_name -eq "PermissionRequest") {
     $pendingTranscript = $data.transcript_path
     if ($data.agent_id -and $pendingTranscript -and $pendingTranscript -notmatch '[\\/]subagents[\\/]') {
         $agentTranscript = Join-Path ($pendingTranscript -replace '\.jsonl$', '') "subagents\agent-$($data.agent_id).jsonl"
@@ -287,8 +356,23 @@ if ($data.hook_event_name -eq "PermissionRequest" -and $data.tool_use_id) {
     if ($pendingTranscript -and (Test-Path -LiteralPath $pendingTranscript)) {
         $pendingOffset = (Get-Item -LiteralPath $pendingTranscript).Length
     }
-    $content += "pending_tool=$($data.tool_use_id)`npending_transcript=$pendingTranscript`npending_offset=$pendingOffset`n"
-    $pendingNote = " tool=$($data.tool_name) toolUseId=$($data.tool_use_id)"
+
+    $pendingId = $data.tool_use_id
+    $pendingRule = "payload"
+    $resolveNote = ""
+    if (-not $pendingId -and $pendingTranscript -and $data.tool_name) {
+        $resolved = Resolve-PendingToolUseId -TranscriptPath $pendingTranscript -ToolName $data.tool_name -ToolInput $data.tool_input
+        $pendingId = $resolved.Id
+        $pendingRule = $resolved.Rule
+        $resolveNote = $resolved.Note
+    }
+    if ($pendingId) {
+        $content += "pending_tool=$pendingId`npending_transcript=$pendingTranscript`npending_offset=$pendingOffset`n"
+        $pendingNote = " tool=$($data.tool_name) toolUseId=$pendingId (via $pendingRule)"
+    } else {
+        $pendingNote = " tool=$($data.tool_name) toolUseId= (unresolved)"
+    }
+    if ($resolveNote) { $pendingNote += " resolve=[$resolveNote]" }
     if ($data.agent_id) { $pendingNote += " agent=$($data.agent_id)" }
 }
 [System.IO.File]::WriteAllText($file, $content, [System.Text.UTF8Encoding]::new($false))

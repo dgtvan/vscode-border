@@ -211,7 +211,15 @@ existed.
 That activity check turned out to be too loose in one direction and too
 short-lived in the other, so a permission prompt now uses something exact
 instead. The `PermissionRequest` hook records which tool call is blocked
-(`pending_tool=<tool_use_id>`), and the answer to that prompt always lands in
+(`pending_tool=<tool_use_id>`). The payload doesn't say -- the hook docs show a
+`tool_use_id` on `PermissionRequest`, but Claude Code 2.1.270 doesn't send one
+(confirmed from a captured real payload and from its bundled source) -- so the
+hook finds it in the transcript, where the call's `tool_use` block is already
+written: the unanswered call with that `tool_name` whose input equals the
+payload's `tool_input`, or failing that the first unanswered one in the newest
+assistant message. The hook log line says which (`toolUseId=... (via
+exact-input)`), or `(unresolved)` if neither found it, in which case the looser
+activity check below still applies. The answer to that prompt always lands in
 the transcript as that same call's `tool_result` -- the approved tool's
 output, your `AskUserQuestion` answers, or the rejection. Checked across 131
 real transcripts: every one of 15,043 occurrences of `"tool_use_id":"<id>"`
