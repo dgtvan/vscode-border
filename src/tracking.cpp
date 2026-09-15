@@ -33,6 +33,8 @@ struct TrackedWindow {
     DWORD pid = 0;
     std::wstring label;     // display text: rawLabel with any user-set alias applied (see label_alias.h)
     std::wstring rawLabel;  // folder name derived from the target's title -- the alias map's key
+    std::wstring branch;    // ${activeRepositoryBranchName} from the title, empty outside a git repo --
+                            // fills label_alias_format's <Branch> on the border's label chip (see BorderLabel)
     std::wstring folderName; // pre-worktree-substitution repo/folder name, i.e. what VS Code's own
                               // workspaceStorage records as the leaf folder name -- distinct from rawLabel,
                               // which shows the substituted *main* repo name for a worktree checkout (see
@@ -73,7 +75,39 @@ static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
         if (!mainRepo.empty()) parts.repo = mainRepo;
     }
     tw.rawLabel = BuildFolderLabel(parts);
+    tw.branch = parts.branch;
     tw.label = ResolveAlias(tw.rawLabel);
+}
+
+// Text for the border's label chip. Without an alias it's just tw.label
+// (the raw "repo - branch"); with one, it's the config's label_alias_format
+// with <Alias>/<Branch> (case-insensitive) substituted in a single pass, so
+// an alias that itself contains "<Branch>" is left as typed -- by default
+// "<alias> - <branch>", keeping the branch visible even though the alias
+// replaces the raw label. A format that uses <Branch> falls back to just the
+// alias outside a git repo (no branch), rather than leaving a dangling
+// separator. The project list HUD shows tw.label as-is -- only the border
+// uses the format.
+static std::wstring BorderLabel(const TrackedWindow& tw) {
+    if (tw.label == tw.rawLabel) return tw.label;
+
+    const std::wstring& format = g_config.labelAliasFormat;
+    std::wstring text;
+    bool usesBranch = false;
+    for (size_t i = 0; i < format.size();) {
+        if (_wcsnicmp(format.c_str() + i, L"<Alias>", 7) == 0) {
+            text += tw.label;
+            i += 7;
+        } else if (_wcsnicmp(format.c_str() + i, L"<Branch>", 8) == 0) {
+            text += tw.branch;
+            usesBranch = true;
+            i += 8;
+        } else {
+            text += format[i++];
+        }
+    }
+    if (usesBranch && tw.branch.empty()) return tw.label;
+    return text;
 }
 
 static std::unordered_map<HWND, TrackedWindow> g_tracked; // target hwnd -> info
@@ -333,6 +367,7 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     // up in the border's label chip promptly, not just the next time the
     // window's title itself changes.
     tw.label = ResolveAlias(tw.rawLabel);
+    std::wstring borderLabel = BorderLabel(tw);
 
     if (IsIconic(target) || !IsWindowVisible(target)) {
         LogFastDiag(L"sync hwnd=%p HIDE iconic=%d visible=%d", target, IsIconic(target), IsWindowVisible(target));
@@ -357,16 +392,16 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
         return;
     }
 
-    if (ow != tw.lastWidth || oh != tw.lastHeight || tw.label != tw.lastLabel) {
+    if (ow != tw.lastWidth || oh != tw.lastHeight || borderLabel != tw.lastLabel) {
         LogFastDiag(L"sync hwnd=%p REPAINT ow=%d oh=%d (was %dx%d) label=[%ls] (was [%ls])", target, ow, oh,
-                    tw.lastWidth, tw.lastHeight, tw.label.c_str(), tw.lastLabel.c_str());
+                    tw.lastWidth, tw.lastHeight, borderLabel.c_str(), tw.lastLabel.c_str());
         COLORREF color = g_config.palette[tw.colorIndex % g_config.palette.size()];
         PaintOverlay(tw.overlay, ow, oh, color, t, g_config.opacity,
-                     tw.label, g_config.showLabel, g_config.labelHeight, g_config.labelFontSize,
+                     borderLabel, g_config.showLabel, g_config.labelHeight, g_config.labelFontSize,
                      g_config.labelTextColorAuto, g_config.labelTextColor);
         tw.lastWidth = ow;
         tw.lastHeight = oh;
-        tw.lastLabel = tw.label;
+        tw.lastLabel = borderLabel;
     }
 
     // Move/resize without touching Z-order. This has to be a separate call
