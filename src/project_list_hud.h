@@ -25,7 +25,8 @@ struct ProjectListHudEntry {
     std::wstring path;     // absolute folder path this window has open, resolved via worktree_resolver's
                             // ResolveFolderPath -- empty if VS Code hasn't recorded it (e.g. a plain
                             // folder it's never logged to workspaceStorage, or a multi-root workspace).
-                            // Used only for the "Add to Favourites" context-menu action -- see favourites.h.
+                            // Used only by the item context menu: "Add to Favourites" (see favourites.h),
+                            // "Copy Directory Path" and "Open Directory in File Explorer".
     COLORREF color = RGB(0, 0, 0);
     ClaudeStatus claudeStatus = ClaudeStatus::None;
 };
