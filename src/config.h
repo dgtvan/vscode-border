@@ -14,6 +14,8 @@ struct Config {
     int labelFontSize = 13;
     bool labelTextColorAuto = false; // true = auto black/white contrast against the border color
     COLORREF labelTextColor = RGB(0, 0, 0); // used when labelTextColorAuto is false
+    std::wstring labelAliasFormat = L"<Alias> - <Branch>"; // border label text for an aliased window --
+                                                            // <Alias>/<Branch> tokens (see tracking.cpp's BorderLabel)
     bool showProjectList = true;
     bool projectListHorizontal = true; // true = single horizontal strip, false = vertical list
     bool projectListManualOrder = false; // true = user can drag items to reorder, remembered across

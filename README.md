@@ -89,6 +89,7 @@ first build):
 | `label_height` | Label chip height in pixels. |
 | `label_font_size` | Label text font size in points. |
 | `label_text_color` | Label text color: a hex `RRGGBB` color, or `auto` to pick black/white based on contrast against the border color. Default `000000` (black). |
+| `label_alias_format` | Border label text for a window with an alias (see [aliases](#project-list-hud-aliases)), using the tokens `<Alias>` and `<Branch>`, e.g. `<Alias> - <Branch>` (default) or just `<Alias>`. Outside a git repo a format using `<Branch>` shows just the alias. The project list HUD always shows just the alias. |
 | `ai_indicator_enabled` | Show the AI status indicator on project list HUD items (`true`/`false` -- see below). Default `true`. |
 | `ai_indicator_provider` | Comma-separated AI services to source it from: `claude` (implemented) and/or `copilot` (reserved, not yet implemented). |
 | `ai_indicator_color_working` / `_attention` / `_waiting` | Hex `RRGGBB` colors for the 3 states -- see below. |
@@ -131,7 +132,9 @@ actual folder/repo/branch. The item's text turns into an editable box in
 place -- type the new name and press Enter (or click elsewhere) to save it,
 or Escape to cancel; clearing the text back to empty removes the alias.
 Once an item has an alias, the same menu also offers **Reset Alias**, which
-clears it immediately without opening the edit box. Aliases are matched by
+clears it immediately without opening the edit box. The HUD item shows the
+alias alone; the border label chip shows it per `label_alias_format`
+(default `<Alias> - <Branch>`, so the branch stays visible). Aliases are matched by
 the label's exact text, so if two windows ever happen to produce the
 identical label, aliasing one aliases both. Stored in `label_aliases.ini`
 next to `config.ini`, and re-read on **Reload Config** as well as at

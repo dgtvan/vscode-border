@@ -1,6 +1,7 @@
 #include "config.h"
 #include "file_util.h"
 #include "logger.h"
+#include "text_util.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -98,6 +99,10 @@ Config LoadConfig(const std::wstring& path) {
                 cfg.labelTextColorAuto = false;
                 cfg.labelTextColor = ParseHexColor(val);
             }
+        } else if (key == "label_alias_format") {
+            // Empty would paint an empty chip (i.e. no label at all) -- that's
+            // what show_label=false is for, so keep the default instead.
+            if (!val.empty()) cfg.labelAliasFormat = Utf8ToWide(val);
         } else if (key == "colors") {
             std::vector<COLORREF> palette;
             for (const std::string& item : SplitChar(val, ',')) {
@@ -148,13 +153,13 @@ Config LoadConfig(const std::wstring& path) {
         providersJoined += p;
     }
 
-    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_style=%ls project_list_order=%ls project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X verbose_logging=%d colors=%zu ai_indicator_enabled=%d ai_indicator_provider=%hs",
+    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_style=%ls project_list_order=%ls project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X label_alias_format=[%ls] verbose_logging=%d colors=%zu ai_indicator_enabled=%d ai_indicator_provider=%hs",
         cfg.thickness, cfg.opacity, cfg.rescanIntervalMs, cfg.showLabel, cfg.showProjectList,
         cfg.projectListHorizontal ? L"horizontal" : L"vertical",
         cfg.projectListManualOrder ? L"manual" : L"auto",
         cfg.projectListOpacityNormal, cfg.projectListOpacityHover, cfg.projectListActivateOnHover,
         cfg.labelHeight, cfg.labelFontSize,
         cfg.labelTextColorAuto, (unsigned)((GetRValue(cfg.labelTextColor) << 16) | (GetGValue(cfg.labelTextColor) << 8) | GetBValue(cfg.labelTextColor)),
-        cfg.verboseLogging, cfg.palette.size(), cfg.aiIndicatorEnabled, providersJoined.c_str());
+        cfg.labelAliasFormat.c_str(), cfg.verboseLogging, cfg.palette.size(), cfg.aiIndicatorEnabled, providersJoined.c_str());
     return cfg;
 }
