@@ -563,7 +563,7 @@ static void BeginAliasEdit(HWND hud, ProjectListHudState* state, int index) {
 // text back to the raw label -- the same end result as BeginAliasEdit
 // followed by committing an empty string, just without opening the edit
 // box first.
-static void ResetAlias(HWND hud, ProjectListHudState* state, int index) {
+static void ClearAlias(HWND hud, ProjectListHudState* state, int index) {
     if (!state || index < 0 || index >= (int)state->entries.size()) return;
     const std::wstring& rawLabel = state->entries[index].rawLabel;
     SetAlias(rawLabel, L"");
@@ -571,25 +571,81 @@ static void ResetAlias(HWND hud, ProjectListHudState* state, int index) {
     RenderProjectListHud(hud, state);
 }
 
-static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
-    HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, 1, L"Set Alias...");
-    bool hasAlias = index >= 0 && index < (int)state->entries.size() &&
-                    state->entries[index].label != state->entries[index].rawLabel;
-    if (hasAlias) AppendMenuW(menu, MF_STRING, 2, L"Reset Alias");
+// Puts `path` on the clipboard as plain Unicode text. The clipboard takes
+// ownership of the HGLOBAL only when SetClipboardData succeeds, so it's
+// freed here on every other exit.
+static void CopyPathToClipboard(HWND hud, const std::wstring& path) {
+    size_t bytes = (path.size() + 1) * sizeof(wchar_t);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!mem) {
+        Log(L"copy directory path: GlobalAlloc(%zu) failed, lastError=%lu", bytes, GetLastError());
+        return;
+    }
+    void* dst = GlobalLock(mem);
+    if (!dst) {
+        Log(L"copy directory path: GlobalLock failed, lastError=%lu", GetLastError());
+        GlobalFree(mem);
+        return;
+    }
+    memcpy(dst, path.c_str(), bytes);
+    GlobalUnlock(mem);
 
-    // No path means VS Code hasn't recorded this window's folder in its own
-    // workspaceStorage (e.g. a multi-root workspace) -- nothing a favourite
-    // could reopen later, so the option is left off entirely rather than
-    // shown disabled. Once a folder IS already a favourite, this toggles to
-    // "Remove from Favourites" instead -- same removal is also still offered
-    // from the "+" button's own menu (see ShowNewWindowButtonContextMenu),
-    // for a favourite that isn't currently open as a hub item.
+    if (!OpenClipboard(hud)) {
+        Log(L"copy directory path: OpenClipboard failed (held by another app?), lastError=%lu", GetLastError());
+        GlobalFree(mem);
+        return;
+    }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, mem)) {
+        Log(L"copy directory path: SetClipboardData failed, lastError=%lu", GetLastError());
+        GlobalFree(mem);
+    }
+    CloseClipboard();
+}
+
+// Opens a File Explorer window showing the contents of `path`. Checked for
+// existence first because explorer.exe, handed a folder that no longer
+// exists (e.g. a worktree deleted while its window stayed open), silently
+// opens its default Home view instead of reporting anything.
+static void OpenPathInExplorer(const std::wstring& path) {
+    DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        Log(L"open directory in explorer: [%ls] is not an existing directory", path.c_str());
+        return;
+    }
+    std::wstring params = L"\"" + path + L"\"";
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", L"explorer.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
+    if ((INT_PTR)result <= 32) {
+        Log(L"ShellExecuteW(open directory in explorer) failed for %ls, code=%Id", path.c_str(), (INT_PTR)result);
+    }
+}
+
+static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
+    // Groups top to bottom: directory, alias, favourites. No path means VS
+    // Code hasn't recorded this window's folder in its own workspaceStorage
+    // (e.g. a multi-root workspace) -- nothing to copy/open in Explorer or
+    // for a favourite to reopen later, so the directory and favourites
+    // groups are left off entirely rather than shown disabled, leaving just
+    // the alias group. Once a folder IS already a favourite, the favourites
+    // item toggles to "Remove from Favourites" instead -- same removal is
+    // also still offered from the "+" button's own menu (see
+    // ShowNewWindowButtonContextMenu), for a favourite that isn't currently
+    // open as a hub item.
     bool hasPath = index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
     bool alreadyFav = hasPath && IsFavourite(state->entries[index].path);
+    bool hasAlias = index >= 0 && index < (int)state->entries.size() &&
+                    state->entries[index].label != state->entries[index].rawLabel;
+
+    HMENU menu = CreatePopupMenu();
     if (hasPath) {
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr); // divides the alias group above from the favourites
-                                                       // group below
+        AppendMenuW(menu, MF_STRING, 5, L"Copy Directory Path");
+        AppendMenuW(menu, MF_STRING, 6, L"Open Directory in File Explorer");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+    AppendMenuW(menu, MF_STRING, 1, L"Set Alias...");
+    if (hasAlias) AppendMenuW(menu, MF_STRING, 2, L"Clear Alias");
+    if (hasPath) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, alreadyFav ? 4 : 3, alreadyFav ? L"Remove from Favourites" : L"Add to Favourites");
     }
 
@@ -604,12 +660,16 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     state->contextMenuOpen = false;
     DestroyMenu(menu);
     if (cmd == 1) BeginAliasEdit(hud, state, index);
-    else if (cmd == 2) ResetAlias(hud, state, index);
+    else if (cmd == 2) ClearAlias(hud, state, index);
     else if (cmd == 3) {
         const ProjectListHudEntry& entry = state->entries[index];
         AddFavourite(entry.label, entry.path);
     } else if (cmd == 4) {
         RemoveFavourite(state->entries[index].path);
+    } else if (cmd == 5) {
+        CopyPathToClipboard(hud, state->entries[index].path);
+    } else if (cmd == 6) {
+        OpenPathInExplorer(state->entries[index].path);
     }
 }
 
