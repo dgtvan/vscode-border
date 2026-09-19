@@ -21,16 +21,13 @@
 // taskbar), it falls back to a plain dark or light color matching the
 // Windows theme.
 //
-// Topmost, like the taskbar, and absorbs clicks without taking focus.
+// Absorbs clicks without taking focus. Created topmost, like the taskbar.
 
 HWND CreateTaskbarBackdrop(HINSTANCE hInstance);
 
-// Shows the backdrop over `band` (screen coords), resampling first, and
-// directly behind `front` (the HUD) in z-order when that's visible.
-void ShowTaskbarBackdrop(HWND backdrop, const RECT& band, HWND front);
+// Shows the backdrop over `band` (screen coords), resampling first. Leaves
+// its z-order alone -- the HUD owns that (see project_list_hud.cpp's
+// RaiseBandWindows), since the two have to move together.
+void ShowTaskbarBackdrop(HWND backdrop, const RECT& band);
 
 void HideTaskbarBackdrop(HWND backdrop);
-
-// Puts the backdrop directly behind `front` (the HUD) in z-order, and
-// with it back into the topmost band, since `front` is topmost.
-void PlaceTaskbarBackdropBehind(HWND backdrop, HWND front);
