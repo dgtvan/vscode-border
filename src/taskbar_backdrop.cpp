@@ -253,12 +253,15 @@ HWND CreateTaskbarBackdrop(HINSTANCE hInstance) {
     return hwnd;
 }
 
-void ShowTaskbarBackdrop(HWND backdrop, const RECT& band) {
+void ShowTaskbarBackdrop(HWND backdrop, const RECT& band, HWND front) {
     TaskbarBackdropState* state = backdrop ? (TaskbarBackdropState*)GetWindowLongPtrW(backdrop, GWLP_USERDATA) : nullptr;
     if (!state) return;
     state->band = band;
     Resample(backdrop, state, true);
-    SetWindowPos(backdrop, HWND_TOPMOST, band.left, band.top, band.right - band.left, band.bottom - band.top,
+    // Straight in behind a visible `front` -- never in front of it, even
+    // for a moment, or it would blink the HUD out.
+    HWND insertAfter = IsWindowVisible(front) ? front : HWND_TOPMOST;
+    SetWindowPos(backdrop, insertAfter, band.left, band.top, band.right - band.left, band.bottom - band.top,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
     SetTimer(backdrop, kResampleTimerId, kResampleIntervalMs, nullptr);
 }
@@ -270,10 +273,7 @@ void HideTaskbarBackdrop(HWND backdrop) {
     ShowWindow(backdrop, SW_HIDE);
 }
 
-void RaiseTaskbarBackdrop(HWND backdrop) {
+void PlaceTaskbarBackdropBehind(HWND backdrop, HWND front) {
     if (!backdrop || !IsWindowVisible(backdrop)) return;
-    // Same NOTOPMOST-then-TOPMOST toggle, for the same reason, as
-    // project_list_hud.cpp's PositionProjectListHud.
-    SetWindowPos(backdrop, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-    SetWindowPos(backdrop, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+    SetWindowPos(backdrop, front, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
 }
