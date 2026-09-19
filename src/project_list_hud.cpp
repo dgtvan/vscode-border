@@ -278,6 +278,34 @@ static bool IsHudCovered(HWND hud, const ProjectListHudState* state) {
     return false;
 }
 
+// Brings the backdrop (when `withBackdrop`) and then the HUD to the front
+// of the topmost band -- the backdrop directly behind the HUD, both in
+// front of everything else, the way the taskbar sits in front of every
+// ordinary window. One DeferWindowPos batch, which Windows applies as a
+// unit, so there's never a moment with the backdrop in front of the HUD
+// (a visible blink, when these were separate calls).
+static void RaiseBandWindows(HWND hud, ProjectListHudState* state, bool withBackdrop) {
+    const UINT flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
+    HDWP batch = BeginDeferWindowPos(withBackdrop ? 2 : 1);
+    if (batch && withBackdrop) batch = DeferWindowPos(batch, state->backdrop, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    if (batch) batch = DeferWindowPos(batch, hud, HWND_TOPMOST, 0, 0, 0, 0, flags | SWP_SHOWWINDOW);
+    if (!batch || !EndDeferWindowPos(batch)) {
+        if (withBackdrop) SetWindowPos(state->backdrop, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        SetWindowPos(hud, HWND_TOPMOST, 0, 0, 0, 0, flags | SWP_SHOWWINDOW);
+    }
+    // Re-asserting HWND_TOPMOST has been seen not to move the HUD ahead of
+    // some other window that went topmost more recently (e.g. briefly, when
+    // another app's own window is maximized) -- toggling through
+    // HWND_NOTOPMOST forces a real re-insertion at the front. Only as a
+    // fallback: the toggle briefly drops the HUD behind the backdrop, which
+    // is harmless here only because the HUD is covered anyway.
+    if (IsHudCovered(hud, state)) {
+        LogDiag(L"hud: still covered after raise -- toggling through HWND_NOTOPMOST");
+        SetWindowPos(hud, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+        SetWindowPos(hud, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    }
+}
+
 static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
     if (!state) return;
     if (state->docked && state->fullscreenAppOpen) {
@@ -286,27 +314,12 @@ static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
     }
     bool wasVisible = IsWindowVisible(hud) != FALSE;
     SetWindowPos(hud, nullptr, state->x, state->y, state->width, state->height, SWP_NOACTIVATE | SWP_NOZORDER);
-    // Only touch the z-order when something is actually in front of the
-    // HUD: this runs on every sync and every frame of a drag, and each
-    // re-raise below briefly drops the HUD out of the topmost band --
-    // visible as a blink when done on every call.
-    if (wasVisible && !IsHudCovered(hud, state)) return;
-
-    // Re-asserting HWND_TOPMOST on a window that's already topmost doesn't
-    // reliably move it ahead of some other window that's gone topmost more
-    // recently (e.g. briefly, when another app's own window is maximized) --
-    // toggling through HWND_NOTOPMOST first forces a real re-insertion at
-    // the front. Same fix, same reasoning, as MoveDragGhost/PaintDragGhost.
-    // The backdrop leaves the topmost band first -- otherwise it would sit
-    // in front of the HUD while the HUD is out of it -- and is then put
-    // directly behind the HUD again.
+    // Only touch the z-order when it's actually wrong: this runs on every
+    // sync and every frame of a drag.
     bool backdrop = state->docked && IsWindowVisible(state->backdrop);
-    if (backdrop) {
-        SetWindowPos(state->backdrop, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-    }
-    SetWindowPos(hud, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-    SetWindowPos(hud, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-    if (backdrop) PlaceTaskbarBackdropBehind(state->backdrop, hud);
+    bool backdropDemoted = backdrop && !(GetWindowLongPtrW(state->backdrop, GWL_EXSTYLE) & WS_EX_TOPMOST);
+    if (wasVisible && !backdropDemoted && !IsHudCovered(hud, state)) return;
+    RaiseBandWindows(hud, state, backdrop);
 }
 
 // Re-checks the current monitor scenario against state->scenarioKey and, if
@@ -373,7 +386,9 @@ static void FitIntoDock(ProjectListHudState* state) {
 // may have changed the band (or the taskbar) gets a fresh sample.
 static void SyncBackdrop(HWND hud, ProjectListHudState* state) {
     if (state->docked && state->matchTaskbar && !state->fullscreenAppOpen) {
-        ShowTaskbarBackdrop(state->backdrop, state->dockRect, hud);
+        ShowTaskbarBackdrop(state->backdrop, state->dockRect);
+        if (IsWindowVisible(hud)) RaiseBandWindows(hud, state, true);
+        else SetWindowPos(state->backdrop, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
     } else {
         HideTaskbarBackdrop(state->backdrop);
     }

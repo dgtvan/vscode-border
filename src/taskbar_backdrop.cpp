@@ -299,16 +299,13 @@ HWND CreateTaskbarBackdrop(HINSTANCE hInstance) {
     return hwnd;
 }
 
-void ShowTaskbarBackdrop(HWND backdrop, const RECT& band, HWND front) {
+void ShowTaskbarBackdrop(HWND backdrop, const RECT& band) {
     TaskbarBackdropState* state = backdrop ? (TaskbarBackdropState*)GetWindowLongPtrW(backdrop, GWLP_USERDATA) : nullptr;
     if (!state) return;
     state->band = band;
     Resample(backdrop, state, true);
-    // Straight in behind a visible `front` -- never in front of it, even
-    // for a moment, or it would blink the HUD out.
-    HWND insertAfter = IsWindowVisible(front) ? front : HWND_TOPMOST;
-    SetWindowPos(backdrop, insertAfter, band.left, band.top, band.right - band.left, band.bottom - band.top,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    SetWindowPos(backdrop, nullptr, band.left, band.top, band.right - band.left, band.bottom - band.top,
+                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
     SetTimer(backdrop, kResampleTimerId, kResampleIntervalMs, nullptr);
 }
 
@@ -319,7 +316,3 @@ void HideTaskbarBackdrop(HWND backdrop) {
     ShowWindow(backdrop, SW_HIDE);
 }
 
-void PlaceTaskbarBackdropBehind(HWND backdrop, HWND front) {
-    if (!backdrop || !IsWindowVisible(backdrop)) return;
-    SetWindowPos(backdrop, front, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-}
