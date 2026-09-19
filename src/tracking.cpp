@@ -166,6 +166,12 @@ static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<A
 
 static void SyncProjectListHud() {
     if (!g_projectListHud) return;
+    // Before the early-outs below: the reserved band follows the config,
+    // not whether any windows happen to be open right now -- otherwise
+    // maximized windows would grow and shrink as VS Code windows came and
+    // went.
+    SetProjectListHudDocked(g_projectListHud, g_config.showProjectList && g_config.projectListFixed,
+                            g_config.labelHeight);
     if (!g_config.showProjectList || g_tracked.empty()) {
         HideProjectListHud(g_projectListHud);
         return;
@@ -231,7 +237,7 @@ static void SyncProjectListHud() {
     }
 
     ProjectListHudStyle style;
-    style.horizontal = g_config.projectListHorizontal;
+    style.horizontal = g_config.projectListHorizontal || g_config.projectListFixed; // fixed = one-row band
     style.manualOrder = g_config.projectListManualOrder;
     style.rowHeight = g_config.labelHeight;
     style.fontSize = g_config.labelFontSize;
@@ -562,7 +568,9 @@ static void LogTrackedWindowsSnapshot(const wchar_t* reason) {
 void TrackingInit(HINSTANCE hInstance, HWND ownerWnd) {
     g_hInstance = hInstance;
     g_ownerWnd = ownerWnd;
-    g_projectListHud = CreateProjectListHud(hInstance, g_config.projectListHorizontal);
+    g_projectListHud = CreateProjectListHud(hInstance, g_config.projectListHorizontal || g_config.projectListFixed);
+    SetProjectListHudDocked(g_projectListHud, g_config.showProjectList && g_config.projectListFixed,
+                            g_config.labelHeight);
     SetFocusStormSnapshotHook(LogTrackedWindowsSnapshot);
 }
 

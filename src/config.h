@@ -18,6 +18,8 @@ struct Config {
                                                             // <Alias>/<Branch> tokens (see tracking.cpp's BorderLabel)
     bool showProjectList = true;
     bool projectListHorizontal = true; // true = single horizontal strip, false = vertical list
+    bool projectListFixed = false; // true = docked in a reserved band above the taskbar (implies
+                                    // horizontal), false = free-floating (see SetProjectListHudDocked)
     bool projectListManualOrder = false; // true = user can drag items to reorder, remembered across
                                           // restarts; false = always sorted by window left edge
     int projectListOpacityNormal = 255;
