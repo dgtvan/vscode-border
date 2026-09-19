@@ -357,15 +357,15 @@ static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
     return true;
 }
 
-// Fits state->x/y/width into the reserved band: y is pinned to the band
-// (the HUD can only slide sideways), the width is capped at the band's, and
+// Fits state->x/y/width into the reserved band: y is pinned to the band's
+// bottom (the HUD can only slide sideways), the width is capped at the band's, and
 // x is either the remembered one clamped into the band or, if never placed
 // by hand, right-aligned -- the same corner free mode defaults to.
 static void FitIntoDock(ProjectListHudState* state) {
     const RECT& d = state->dockRect;
     state->width = std::min(state->width, (int)(d.right - d.left));
     state->x = state->manualPosition ? ClampInt(state->x, d.left, d.right - state->width) : d.right - state->width;
-    state->y = d.top + ((d.bottom - d.top) - state->height) / 2;
+    state->y = d.bottom - state->height; // on the taskbar side, clear of the backdrop's border row
 }
 
 // Shown exactly while the band is reserved, enabled, and not yielding to a
@@ -1779,12 +1779,14 @@ void HideProjectListHud(HWND hud) {
 void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTaskbar) {
     ProjectListHudState* state = hud ? (ProjectListHudState*)GetWindowLongPtrW(hud, GWLP_USERDATA) : nullptr;
     if (!state) return;
-    int bandHeight = std::max(kProjectListMinRowHeight, rowHeight);
+    // With the taskbar-matching backdrop, one extra row on top for its
+    // border line (see taskbar_backdrop.h) -- FitIntoDock keeps the HUD
+    // below it, the way the taskbar's own icons sit below its border.
+    int bandHeight = std::max(kProjectListMinRowHeight, rowHeight) + (matchTaskbar ? 1 : 0);
     if (docked == state->docked && (!docked || bandHeight == state->dockBandHeight)) {
-        if (matchTaskbar != state->matchTaskbar) {
+        if (matchTaskbar != state->matchTaskbar) { // only reachable while undocked
             state->matchTaskbar = matchTaskbar;
             SyncBackdrop(hud, state);
-            if (IsWindowVisible(hud)) PositionProjectListHud(hud, state);
         }
         return;
     }

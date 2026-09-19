@@ -138,7 +138,10 @@ settings, it copies what the taskbar actually shows on screen -- a thin row
 of pixels just inside its top edge, one color per column -- so it follows
 dark/light mode, accent color, transparency, Windows 10 vs. 11, and
 taskbar restyling tools on its own. A solid taskbar gives a solid band; a
-translucent one gives the blurred wallpaper's colors column by column. That
+translucent one gives the blurred wallpaper's colors column by column. The
+taskbar's own top edge (a 1px border line on Windows 11) is copied too, as
+the band's top border -- the band is 1px taller for it, with the HUD
+sitting below it the way the taskbar's icons sit below the taskbar's line. That
 is a snapshot, not a live blur: it's refreshed every 30 seconds and shortly
 after any theme, accent or wallpaper change (never while the mouse is over
 the taskbar, so a hover highlight isn't copied). With an auto-hide taskbar
