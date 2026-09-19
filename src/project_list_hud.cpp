@@ -7,6 +7,7 @@
 #include "logger.h"
 #include "monitor_scenario.h"
 #include "project_list_order.h"
+#include "taskbar_backdrop.h"
 
 #include <shellapi.h>
 #include <windowsx.h>
@@ -110,6 +111,8 @@ struct ProjectListHudState {
                         // the whole monitor width; the HUD itself sits somewhere inside it.
     bool fullscreenAppOpen = false; // docked only: the shell reported a fullscreen app (ABN_FULLSCREENAPP),
                                      // so the HUD stays hidden instead of painting over it
+    bool matchTaskbar = false; // docked only: paint the rest of the band like the taskbar (see backdrop)
+    HWND backdrop = nullptr;   // fills the band behind the HUD -- see taskbar_backdrop.h
     bool visibleBeforeFullscreen = false; // whether to bring the HUD back once that fullscreen app closes --
                                            // it may have been hidden for its own reasons (no windows, etc.)
 };
@@ -267,6 +270,8 @@ static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
     // recently (e.g. briefly, when another app's own window is maximized) --
     // toggling through HWND_NOTOPMOST first forces a real re-insertion at
     // the front. Same fix, same reasoning, as MoveDragGhost/PaintDragGhost.
+    // The backdrop goes first so the HUD lands in front of it.
+    if (state->docked) RaiseTaskbarBackdrop(state->backdrop);
     SetWindowPos(hud, HWND_NOTOPMOST, state->x, state->y, state->width, state->height, SWP_NOACTIVATE);
     SetWindowPos(hud, HWND_TOPMOST, state->x, state->y, state->width, state->height,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -331,6 +336,17 @@ static void FitIntoDock(ProjectListHudState* state) {
     state->y = d.top + ((d.bottom - d.top) - state->height) / 2;
 }
 
+// Shown exactly while the band is reserved, enabled, and not yielding to a
+// fullscreen app. Showing it resamples the taskbar, so every caller that
+// may have changed the band (or the taskbar) gets a fresh sample.
+static void SyncBackdrop(ProjectListHudState* state) {
+    if (state->docked && state->matchTaskbar && !state->fullscreenAppOpen) {
+        ShowTaskbarBackdrop(state->backdrop, state->dockRect);
+    } else {
+        HideTaskbarBackdrop(state->backdrop);
+    }
+}
+
 // Asks the shell for a band of dockBandHeight at the bottom of the primary
 // monitor and reserves it -- the shell stacks it against the taskbar when
 // the taskbar is on that same edge, so the band lands directly above it,
@@ -353,6 +369,7 @@ static void RefreshDockRect(HWND hud, ProjectListHudState* state) {
     SHAppBarMessage(ABM_SETPOS, &abd);
     state->dockRect = abd.rc;
     Log(L"hud: docked band=(%ld,%ld)-(%ld,%ld)", abd.rc.left, abd.rc.top, abd.rc.right, abd.rc.bottom);
+    SyncBackdrop(state);
 }
 
 // Re-lays-out an already-populated HUD after the band itself moved (taskbar
@@ -1208,6 +1225,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 state->fullscreenAppOpen = open;
                 Log(L"hud: fullscreen app %ls -- docked HUD %ls", open ? L"opened" : L"closed",
                     open ? L"hidden" : L"restored");
+                SyncBackdrop(state);
                 if (open) {
                     state->visibleBeforeFullscreen = IsWindowVisible(hwnd) != FALSE;
                     ShowWindow(hwnd, SW_HIDE);
@@ -1239,6 +1257,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             break;
         case WM_NCDESTROY:
             if (state && state->dragGhost) DestroyWindow(state->dragGhost);
+            if (state && state->backdrop) DestroyWindow(state->backdrop);
             delete state;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             break;
@@ -1309,6 +1328,7 @@ HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal) {
     // "winning" every individual z-order call. A fully independent
     // top-level window has no such coupling.
     RegisterProjectListGhostClass(hInstance);
+    state->backdrop = CreateTaskbarBackdrop(hInstance);
     state->dragGhost = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kProjectListGhostClassName, L"", WS_POPUP,
@@ -1724,11 +1744,19 @@ void HideProjectListHud(HWND hud) {
     if (hud) ShowWindow(hud, SW_HIDE);
 }
 
-void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight) {
+void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTaskbar) {
     ProjectListHudState* state = hud ? (ProjectListHudState*)GetWindowLongPtrW(hud, GWLP_USERDATA) : nullptr;
     if (!state) return;
     int bandHeight = std::max(kProjectListMinRowHeight, rowHeight);
-    if (docked == state->docked && (!docked || bandHeight == state->dockBandHeight)) return;
+    if (docked == state->docked && (!docked || bandHeight == state->dockBandHeight)) {
+        if (matchTaskbar != state->matchTaskbar) {
+            state->matchTaskbar = matchTaskbar;
+            SyncBackdrop(state);
+            if (IsWindowVisible(hud)) PositionProjectListHud(hud, state);
+        }
+        return;
+    }
+    state->matchTaskbar = matchTaskbar;
 
     bool modeChanged = docked != state->docked;
     if (docked && modeChanged && !RegisterAppBar(hud)) {
@@ -1738,6 +1766,8 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight) {
     if (!docked) {
         UnregisterAppBar(hud);
         state->fullscreenAppOpen = false;
+        state->docked = false;
+        SyncBackdrop(state);
     }
     state->docked = docked;
     state->dockBandHeight = bandHeight;
