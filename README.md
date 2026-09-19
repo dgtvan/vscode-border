@@ -83,6 +83,7 @@ first build):
 | `show_project_list` | Show an interactive project list HUD at the bottom-right of the desktop, using the same labels/colors as the border chips; includes minimized windows so it doubles as a restore list (`true`/`false`). |
 | `project_list_style` | Project list HUD layout: `horizontal` (single strip, all items share one width) or `vertical` (stacked list, shared column width). Both are resizable by Ctrl+left-click-dragging either edge and movable by Ctrl+left-click-dragging the middle; a plain right-click opens a context menu (**Copy Directory Path** / **Open Directory in File Explorer** for the window's folder, **Set Alias**, and **Add to Favourites** -- see below). Default `horizontal`. |
 | `project_list_position` | Project list HUD placement: `free` (floats anywhere -- Ctrl+left-click-drag to move it) or `fixed` (reserves a band one item row tall directly above the taskbar, so maximized windows stop above it, and docks the HUD in it -- see below). Default `free`. |
+| `project_list_fixed_match_taskbar` | Fixed mode only: paint the whole reserved band to look like the taskbar (`true`), or leave its empty part showing the desktop (`false`). Default `true`. |
 | `project_list_order` | Item order: `auto` (sorted by window left edge) or `manual` (drag items with a plain left-click to arrange them yourself -- see below). Default `auto`. |
 | `project_list_opacity_normal` | Project list HUD opacity when no item is hovered: 0 (invisible) - 255 (fully opaque). |
 | `project_list_opacity_hover` | Project list HUD opacity for the currently hovered item: 0 (invisible) - 255 (fully opaque). |
@@ -129,6 +130,20 @@ two modes keeps both. Fixed mode always uses the horizontal style,
 whatever `project_list_style` says. The HUD hides while a fullscreen app
 (a game, a fullscreen video) is up. Exiting the app, switching back to
 `free` or setting `show_project_list=false` releases the band.
+
+With `project_list_fixed_match_taskbar=true` (the default), the rest of the
+band is painted to look like the taskbar, so the band reads as an extension
+of it instead of a strip of wallpaper. Rather than guessing from theme
+settings, it copies what the taskbar actually shows on screen -- a thin row
+of pixels just inside its top edge, one color per column -- so it follows
+dark/light mode, accent color, transparency, Windows 10 vs. 11, and
+taskbar restyling tools on its own. A solid taskbar gives a solid band; a
+translucent one gives the blurred wallpaper's colors column by column. That
+is a snapshot, not a live blur: it's refreshed every 30 seconds and shortly
+after any theme, accent or wallpaper change (never while the mouse is over
+the taskbar, so a hover highlight isn't copied). With an auto-hide taskbar
+there's nothing to copy, so it falls back to plain dark or light, per the
+Windows theme.
 
 ### Project list HUD manual ordering
 

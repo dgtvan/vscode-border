@@ -171,7 +171,7 @@ static void SyncProjectListHud() {
     // maximized windows would grow and shrink as VS Code windows came and
     // went.
     SetProjectListHudDocked(g_projectListHud, g_config.showProjectList && g_config.projectListFixed,
-                            g_config.labelHeight);
+                            g_config.labelHeight, g_config.projectListFixedMatchTaskbar);
     if (!g_config.showProjectList || g_tracked.empty()) {
         HideProjectListHud(g_projectListHud);
         return;
@@ -570,7 +570,7 @@ void TrackingInit(HINSTANCE hInstance, HWND ownerWnd) {
     g_ownerWnd = ownerWnd;
     g_projectListHud = CreateProjectListHud(hInstance, g_config.projectListHorizontal || g_config.projectListFixed);
     SetProjectListHudDocked(g_projectListHud, g_config.showProjectList && g_config.projectListFixed,
-                            g_config.labelHeight);
+                            g_config.labelHeight, g_config.projectListFixedMatchTaskbar);
     SetFocusStormSnapshotHook(LogTrackedWindowsSnapshot);
 }
 

@@ -80,8 +80,10 @@ void HideProjectListHud(HWND hud);
 // horizontal style, which the caller is expected to pass to
 // UpdateProjectListHud while docked. Cheap to call on every sync -- a no-op
 // unless `docked` or `rowHeight` changed. Undocking releases the reserved
-// band; so does destroying the HUD.
-void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight);
+// band; so does destroying the HUD. `matchTaskbar` fills the whole band
+// behind the HUD with a backdrop painted to match the taskbar (see
+// taskbar_backdrop.h); otherwise the rest of the band shows the desktop.
+void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTaskbar);
 
 // Sorts `entries` to match window layout (left-to-right, top-to-bottom) --
 // or, if `style.manualOrder` is set, to the last order the user dragged
