@@ -82,6 +82,7 @@ first build):
 | `show_label` | Show the folder/repo name as a label chip inside the border's top-left corner (`true`/`false`). |
 | `show_project_list` | Show an interactive project list HUD at the bottom-right of the desktop, using the same labels/colors as the border chips; includes minimized windows so it doubles as a restore list (`true`/`false`). |
 | `project_list_style` | Project list HUD layout: `horizontal` (single strip, all items share one width) or `vertical` (stacked list, shared column width). Both are resizable by Ctrl+left-click-dragging either edge and movable by Ctrl+left-click-dragging the middle; a plain right-click opens a context menu (**Copy Directory Path** / **Open Directory in File Explorer** for the window's folder, **Set Alias**, and **Add to Favourites** -- see below). Default `horizontal`. |
+| `project_list_position` | Project list HUD placement: `free` (floats anywhere -- Ctrl+left-click-drag to move it) or `fixed` (reserves a band one item row tall directly above the taskbar, so maximized windows stop above it, and docks the HUD in it -- see below). Default `free`. |
 | `project_list_order` | Item order: `auto` (sorted by window left edge) or `manual` (drag items with a plain left-click to arrange them yourself -- see below). Default `auto`. |
 | `project_list_opacity_normal` | Project list HUD opacity when no item is hovered: 0 (invisible) - 255 (fully opaque). |
 | `project_list_opacity_hover` | Project list HUD opacity for the currently hovered item: 0 (invisible) - 255 (fully opaque). |
@@ -108,6 +109,26 @@ glance. It includes minimized windows, so it doubles as a restore list.
 Enable it with `show_project_list=true`.
 
 ![Project list HUD showing three open windows and a "+" button to open a new one](assets/hub.png)
+
+### Project list HUD fixed position
+
+With `project_list_position=fixed`, the HUD registers as a desktop toolbar
+(an "AppBar", the same mechanism docked toolbars use) on the bottom edge of
+the primary monitor. Windows reserves a band `label_height` pixels tall
+directly above the taskbar for it and shrinks the desktop work area to
+match, so maximized windows stop above the band instead of covering the
+HUD. The band stays reserved while the app runs, even with no VS Code
+windows open, so maximized windows don't jump each time one opens or
+closes.
+
+Inside the band, Ctrl+left-click-dragging either edge still resizes the
+HUD, and Ctrl+left-click-dragging the middle slides it sideways -- it just
+can't leave the band. That placement is remembered separately from the
+free-mode one (per monitor scenario, see below), so switching between the
+two modes keeps both. Fixed mode always uses the horizontal style,
+whatever `project_list_style` says. The HUD hides while a fullscreen app
+(a game, a fullscreen video) is up. Exiting the app, switching back to
+`free` or setting `show_project_list=false` releases the band.
 
 ### Project list HUD manual ordering
 

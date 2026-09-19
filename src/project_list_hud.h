@@ -70,6 +70,19 @@ HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal);
 // Hides the HUD (config disabled, or nothing currently worth showing).
 void HideProjectListHud(HWND hud);
 
+// Switches between free placement (`docked` false: anywhere, Ctrl+drag to
+// move/resize) and fixed placement (`docked` true: registered as a
+// bottom-edge AppBar on the primary monitor, which reserves a band one
+// item row tall directly above the taskbar -- maximized windows then stop
+// above it -- and the HUD lives inside that band: Ctrl+drag still resizes
+// it and slides it sideways, but can't take it out of the band). Each mode
+// remembers its own placement. Fixed placement only makes sense with the
+// horizontal style, which the caller is expected to pass to
+// UpdateProjectListHud while docked. Cheap to call on every sync -- a no-op
+// unless `docked` or `rowHeight` changed. Undocking releases the reserved
+// band; so does destroying the HUD.
+void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight);
+
 // Sorts `entries` to match window layout (left-to-right, top-to-bottom) --
 // or, if `style.manualOrder` is set, to the last order the user dragged
 // them into (see project_list_order.h), with any entries never seen before

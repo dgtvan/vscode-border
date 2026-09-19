@@ -30,6 +30,8 @@ static const int kProjectListMeasurePaddingX = 32;
 static const int kReorderDragThreshold = 4; // pixels of movement before a plain left-click-on-an-item
                                              // commits to a reorder-drag instead of a click-to-activate
 static const int kProjectListBottomMargin = 24;
+static const int kProjectListMinRowHeight = 18;
+static const UINT kAppBarCallbackMsg = WM_APP + 1; // shell -> HUD AppBar notifications (ABN_*), docked mode only
 static const UINT_PTR kClaudePulseTimerId = 1; // repaints while >=1 item is ClaudeStatus::Working, to
                                                 // animate its dot -- started/stopped on demand, see
                                                 // UpdateProjectListHud
@@ -102,6 +104,14 @@ struct ProjectListHudState {
                                    // UpdateProjectListHud's guard for why this (and editIndex >= 0)
                                    // needs to suppress resyncs while set
     bool pulseTimerActive = false; // mirrors whether kClaudePulseTimerId is currently running
+    bool docked = false; // fixed mode: registered as a bottom-edge AppBar -- see SetProjectListHudDocked
+    int dockBandHeight = 0;
+    RECT dockRect = {}; // the reserved band (screen coords) the shell granted, valid while docked. Spans
+                        // the whole monitor width; the HUD itself sits somewhere inside it.
+    bool fullscreenAppOpen = false; // docked only: the shell reported a fullscreen app (ABN_FULLSCREENAPP),
+                                     // so the HUD stays hidden instead of painting over it
+    bool visibleBeforeFullscreen = false; // whether to bring the HUD back once that fullscreen app closes --
+                                           // it may have been hidden for its own reasons (no windows, etc.)
 };
 
 static int ClampInt(int value, int minValue, int maxValue) {
@@ -248,6 +258,10 @@ static void MoveDragGhost(ProjectListHudState* state);
 
 static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
     if (!state) return;
+    if (state->docked && state->fullscreenAppOpen) {
+        ShowWindow(hud, SW_HIDE);
+        return;
+    }
     // Re-asserting HWND_TOPMOST on a window that's already topmost doesn't
     // reliably move it ahead of some other window that's gone topmost more
     // recently (e.g. briefly, when another app's own window is maximized) --
@@ -271,12 +285,15 @@ static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
 // column), but for horizontal it's deliberately not the whole strip's
 // width, so restoring it doesn't depend on how many windows happen to be
 // tracked at that moment (see manualItemWidth's comment).
-static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
-    std::wstring key = GetMonitorScenarioKey();
-    if (!state || key == state->scenarioKey) return false;
-    state->scenarioKey = key;
+// Fixed (docked) mode remembers its own placement, separately from free
+// mode's, so switching modes back and forth doesn't make either one forget
+// where the user put it.
+static std::wstring PlacementKey(const ProjectListHudState* state) {
+    return state->docked ? state->scenarioKey + L"|docked" : state->scenarioKey;
+}
 
-    SavedHudPlacement saved = LoadHudPlacement(key);
+static void LoadPlacementForCurrentKey(ProjectListHudState* state) {
+    SavedHudPlacement saved = LoadHudPlacement(PlacementKey(state));
     state->manualPosition = saved.found;
     state->manualWidth = saved.found;
     if (saved.found) {
@@ -293,7 +310,79 @@ static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
             state->width = std::max(saved.width, kProjectListMinWidth);
         }
     }
+}
+
+static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
+    std::wstring key = GetMonitorScenarioKey();
+    if (!state || key == state->scenarioKey) return false;
+    state->scenarioKey = key;
+    LoadPlacementForCurrentKey(state);
     return true;
+}
+
+// Fits state->x/y/width into the reserved band: y is pinned to the band
+// (the HUD can only slide sideways), the width is capped at the band's, and
+// x is either the remembered one clamped into the band or, if never placed
+// by hand, right-aligned -- the same corner free mode defaults to.
+static void FitIntoDock(ProjectListHudState* state) {
+    const RECT& d = state->dockRect;
+    state->width = std::min(state->width, (int)(d.right - d.left));
+    state->x = state->manualPosition ? ClampInt(state->x, d.left, d.right - state->width) : d.right - state->width;
+    state->y = d.top + ((d.bottom - d.top) - state->height) / 2;
+}
+
+// Asks the shell for a band of dockBandHeight at the bottom of the primary
+// monitor and reserves it -- the shell stacks it against the taskbar when
+// the taskbar is on that same edge, so the band lands directly above it,
+// and shrinks the work area so maximized windows stop above the band. The
+// QUERYPOS/re-apply-height/SETPOS sequence is the documented one: QUERYPOS
+// may move either edge of the proposed rect out of the taskbar's way, so
+// the height is reapplied from the (adjusted) bottom before committing.
+static void RefreshDockRect(HWND hud, ProjectListHudState* state) {
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi);
+    APPBARDATA abd = {};
+    abd.cbSize = sizeof(abd);
+    abd.hWnd = hud;
+    abd.uEdge = ABE_BOTTOM;
+    abd.rc = mi.rcMonitor;
+    abd.rc.top = abd.rc.bottom - state->dockBandHeight;
+    SHAppBarMessage(ABM_QUERYPOS, &abd);
+    abd.rc.top = abd.rc.bottom - state->dockBandHeight;
+    SHAppBarMessage(ABM_SETPOS, &abd);
+    state->dockRect = abd.rc;
+    Log(L"hud: docked band=(%ld,%ld)-(%ld,%ld)", abd.rc.left, abd.rc.top, abd.rc.right, abd.rc.bottom);
+}
+
+// Re-lays-out an already-populated HUD after the band itself moved (taskbar
+// moved/resized, display change) -- without waiting for the next regular
+// UpdateProjectListHud, which only runs when something about the tracked
+// windows changes.
+static void RelayoutDocked(HWND hud, ProjectListHudState* state) {
+    if (!state->docked || state->entries.empty()) return;
+    FitIntoDock(state);
+    if (state->horizontal) RebuildHorizontalItemRects(state);
+    else RebuildVerticalItemRects(state);
+    if (IsWindowVisible(hud)) {
+        RenderProjectListHud(hud, state);
+        PositionProjectListHud(hud, state);
+    }
+}
+
+static bool RegisterAppBar(HWND hud) {
+    APPBARDATA abd = {};
+    abd.cbSize = sizeof(abd);
+    abd.hWnd = hud;
+    abd.uCallbackMessage = kAppBarCallbackMsg;
+    return SHAppBarMessage(ABM_NEW, &abd) != 0;
+}
+
+static void UnregisterAppBar(HWND hud) {
+    APPBARDATA abd = {};
+    abd.cbSize = sizeof(abd);
+    abd.hWnd = hud;
+    SHAppBarMessage(ABM_REMOVE, &abd);
 }
 
 // True while one of the taskbar's own flyouts holds the foreground -- the
@@ -772,13 +861,23 @@ static void EndMoveResizeDrag(HWND hwnd, ProjectListHudState* state, int mouseX,
     if (GetCapture() == hwnd) ReleaseCapture();
     if (state->manualPosition) {
         int savedWidth = state->horizontal ? state->manualItemWidth : state->width;
-        SaveHudPlacement(state->scenarioKey, state->x, state->y, savedWidth);
+        SaveHudPlacement(PlacementKey(state), state->x, state->y, savedWidth);
     }
     SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, mouseX, mouseY)));
 }
 
 static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     ProjectListHudState* state = (ProjectListHudState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+    // Explorer restarted (crash, or killed by hand): every AppBar
+    // registration died with it, so register again and reclaim the band.
+    static const UINT taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
+    if (msg == taskbarCreatedMsg && state && state->docked) {
+        RegisterAppBar(hwnd);
+        RefreshDockRect(hwnd, state);
+        RelayoutDocked(hwnd, state);
+        return 0;
+    }
 
     switch (msg) {
         case WM_MOUSEMOVE: {
@@ -880,6 +979,21 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     right = std::max(right + dx, left + kProjectListMinWidth);
                     state->manualPosition = true;
                     state->manualWidth = true;
+                }
+
+                if (state->docked) {
+                    // Pinned to the band: sideways only, never out of it.
+                    const RECT& d = state->dockRect;
+                    top = state->dragStartRect.top;
+                    bottom = state->dragStartRect.bottom;
+                    if (state->dragMode == ProjectListHudState::DragMove) {
+                        int w = right - left;
+                        left = ClampInt(left, d.left, d.right - w);
+                        right = left + w;
+                    } else {
+                        left = std::max(left, (int)d.left);
+                        right = std::min(right, (int)d.right);
+                    }
                 }
 
                 int newWidth = right - left;
@@ -1014,6 +1128,14 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             }
             return 0;
         case WM_DISPLAYCHANGE:
+            if (state && state->docked) {
+                // The shell also sends ABN_POSCHANGED for this, but the
+                // band's monitor may have changed size under us either way.
+                ApplyScenarioForCurrentMonitors(state);
+                RefreshDockRect(hwnd, state);
+                RelayoutDocked(hwnd, state);
+                return 0;
+            }
             if (state && ApplyScenarioForCurrentMonitors(state) && state->manualPosition) {
                 // Only need to force an immediate refresh when we just
                 // snapped to a remembered placement -- if this scenario has
@@ -1064,6 +1186,57 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 if (state->dragGhost) ShowWindow(state->dragGhost, SW_HIDE);
             }
             return 0;
+        case kAppBarCallbackMsg:
+            if (!state || !state->docked) return 0;
+            if (wParam == ABN_POSCHANGED) {
+                // Taskbar moved/resized/auto-hide toggled, or another
+                // AppBar came or went -- renegotiate the band.
+                RefreshDockRect(hwnd, state);
+                RelayoutDocked(hwnd, state);
+            } else if (wParam == ABN_FULLSCREENAPP) {
+                bool open = lParam != 0;
+                // The shell also reports clicking the bare desktop as a
+                // fullscreen app opening (the desktop window covers the
+                // whole monitor) -- hiding the HUD for that would make it
+                // vanish every time the user clicks their wallpaper.
+                if (open) {
+                    wchar_t cls[64] = {};
+                    GetClassNameW(GetForegroundWindow(), cls, 64);
+                    if (wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0) return 0;
+                }
+                if (open == state->fullscreenAppOpen) return 0;
+                state->fullscreenAppOpen = open;
+                Log(L"hud: fullscreen app %ls -- docked HUD %ls", open ? L"opened" : L"closed",
+                    open ? L"hidden" : L"restored");
+                if (open) {
+                    state->visibleBeforeFullscreen = IsWindowVisible(hwnd) != FALSE;
+                    ShowWindow(hwnd, SW_HIDE);
+                } else if (state->visibleBeforeFullscreen && !state->entries.empty()) {
+                    FitIntoDock(state);
+                    RenderProjectListHud(hwnd, state);
+                    PositionProjectListHud(hwnd, state);
+                }
+            }
+            return 0;
+        case WM_ACTIVATE:
+            // Part of the AppBar protocol. (ABM_WINDOWPOSCHANGED, its
+            // WM_WINDOWPOSCHANGED counterpart, is deliberately not sent:
+            // it only matters for auto-hide AppBars, and this window
+            // re-asserts its z-order via SetWindowPos on every sync and
+            // every frame of a drag -- a cross-process call to Explorer
+            // each time, for nothing.)
+            if (state && state->docked) {
+                APPBARDATA abd = {};
+                abd.cbSize = sizeof(abd);
+                abd.hWnd = hwnd;
+                SHAppBarMessage(ABM_ACTIVATE, &abd);
+            }
+            break;
+        case WM_DESTROY:
+            // A still-registered AppBar would leave its band reserved --
+            // an empty strip that maximized windows keep stopping above.
+            if (state && state->docked) UnregisterAppBar(hwnd);
+            break;
         case WM_NCDESTROY:
             if (state && state->dragGhost) DestroyWindow(state->dragGhost);
             delete state;
@@ -1551,6 +1724,31 @@ void HideProjectListHud(HWND hud) {
     if (hud) ShowWindow(hud, SW_HIDE);
 }
 
+void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight) {
+    ProjectListHudState* state = hud ? (ProjectListHudState*)GetWindowLongPtrW(hud, GWLP_USERDATA) : nullptr;
+    if (!state) return;
+    int bandHeight = std::max(kProjectListMinRowHeight, rowHeight);
+    if (docked == state->docked && (!docked || bandHeight == state->dockBandHeight)) return;
+
+    bool modeChanged = docked != state->docked;
+    if (docked && modeChanged && !RegisterAppBar(hud)) {
+        LogWarn(L"hud: couldn't register as an AppBar -- staying in free position mode");
+        return;
+    }
+    if (!docked) {
+        UnregisterAppBar(hud);
+        state->fullscreenAppOpen = false;
+    }
+    state->docked = docked;
+    state->dockBandHeight = bandHeight;
+    if (docked) RefreshDockRect(hud, state);
+    if (modeChanged) {
+        Log(L"hud: position mode -> %ls", docked ? L"fixed" : L"free");
+        LoadPlacementForCurrentKey(state);
+    }
+    RelayoutDocked(hud, state);
+}
+
 // Widest label (padded, clamped) across `entries`, using the same font
 // RenderProjectListHud paints normal (non-hover) rows with -- so the HUD is
 // sized to fit what it's about to draw.
@@ -1635,7 +1833,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
 
     PinFavouritesToFront(sorted);
 
-    int rowHeight = std::max(18, style.rowHeight);
+    int rowHeight = std::max(kProjectListMinRowHeight, style.rowHeight);
     state->rowHeight = rowHeight;
     state->entries = sorted;
     if (state->horizontal != style.horizontal) {
@@ -1667,7 +1865,6 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
         int itemWidth = !state->manualWidth ? MeasureRequiredWidth(sorted, style.fontSize)
                                              : std::max(1, state->manualItemWidth);
         state->width = (int)sorted.size() * itemWidth + (int)(sorted.size() - 1) * kProjectListGap + buttonReserve;
-        RebuildHorizontalItemRects(state);
         totalHeight = rowHeight;
     } else {
         if (!state->manualWidth) {
@@ -1675,17 +1872,21 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
         } else {
             state->width = std::max(state->width, kProjectListMinWidth);
         }
-        RebuildVerticalItemRects(state);
         totalHeight = (int)sorted.size() * rowHeight + ((int)sorted.size() - 1) * kProjectListGap + buttonReserve;
     }
     state->height = totalHeight;
 
-    if (!state->manualPosition) {
+    if (state->docked) {
+        FitIntoDock(state);
+    } else if (!state->manualPosition) {
         RECT workArea = {};
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
         state->x = workArea.right - state->width;
         state->y = workArea.bottom - state->height - kProjectListBottomMargin;
     }
+    // After the placement above, since docking can cap the width.
+    if (style.horizontal) RebuildHorizontalItemRects(state);
+    else RebuildVerticalItemRects(state);
 
     state->fontSize = style.fontSize;
     state->labelTextColorAuto = style.labelTextColorAuto;
