@@ -29,6 +29,12 @@ struct ProjectListHudEntry {
                             // "Copy Directory Path" and "Open Directory in File Explorer".
     COLORREF color = RGB(0, 0, 0);
     ClaudeStatus claudeStatus = ClaudeStatus::None;
+    // True while rawLabel might still change (VS Code's title/worktree
+    // mapping still settling -- see tracking.cpp's IsWindowLoading). Drawn
+    // greyed out with a spinner instead of its real color/AI status, and
+    // can't be alias-edited or drag-reordered until this clears, since both
+    // of those are keyed by rawLabel.
+    bool loading = false;
 };
 
 struct ProjectListHudStyle {

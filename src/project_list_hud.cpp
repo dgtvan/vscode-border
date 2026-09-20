@@ -34,10 +34,18 @@ static const int kReorderDragThreshold = 4; // pixels of movement before a plain
 static const int kProjectListBottomMargin = 24;
 static const int kProjectListMinRowHeight = 18;
 static const UINT kAppBarCallbackMsg = WM_APP + 1; // shell -> HUD AppBar notifications (ABN_*), docked mode only
-static const UINT_PTR kClaudePulseTimerId = 1; // repaints while >=1 item is ClaudeStatus::Working, to
-                                                // animate its dot -- started/stopped on demand, see
-                                                // UpdateProjectListHud
+static const UINT_PTR kClaudePulseTimerId = 1; // repaints while >=1 item is ClaudeStatus::Working or
+                                                // loading, to animate its indicator -- started/stopped
+                                                // on demand, see UpdateProjectListHud
 static const UINT kClaudePulseIntervalMs = 150;
+// Ring-spinner geometry shared by the Claude "Working" indicator and the
+// loading-state indicator (see DrawHudItem): 8 cells around a 3x3 grid's
+// perimeter (empty center), in clockwise order, one lit at a time.
+static const int kRingCellSize = 4, kRingGap = 1, kRingStride = kRingCellSize + kRingGap;
+static const int kRingSpan = 3 * kRingCellSize + 2 * kRingGap;
+static const int kRingCells[8][2] = {
+    {0, 0}, {1, 0}, {2, 0}, {2, 1}, {2, 2}, {1, 2}, {0, 2}, {0, 1},
+};
 
 static HFONT CreateHudFont(int fontSize, int weight) {
     return CreateFontW(-fontSize, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
@@ -784,22 +792,31 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     // also still offered from the "+" button's own menu (see
     // ShowNewWindowButtonContextMenu), for a favourite that isn't currently
     // open as a hub item.
-    bool hasPath = index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
+    // While loading (see ProjectListHudEntry::loading), this window's
+    // path/alias may not be known yet, or may still change -- an alias set
+    // now would key it to a rawLabel that's about to be replaced, silently
+    // orphaning it once VS Code's title/worktree mapping settles. Rather
+    // than a menu whose shape/enabled-state shifts as that data trickles
+    // in, show every possible item, all disabled, so it's unambiguous:
+    // nothing here is usable yet.
+    bool loading = index >= 0 && index < (int)state->entries.size() && state->entries[index].loading;
+    bool hasPath = !loading && index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
     bool alreadyFav = hasPath && IsFavourite(state->entries[index].path);
-    bool hasAlias = index >= 0 && index < (int)state->entries.size() &&
+    bool hasAlias = !loading && index >= 0 && index < (int)state->entries.size() &&
                     state->entries[index].label != state->entries[index].rawLabel;
 
     HMENU menu = CreatePopupMenu();
-    if (hasPath) {
-        AppendMenuW(menu, MF_STRING, 5, L"Copy Directory Path");
-        AppendMenuW(menu, MF_STRING, 6, L"Open Directory in File Explorer");
+    UINT itemFlags = MF_STRING | (loading ? MF_GRAYED : 0);
+    if (hasPath || loading) {
+        AppendMenuW(menu, itemFlags, 5, L"Copy Directory Path");
+        AppendMenuW(menu, itemFlags, 6, L"Open Directory in File Explorer");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
-    AppendMenuW(menu, MF_STRING, 1, L"Set Alias...");
-    if (hasAlias) AppendMenuW(menu, MF_STRING, 2, L"Clear Alias");
-    if (hasPath) {
+    AppendMenuW(menu, itemFlags, 1, L"Set Alias...");
+    if (hasAlias || loading) AppendMenuW(menu, itemFlags, 2, L"Clear Alias");
+    if (hasPath || loading) {
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, alreadyFav ? 4 : 3, alreadyFav ? L"Remove from Favourites" : L"Add to Favourites");
+        AppendMenuW(menu, itemFlags, alreadyFav ? 4 : 3, alreadyFav ? L"Remove from Favourites" : L"Add to Favourites");
     }
 
     RequestForeground(hud, FocusTargetKind::OwnUi,
@@ -1148,7 +1165,12 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 // its click is handled entirely on WM_LBUTTONUP via
                 // hoverIndex, same as a plain item click.
                 int index = ProjectListHitTest(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-                if (index >= 0 && index < (int)state->entries.size()) {
+                // A loading entry's rawLabel may still change (see
+                // ProjectListHudEntry::loading) -- not draggable into a
+                // reorder that a later relabel would silently orphan.
+                // Plain click-to-activate on release still works either way,
+                // since that only needs hoverIndex, not pendingDragIndex.
+                if (index >= 0 && index < (int)state->entries.size() && !state->entries[index].loading) {
                     state->pendingDragIndex = index;
                     GetCursorPos(&state->dragStart);
                 }
@@ -1453,7 +1475,14 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
                         COLORREF claudeColorWorking, COLORREF claudeColorAttention,
                         COLORREF claudeColorWaiting, bool claudeBorderColorAuto, COLORREF claudeBorderColor) {
     const int paddingX = 12;
-    int leftTextPad = isFavourite ? kFavouriteMarkerLeftPad : paddingX;
+    // A loading item's star (if it's a favourite) is suppressed below --
+    // loading entries are deliberately kept out of the favourites-front
+    // sort (see UpdateProjectListHud) so their position doesn't jump
+    // around while still resolving, so showing the star here (implying
+    // "pinned to front") while it sits wherever the loading block landed
+    // would be misleading.
+    bool showFavouriteMarker = isFavourite && !entry.loading;
+    int leftTextPad = showFavouriteMarker ? kFavouriteMarkerLeftPad : paddingX;
     int itemWidth = item.right - item.left;
     COLORREF color = entry.color;
     BYTE r = GetRValue(color), g = GetGValue(color), b = GetBValue(color);
@@ -1465,16 +1494,61 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
     COLORREF chipColor = RGB(r, g, b);
     UINT32 chipPx = (UINT32(255) << 24) | (UINT32(r) << 16) | (UINT32(g) << 8) | UINT32(b);
 
+    // Loading fill: the item's own color on the left fading, on a 115deg
+    // diagonal, into grey on the right (see the reddit-ads preview's
+    // "Variant B") -- computed once per item as a projection onto the
+    // gradient direction, normalized so 0.0/1.0 land exactly on the box's
+    // two extreme corners along that direction (the same convention CSS's
+    // linear-gradient uses), then reused below both to fill the chip and
+    // to color the spinner dots' local background so they blend correctly
+    // wherever they land on the gradient.
+    const double kPi = 3.14159265358979323846;
+    const double kLoadingAngleRad = 115.0 * kPi / 180.0;
+    const double kLoadingGradDx = sin(kLoadingAngleRad), kLoadingGradDy = -cos(kLoadingAngleRad);
+    const double kLoadingBandStart = 0.30, kLoadingBandEnd = 0.70;
+    BYTE loadingGrey = (BYTE)(highlighted ? 160 : 128);
+    double loadingCorners[4][2] = {
+        {0.0, 0.0}, {(double)itemWidth, 0.0}, {0.0, (double)(item.bottom - item.top)},
+        {(double)itemWidth, (double)(item.bottom - item.top)},
+    };
+    double loadingMinProj = 1e18, loadingMaxProj = -1e18;
+    for (auto& c : loadingCorners) {
+        double p = c[0] * kLoadingGradDx + c[1] * kLoadingGradDy;
+        loadingMinProj = std::min(loadingMinProj, p);
+        loadingMaxProj = std::max(loadingMaxProj, p);
+    }
+    double loadingSpan = loadingMaxProj - loadingMinProj;
+    auto LoadingColorAt = [&](int absCol, int absRow) -> UINT32 {
+        double px = absCol - item.left, py = absRow - item.top;
+        double proj = px * kLoadingGradDx + py * kLoadingGradDy;
+        double t = loadingSpan > 1e-6 ? (proj - loadingMinProj) / loadingSpan : 0.0;
+        t = std::max(0.0, std::min(1.0, t));
+        BYTE fr, fg, fb;
+        if (t <= kLoadingBandStart) {
+            fr = r; fg = g; fb = b;
+        } else if (t >= kLoadingBandEnd) {
+            fr = fg = fb = loadingGrey;
+        } else {
+            double lt = (t - kLoadingBandStart) / (kLoadingBandEnd - kLoadingBandStart);
+            fr = (BYTE)(r + (loadingGrey - (int)r) * lt);
+            fg = (BYTE)(g + (loadingGrey - (int)g) * lt);
+            fb = (BYTE)(b + (loadingGrey - (int)b) * lt);
+        }
+        return (UINT32(fr) << 16) | (UINT32(fg) << 8) | UINT32(fb);
+    };
+
     int rowStart = std::max((int)item.top, 0), rowEnd = std::min((int)item.bottom, height);
     int colStart = std::max((int)item.left, 0), colEnd = std::min((int)item.right, width);
     for (int row = rowStart; row < rowEnd; row++) {
-        for (int col = colStart; col < colEnd; col++) pixels[row * width + col] = chipPx;
+        for (int col = colStart; col < colEnd; col++) {
+            pixels[row * width + col] = entry.loading ? (0xFF000000u | LoadingColorAt(col, row)) : chipPx;
+        }
     }
 
     // Favourites star marker, left edge -- drawn before the opacity pass
     // below so it fades with the rest of the chip on hover/normal opacity,
     // same reasoning as the Claude status indicator's placement.
-    if (isFavourite) DrawFavouriteMarker(pixels, width, height, item, color);
+    if (showFavouriteMarker) DrawFavouriteMarker(pixels, width, height, item, color);
 
     COLORREF tx = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
     BlendTextIntoPixels(screenDC, pixels, width, height, item.left + leftTextPad, item.top,
@@ -1509,7 +1583,44 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
             for (int col = iColStart; col < iColEnd; col++) pixels[row * width + col] = fillPx;
         }
     };
-    if (entry.claudeStatus == ClaudeStatus::Working) {
+    if (entry.loading) {
+        // Radial spinner: kDots evenly spaced around a small circle, faded
+        // from solid (auto-contrast accent color) down to the chip's own
+        // background color going backwards from the current position --
+        // reads as "still resolving this window's repo/branch/alias" (see
+        // IsWindowLoading) without touching the chip's real color at all,
+        // and takes priority over the AI status indicator since
+        // ComputeAiStatus's folder match isn't reliable yet during this
+        // window.
+        const int kDots = 8, kSpinnerRadius = 6, kDotRadius = 2;
+        int cx = (int)item.right - dotMargin - kSpinnerRadius - kDotRadius;
+        int cy = (int)(item.top + item.bottom) / 2; // vertically centered on the item, unlike the
+                                                      // top-anchored Claude status dot/ring below
+        COLORREF accent = claudeBorderColorAuto ? ContrastTextColor(color) : claudeBorderColor;
+        int activeIndex = (int)((GetTickCount64() / kClaudePulseIntervalMs) % kDots);
+        for (int i = 0; i < kDots; i++) {
+            double angle = -kPi / 2 + i * 2.0 * kPi / kDots;
+            int dx = cx + (int)std::lround(kSpinnerRadius * cos(angle));
+            int dy = cy + (int)std::lround(kSpinnerRadius * sin(angle));
+            int distBack = (activeIndex - i + kDots) % kDots; // 0 at the lit dot, fading with distance
+            double t = 1.0 - (double)distBack / kDots;
+            UINT32 localBg = LoadingColorAt(dx, dy);
+            BYTE bgR = (BYTE)((localBg >> 16) & 0xFF), bgG = (BYTE)((localBg >> 8) & 0xFF), bgB = (BYTE)(localBg & 0xFF);
+            BYTE dr = (BYTE)(bgR + (GetRValue(accent) - (int)bgR) * t);
+            BYTE dg = (BYTE)(bgG + (GetGValue(accent) - (int)bgG) * t);
+            BYTE db = (BYTE)(bgB + (GetBValue(accent) - (int)bgB) * t);
+            UINT32 dotPx = (UINT32(255) << 24) | (UINT32(dr) << 16) | (UINT32(dg) << 8) | UINT32(db);
+            int dRowStart = std::max(dy - kDotRadius, rowStart), dRowEnd = std::min(dy + kDotRadius + 1, rowEnd);
+            int dColStart = std::max(dx - kDotRadius, colStart), dColEnd = std::min(dx + kDotRadius + 1, colEnd);
+            for (int row = dRowStart; row < dRowEnd; row++) {
+                for (int col = dColStart; col < dColEnd; col++) {
+                    if ((row - dy) * (row - dy) + (col - dx) * (col - dx) <= kDotRadius * kDotRadius) {
+                        pixels[row * width + col] = dotPx;
+                    }
+                }
+            }
+        }
+    } else if (entry.claudeStatus == ClaudeStatus::Working) {
         // Ring spinner: 8 cells in a 3x3 grid with an empty center, only
         // one lit at a time, advancing one step per pulse timer tick --
         // reads as a single square chasing itself around the ring. (A
@@ -1518,20 +1629,12 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
         COLORREF dotColor = claudeColorWorking;
         UINT32 dotPx = (UINT32(255) << 24) | (UINT32(GetRValue(dotColor)) << 16) |
                       (UINT32(GetGValue(dotColor)) << 8) | UINT32(GetBValue(dotColor));
-        const int cell = 4, gap = 1, stride = cell + gap, ringSpan = 3 * cell + 2 * gap; // 14x14 overall
-        // {col, row} in the 3x3 grid, in clockwise perimeter order (each
-        // step moves to an *adjacent* cell -- indexing the grid in plain
-        // row-major order instead jumps straight from top-right to
-        // mid-left, breaking the "chasing around a ring" illusion).
-        static const int kRingCells[8][2] = {
-            {0, 0}, {1, 0}, {2, 0}, {2, 1}, {2, 2}, {1, 2}, {0, 2}, {0, 1},
-        };
         int activeIndex = (int)((GetTickCount64() / kClaudePulseIntervalMs) % 8);
-        int baseX = (int)item.right - dotMargin - ringSpan;
+        int baseX = (int)item.right - dotMargin - kRingSpan;
         int baseY = (int)item.top + dotMargin;
-        int sqLeft = baseX + kRingCells[activeIndex][0] * stride;
-        int sqTop = baseY + kRingCells[activeIndex][1] * stride;
-        drawBorderedSquare(sqLeft, sqTop, cell, dotPx);
+        int sqLeft = baseX + kRingCells[activeIndex][0] * kRingStride;
+        int sqTop = baseY + kRingCells[activeIndex][1] * kRingStride;
+        drawBorderedSquare(sqLeft, sqTop, kRingCellSize, dotPx);
     } else if (entry.claudeStatus == ClaudeStatus::Attention || entry.claudeStatus == ClaudeStatus::Waiting) {
         // A single big square, vertically centered on the item (unlike the
         // ring spinner above, which stays corner-anchored) -- red and
@@ -1901,8 +2004,25 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
         if (a.windowRect.top != b.windowRect.top) return a.windowRect.top < b.windowRect.top;
         return a.target < b.target;
     });
+
+    // Pull loading entries (see ProjectListHudEntry::loading) out before
+    // manual-order matching and favourites-pinning below: both key off
+    // rawLabel/path, which can still be changing moment to moment while
+    // loading, and would otherwise make the whole list visibly reshuffle
+    // for no action the user actually took. Keep them in their own fixed,
+    // trackSeq-ordered block at the very end instead -- each one moves to
+    // its proper place exactly once, when it finishes loading, not before.
+    std::vector<ProjectListHudEntry> loadingEntries;
+    std::vector<ProjectListHudEntry> settled;
+    for (const ProjectListHudEntry& e : sorted) {
+        if (e.loading) loadingEntries.push_back(e);
+        else settled.push_back(e);
+    }
+    std::sort(loadingEntries.begin(), loadingEntries.end(),
+             [](const ProjectListHudEntry& a, const ProjectListHudEntry& b) { return a.trackSeq < b.trackSeq; });
+
     state->manualOrderMode = style.manualOrder;
-    if (style.manualOrder) ApplyManualOrder(sorted, state->manualOrder);
+    if (style.manualOrder) ApplyManualOrder(settled, state->manualOrder);
 
     // Keep a favourite's stored label in sync with its live hub item
     // whenever that project is actually open -- otherwise the favourites
@@ -1911,11 +2031,13 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     // clicked, even after the hub item's own label later changes (e.g. the
     // window title reparses differently once VS Code picks up this app's
     // window.title setting, or the user sets/changes an alias).
-    for (const ProjectListHudEntry& e : sorted) {
+    for (const ProjectListHudEntry& e : settled) {
         if (!e.path.empty()) RefreshFavouriteLabel(e.path, e.label);
     }
 
-    PinFavouritesToFront(sorted);
+    PinFavouritesToFront(settled);
+    sorted = settled;
+    sorted.insert(sorted.end(), loadingEntries.begin(), loadingEntries.end());
 
     int rowHeight = std::max(kProjectListMinRowHeight, style.rowHeight);
     state->rowHeight = rowHeight;
@@ -2008,7 +2130,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     // desktop (or one where nothing's currently animating) never pays for
     // it, same on-demand pattern as tracking.cpp's foreground-poll timer.
     bool anyAnimating = std::any_of(sorted.begin(), sorted.end(), [](const ProjectListHudEntry& e) {
-        return e.claudeStatus == ClaudeStatus::Working || e.claudeStatus == ClaudeStatus::Attention;
+        return e.loading || e.claudeStatus == ClaudeStatus::Working || e.claudeStatus == ClaudeStatus::Attention;
     });
     if (anyAnimating && !state->pulseTimerActive) {
         SetTimer(hud, kClaudePulseTimerId, kClaudePulseIntervalMs, nullptr);

@@ -25,6 +25,25 @@ static HWND g_projectListHud = nullptr;
 const UINT_PTR kForegroundPollTimerId = 2;
 static const UINT kForegroundPollIntervalMs = 50;
 
+// A tracked window counts as "loading" (see IsWindowLoading) for up to
+// this long after its current loading episode began -- first tracked, or
+// the first NAMECHANGE seen after a prior episode had already ended. A
+// single bounded window rather than a per-event recency check: VS Code's
+// git extension can go completely silent for a while before firing the
+// one NAMECHANGE that finally carries the resolved repo/branch, so
+// resetting on a quiet gap flickered the item normal and back. Measured
+// directly from this app's own logs on a real reload: title went from
+// "no repo yet" to fully resolved "repo - branch - folder" in 3 separate
+// NAMECHANGE bursts spanning ~11.5s total, with one silent gap of ~8.1s
+// in the middle where nothing happened at all -- 4000ms (the previous
+// value) expired mid-gap and caused exactly this flicker. Also covers a
+// folder that plainly has no git repo at all (nothing will ever resolve,
+// so this is simply how long that folder shows as loading before giving
+// up), and a git extension that never finishes (e.g. disabled in
+// settings) -- either way this is the absolute cap, not just a typical
+// case estimate.
+static const ULONGLONG kLoadingGraceMs = 20000;
+
 struct TrackedWindow {
     HWND overlay = nullptr;
     int colorIndex = 0;
@@ -53,6 +72,10 @@ struct TrackedWindow {
                              // creation time can't tell them apart either; see project_list_hud.cpp's
                              // ShowNewWindowButtonContextMenu for how the favourites menu instead derives
                              // open order from each entry's live position in the HUD.
+    ULONGLONG loadingEpisodeStartTick = 0; // GetTickCount64() when the current loading episode began --
+                                             // see kLoadingGraceMs / IsWindowLoading
+    bool hasRepoInTitle = false; // whether the most recent title parse had a non-empty
+                                  // ${activeRepositoryName} -- see IsWindowLoading
 };
 
 static long long g_nextTrackSeq = 0;
@@ -74,9 +97,26 @@ static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
         std::wstring mainRepo = ResolveMainRepoName(parts.repo);
         if (!mainRepo.empty()) parts.repo = mainRepo;
     }
+    tw.hasRepoInTitle = !parts.repo.empty();
     tw.rawLabel = BuildFolderLabel(parts);
     tw.branch = parts.branch;
     tw.label = ResolveAlias(tw.rawLabel);
+}
+
+// See kLoadingGraceMs: true while this window's rawLabel might still
+// change out from under an alias or a manual reorder (both keyed by
+// rawLabel) -- surfaced to the project list HUD as
+// ProjectListHudEntry::loading (greyed out, alias/drag-reorder disabled).
+static bool IsWindowLoading(const TrackedWindow& tw, HWND hwnd) {
+    if (tw.hasRepoInTitle) {
+        LogFastDiag(L"loading-check hwnd=%p rawLabel=[%ls] hasRepoInTitle=1 -> done", hwnd, tw.rawLabel.c_str());
+        return false; // title already shows repo/branch -- nothing left to wait for
+    }
+    ULONGLONG elapsed = GetTickCount64() - tw.loadingEpisodeStartTick;
+    bool loading = elapsed < kLoadingGraceMs;
+    LogFastDiag(L"loading-check hwnd=%p rawLabel=[%ls] hasRepoInTitle=0 elapsedMs=%llu -> %ls", hwnd,
+                tw.rawLabel.c_str(), (unsigned long long)elapsed, loading ? L"loading" : L"done");
+    return loading;
 }
 
 // Text for the border's label chip. Without an alias it's just tw.label
@@ -232,6 +272,12 @@ static void SyncProjectListHud() {
         entry.path = kv.second.folderName.empty() ? L"" : ResolveFolderPath(kv.second.folderName);
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
+        entry.loading = IsWindowLoading(kv.second, kv.first);
+        // Fixed placeholder text while loading -- entry.label/rawLabel
+        // otherwise still churns underneath (see IsWindowLoading), and
+        // that visible text change is itself part of what looked like the
+        // item randomly changing/reordering.
+        if (entry.loading) entry.label = L"Loading...";
         entries.push_back(entry);
     }
 
@@ -457,7 +503,9 @@ static void CALLBACK LabelDebounceTimerProc(HWND, UINT, UINT_PTR idEvent, DWORD)
     wchar_t title[512] = {};
     GetWindowTextW(target, title, 512);
     ApplyLabelForTitle(tracked->second, title);
-    LogFastDiag(L"namechange(settled) hwnd=%p title=[%ls] label=[%ls]", target, title, tracked->second.label.c_str());
+    LogFastDiag(L"namechange(settled) hwnd=%p title=[%ls] label=[%ls] hasRepoInTitle=%d loading=%ls", target, title,
+                tracked->second.label.c_str(), tracked->second.hasRepoInTitle,
+                IsWindowLoading(tracked->second, target) ? L"1" : L"0");
     SyncOverlay(target, tracked->second);
 }
 
@@ -513,7 +561,10 @@ static void TrackWindow(HWND hwnd) {
     tw.colorIndex = AllocateColorIndex();
     tw.pid = pid;
     tw.trackSeq = g_nextTrackSeq++;
+    tw.loadingEpisodeStartTick = GetTickCount64();
     ApplyLabelForTitle(tw, title);
+    LogDiag(L"tracked(initial) hwnd=%p title=[%ls] rawLabel=[%ls] hasRepoInTitle=%d loadingEpisodeStartTick=%llu",
+            hwnd, title, tw.rawLabel.c_str(), tw.hasRepoInTitle, (unsigned long long)tw.loadingEpisodeStartTick);
     g_tracked[hwnd] = tw;
     SyncOverlay(hwnd, g_tracked[hwnd]);
     AddPidHooks(pid);
@@ -673,6 +724,24 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         auto it = g_tracked.find(hwnd);
         if (it != g_tracked.end()) {
             if (event == EVENT_OBJECT_NAMECHANGE) {
+                // A reload (Developer: Reload Window), or the window first
+                // appearing, starts a fresh loading episode the moment any
+                // NAMECHANGE is observed, whether or not the title/rawLabel
+                // ends up any different once it settles (see
+                // ApplyLabelForTitle) -- only repaints the HUD on the
+                // not-loading -> loading edge; a rapid run of NAMECHANGEs
+                // mid-episode doesn't restart the clock or repaint again,
+                // since VS Code's git extension can go quiet for a while
+                // before its one final update (see kLoadingGraceMs).
+                wchar_t rawTitle[512] = {};
+                GetWindowTextW(hwnd, rawTitle, 512);
+                bool wasLoading = IsWindowLoading(it->second, hwnd);
+                LogFastDiag(L"namechange(raw) hwnd=%p title=[%ls] wasLoading=%d", hwnd, rawTitle, wasLoading);
+                if (!wasLoading) {
+                    it->second.loadingEpisodeStartTick = GetTickCount64();
+                    LogDiag(L"namechange(raw) hwnd=%p -- starting new loading episode", hwnd);
+                    SyncProjectListHud();
+                }
                 ScheduleLabelUpdate(hwnd);
             } else {
                 SyncOverlay(hwnd, it->second);

@@ -231,6 +231,8 @@ isn't. Favourites are matched by folder path, not label text, and stored in
 Each HUD item can show a small status indicator in its top-right corner
 for an AI coding assistant running in that VS Code window's terminal(s):
 
+![Two HUD items each showing a small green "waiting" status square in their top-right corner](assets/ai-indicator.png)
+
 - **Working** -- amber, a small square chasing itself around an 8-position
   ring -- actively generating a response or running a tool (from
   `UserPromptSubmit` until the turn's `Stop`/`StopFailure`/`SubagentStop`).
