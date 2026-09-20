@@ -99,8 +99,11 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTas
 // to resize, the middle to move; plain right-click opens a context menu
 // instead, e.g. to set an alias for an item's label). Once manually
 // placed/sized, that placement is kept on later calls instead of being
-// recomputed. Does nothing if `entries` is empty; call HideProjectListHud
-// in that case instead.
+// recomputed. An empty `entries` is fine as long as
+// style.showNewWindowButton is set -- the hub then shows that button on its
+// own, which is what it looks like with every VS Code window closed; with
+// the button off too there's nothing to show and this does nothing, so call
+// HideProjectListHud in that case instead.
 //
 // When style.manualOrder is set, plain left-click-and-drag on an item (as
 // opposed to a plain click, which activates it) reorders it: other items

@@ -1617,7 +1617,8 @@ static void DrawNewWindowButton(HDC screenDC, UINT32* pixels, int width, int hei
 }
 
 static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
-    if (!state || state->width <= 0 || state->height <= 0 || state->entries.empty()) return;
+    if (!state || state->width <= 0 || state->height <= 0) return;
+    if (state->entries.empty() && !state->showNewWindowButton) return; // nothing to draw at all
 
     int width = state->width;
     int height = state->height;
@@ -1873,7 +1874,11 @@ static void ApplyManualOrder(std::vector<ProjectListHudEntry>& entries, const st
 
 void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entries,
                           const ProjectListHudStyle& style) {
-    if (entries.empty()) return;
+    // An empty list is a valid hub as long as the new-window button is on:
+    // that button alone is what's left when every VS Code window is closed,
+    // and it's how the user opens one again. Only a hub with nothing at all
+    // in it is skipped.
+    if (entries.empty() && !style.showNewWindowButton) return;
 
     ProjectListHudState* state = (ProjectListHudState*)GetWindowLongPtrW(hud, GWLP_USERDATA);
     if (!state) return;
@@ -1929,6 +1934,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     state->showNewWindowButton = style.showNewWindowButton;
     state->newWindowButtonColor = style.newWindowButtonColor;
     int buttonReserve = state->showNewWindowButton ? (rowHeight + kProjectListGap) : 0;
+    size_t n = sorted.size();
     int totalHeight;
 
     if (style.horizontal) {
@@ -1943,15 +1949,26 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
         // fixed square slot on top of that (see RebuildHorizontalItemRects).
         int itemWidth = !state->manualWidth ? MeasureRequiredWidth(sorted, style.fontSize)
                                              : std::max(1, state->manualItemWidth);
-        state->width = (int)sorted.size() * itemWidth + (int)(sorted.size() - 1) * kProjectListGap + buttonReserve;
+        // With no entries the button is the whole hub: just its square,
+        // without the gap buttonReserve carries to separate it from the
+        // last item there is no longer any of.
+        state->width = n > 0 ? (int)n * itemWidth + (int)(n - 1) * kProjectListGap + buttonReserve
+                             : std::max(0, buttonReserve - kProjectListGap);
         totalHeight = rowHeight;
     } else {
-        if (!state->manualWidth) {
+        if (n == 0) {
+            // Same as horizontal's zero-entry case: the shared column width
+            // measures nothing when there's nothing to measure, so fall
+            // back to the button's own square rather than leaving a wide
+            // strip of empty hub next to it.
+            state->width = rowHeight;
+        } else if (!state->manualWidth) {
             state->width = MeasureRequiredWidth(sorted, style.fontSize);
         } else {
             state->width = std::max(state->width, kProjectListMinWidth);
         }
-        totalHeight = (int)sorted.size() * rowHeight + ((int)sorted.size() - 1) * kProjectListGap + buttonReserve;
+        totalHeight = n > 0 ? (int)n * rowHeight + ((int)n - 1) * kProjectListGap + buttonReserve
+                            : std::max(0, buttonReserve - kProjectListGap);
     }
     state->height = totalHeight;
 

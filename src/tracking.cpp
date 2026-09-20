@@ -172,7 +172,7 @@ static void SyncProjectListHud() {
     // went.
     SetProjectListHudDocked(g_projectListHud, g_config.showProjectList && g_config.projectListFixed,
                             g_config.labelHeight, g_config.projectListFixedMatchTaskbar);
-    if (!g_config.showProjectList || g_tracked.empty()) {
+    if (!g_config.showProjectList) {
         HideProjectListHud(g_projectListHud);
         return;
     }
@@ -191,6 +191,9 @@ static void SyncProjectListHud() {
         }
     }
 
+    // No early-out on an empty g_tracked: with every VS Code window closed
+    // the hub stays up as just its new-window button, which is the one
+    // thing still worth clicking then (see UpdateProjectListHud).
     std::vector<ProjectListHudEntry> entries;
     for (auto& kv : g_tracked) {
         if (!IsWindow(kv.first) || !IsWindowVisible(kv.first) || kv.second.label.empty()) continue;
@@ -230,10 +233,6 @@ static void SyncProjectListHud() {
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
         entries.push_back(entry);
-    }
-    if (entries.empty()) {
-        HideProjectListHud(g_projectListHud);
-        return;
     }
 
     ProjectListHudStyle style;
@@ -586,6 +585,11 @@ void RescanAllWindows() {
     for (HWND hwnd : stale) UntrackWindow(hwnd);
 
     for (auto& kv : g_tracked) SyncOverlay(kv.first, kv.second);
+    // SyncOverlay already syncs the hub per tracked window, but this rescan
+    // (called at startup and on the rescan timer) is also the only thing
+    // that runs when *nothing* is tracked -- and the hub is shown even
+    // then, as a lone new-window button.
+    SyncProjectListHud();
 }
 
 void ForceRepaintAllTracked() {
