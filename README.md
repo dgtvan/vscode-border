@@ -163,6 +163,35 @@ across restarts, stored in `project_list_order.ini` next to `config.ini`.
 Switching `project_list_order` back to `auto` falls back to window-left-edge
 sorting; switching back to `manual` restores the last saved arrangement.
 
+### Project list HUD item context menu
+
+Right-clicking a HUD item (or its border label chip -- both act on the same
+window) opens a menu of everything you can do with that window's project,
+grouped top to bottom: directory actions, alias actions, favourites.
+
+![Context menu on a HUD item, showing the directory, alias and favourites groups](assets/item-menu.png)
+
+- **Copy Directory Path** puts the window's open folder on the clipboard as
+  plain text.
+- **Open Directory in File Explorer** opens that folder in a new Explorer
+  window. If the folder no longer exists (a worktree deleted while its
+  window stayed open, say) nothing opens -- Explorer would otherwise
+  silently show its Home view instead.
+- **Set Alias...** / **Clear Alias** rename how the window displays -- see
+  [aliases](#project-list-hud-aliases) below.
+- **Add to Favourites** / **Remove from Favourites** save or drop that
+  folder from the "+" button's favourites menu -- see
+  [favourites](#project-list-hud-favourites) below.
+
+The directory and favourites groups act on the window's open folder, which
+is resolved to a real absolute path via the same workspaceStorage lookup
+the AI status indicator and worktree name substitution use. When VS Code
+hasn't recorded a folder for that window (a multi-root workspace, for
+instance), there's nothing for those items to act on, so both groups are
+left off entirely rather than shown greyed out, leaving just the alias
+group. **Clear Alias** likewise only appears once the item actually has an
+alias.
+
 ### Project list HUD aliases
 
 Right-click any item (or its border label chip -- same underlying label)
@@ -189,15 +218,13 @@ the default action) and **Remove from Favourites**.
 
 To add a favourite, right-click any regular item (or its border label
 chip) and choose **Add to Favourites** -- this saves the window's currently
-open folder (resolved to a real absolute path via the same workspaceStorage
-lookup the AI status indicator and worktree name substitution use, so it
-only works for a folder VS Code has actually recorded there; a multi-root
-workspace, for instance, isn't covered, and the menu item is left off
-entirely when there's nothing to save, or when that folder is already a
-favourite). Removal only happens from the "+" button's own menu -- there's
-no "Remove from Favourites" on a regular item, so there's exactly one place
-to do it. Favourites are matched by folder path, not label text, and stored
-in `favourites.ini` next to `config.ini`.
+open folder (resolved to a real absolute path, with the same caveats as the
+rest of the [item context menu](#project-list-hud-item-context-menu) above).
+Once that folder is a favourite, the same item's menu offers **Remove from
+Favourites** in its place. That only reaches a favourite while its window is
+open, though -- the "+" button's own menu is the way to remove one that
+isn't. Favourites are matched by folder path, not label text, and stored in
+`favourites.ini` next to `config.ini`.
 
 ### AI status indicator
 
