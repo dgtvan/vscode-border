@@ -34,7 +34,7 @@ static int g_openedDateKey = -1; // YYYYMMDD of the currently open file
 // via autostart doesn't accumulate logs\ forever. Long enough to still be
 // useful ("the user noticed something was off last week"), short enough to
 // stay bounded.
-static const int kLogRetentionDays = 14;
+static const int kLogRetentionDays = 7;
 
 // Each file is capped so a single very active day can't grow one file
 // without bound; crossing this rotates to a new part of the *same*
