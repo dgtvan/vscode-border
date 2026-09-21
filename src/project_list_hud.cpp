@@ -457,12 +457,14 @@ static void UnregisterAppBar(HWND hud) {
     SHAppBarMessage(ABM_REMOVE, &abd);
 }
 
-// True while one of the taskbar's own flyouts holds the foreground -- the
-// thumbnail list that clicking a grouped taskbar button opens (several VS
-// Code windows -> one grouped button -> this flyout), which is exactly the
-// moment someone reaches for this HUD instead of picking a thumbnail.
+// True while one of the shell's own flyouts holds the foreground -- the
+// taskbar thumbnail list that clicking a grouped taskbar button opens
+// (several VS Code windows -> one grouped button -> this flyout), or the
+// Quick Settings panel (network/volume/battery icons), both of which are
+// exactly the moment someone reaches for this HUD instead of picking a
+// thumbnail or dismissing the panel.
 //
-// While it is up, *no* SetForegroundWindow aimed at another window is
+// While either is up, *no* SetForegroundWindow aimed at another window is
 // granted, from anyone. Measured with a stand-in for this HUD against a
 // throwaway target window: refused with a plain request, after a dummy
 // SendInput, via SwitchToThisWindow, after an injected Alt tap, after an
@@ -472,12 +474,14 @@ static void UnregisterAppBar(HWND hud) {
 // closed was granted every time. The flyout gives the foreground back only
 // when it is itself deactivated, and a WS_EX_NOACTIVATE click never
 // deactivates anything -- see SetHudClickActivates for the way out.
+// ControlCenterWindow (Quick Settings) was added after logs showed the same
+// refused-request/flashing-taskbar-button symptom with it in the foreground.
 static bool ForegroundIsTaskbarFlyout() {
     HWND fg = GetForegroundWindow();
     if (!fg || !IsWindowVisible(fg)) return false; // Alt+Tab's switcher shares the class but is invisible
     wchar_t cls[64] = {};
     GetClassNameW(fg, cls, 64);
-    return wcscmp(cls, L"XamlExplorerHostIslandWindow") == 0;
+    return wcscmp(cls, L"XamlExplorerHostIslandWindow") == 0 || wcscmp(cls, L"ControlCenterWindow") == 0;
 }
 
 // The HUD is WS_EX_NOACTIVATE so that using it never takes focus away from
