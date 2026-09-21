@@ -58,8 +58,10 @@ static bool IsOlderThanDays(const FILETIME& ft, int days) {
 
 // Deletes this app's own log files once they're older than
 // kLogRetentionDays. Only matches this app's own naming pattern, so it
-// never touches anything else that might live in logs\. Called once, right
-// before the very first file of a new session is created.
+// never touches anything else that might live in logs\. Called before the
+// very first file of a new session, and again on every day-rollover after
+// that -- a session that never restarts (autostart, left running for
+// weeks) still gets pruned daily instead of only once at the start.
 static void PruneOldLogFiles() {
     std::wstring pattern = g_logDir + L"\\vscode_border_*.log";
     WIN32_FIND_DATAW fd;
@@ -123,6 +125,10 @@ static FILE* GetLogFile() {
     int prevSeq = g_seq;
     fclose(g_logFile);
     g_logFile = nullptr;
+    // Otherwise a process left running for weeks via autostart never
+    // revisits PruneOldLogFiles (that only runs once, on the very first
+    // file of a session) and logs\ grows unbounded for as long as it stays up.
+    PruneOldLogFiles();
     OpenNewLogFile();
     if (g_logFile) fwprintf(g_logFile, L"=== new day, continuing session %ls (part %d -> %d) ===\n",
                              g_sessionId.c_str(), prevSeq, g_seq);
