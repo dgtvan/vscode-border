@@ -76,6 +76,10 @@ struct TrackedWindow {
                                              // see kLoadingGraceMs / IsWindowLoading
     bool hasRepoInTitle = false; // whether the most recent title parse had a non-empty
                                   // ${activeRepositoryName} -- see IsWindowLoading
+    bool hasFolderOrRepoInTitle = false; // whether the most recent title parse had either a repo or a
+                                          // folder at all -- false only for a bare "File > New Window"
+                                          // with nothing open, which will never gain one -- see
+                                          // IsWindowLoading
 };
 
 static long long g_nextTrackSeq = 0;
@@ -98,6 +102,7 @@ static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
         if (!mainRepo.empty()) parts.repo = mainRepo;
     }
     tw.hasRepoInTitle = !parts.repo.empty();
+    tw.hasFolderOrRepoInTitle = !parts.repo.empty() || !parts.folder.empty();
     tw.rawLabel = BuildFolderLabel(parts);
     tw.branch = parts.branch;
     tw.label = ResolveAlias(tw.rawLabel);
@@ -108,6 +113,16 @@ static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
 // rawLabel) -- surfaced to the project list HUD as
 // ProjectListHudEntry::loading (greyed out, alias/drag-reorder disabled).
 static bool IsWindowLoading(const TrackedWindow& tw, HWND hwnd) {
+    if (!tw.hasFolderOrRepoInTitle) {
+        // A bare window with no folder or repo open at all -- e.g. "File >
+        // New Window" -- has nothing for VS Code's git extension to ever
+        // resolve, so there's no reason to wait out the grace period; it
+        // would otherwise sit "loading" for the full kLoadingGraceMs for
+        // no reason.
+        LogFastDiag(L"loading-check hwnd=%p rawLabel=[%ls] hasFolderOrRepoInTitle=0 -> done", hwnd,
+                    tw.rawLabel.c_str());
+        return false;
+    }
     if (tw.hasRepoInTitle) {
         LogFastDiag(L"loading-check hwnd=%p rawLabel=[%ls] hasRepoInTitle=1 -> done", hwnd, tw.rawLabel.c_str());
         return false; // title already shows repo/branch -- nothing left to wait for
