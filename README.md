@@ -45,8 +45,12 @@ there.
 Start-Process bin\vscode_border.exe
 ```
 
-It runs in the background with a tray icon (right-click for **Reload
-Config** / **Open Config** / **Open Log Folder** / **Exit**). To launch it
+It runs in the background with a tray icon (right-click for **Hide Borders
+and Hub** / **Reload Config** / **Open Config** / **Open Log Folder** /
+**Exit**). **Hide Borders and Hub** is a checkable toggle that quickly hides
+every border overlay and the project list HUD together; it isn't saved, so
+the next launch shows everything again (to turn one off for good, use its
+flag in `config.ini`, e.g. `show_project_list=false`). To launch it
 automatically at login, see [docs/AUTOSTART.md](docs/AUTOSTART.md).
 
 If something unexpected happens during a run (e.g. a VS Code window's

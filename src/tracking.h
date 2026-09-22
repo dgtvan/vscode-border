@@ -31,6 +31,14 @@ void PollForegroundChange();
 // config reload changes colors/thickness/label settings).
 void ForceRepaintAllTracked();
 
+// Session-only "Hide Borders and Hub" tray toggle: hides every border
+// overlay and the project-list HUD at once (releasing the HUD's reserved
+// band when it's docked), without touching config.ini -- not persisted, so
+// every launch starts with everything shown. Turning one of them off for
+// good is config.ini's job (show_project_list etc.).
+bool AreOverlaysHidden();
+void SetOverlaysHidden(bool hidden);
+
 // Re-derives every tracked window's label from its current title (e.g.
 // after RefreshWorktreeCache() picks up newly-created worktrees).
 void RefreshAllLabels();

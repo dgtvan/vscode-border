@@ -21,6 +21,10 @@
 static HINSTANCE g_hInstance = nullptr;
 static HWND g_ownerWnd = nullptr;
 static HWND g_projectListHud = nullptr;
+// Session-only "Hide Borders and Hub" tray toggle (see SetOverlaysHidden)
+// -- layered on top of config.ini, not persisted, so every launch starts
+// with everything shown.
+static bool g_overlaysHidden = false;
 
 const UINT_PTR kForegroundPollTimerId = 2;
 static const UINT kForegroundPollIntervalMs = 50;
@@ -225,9 +229,10 @@ static void SyncProjectListHud() {
     // not whether any windows happen to be open right now -- otherwise
     // maximized windows would grow and shrink as VS Code windows came and
     // went.
-    SetProjectListHudDocked(g_projectListHud, g_config.showProjectList && g_config.projectListFixed,
+    bool showHub = g_config.showProjectList && !g_overlaysHidden;
+    SetProjectListHudDocked(g_projectListHud, showHub && g_config.projectListFixed,
                             g_config.labelHeight, g_config.projectListFixedMatchTaskbar);
-    if (!g_config.showProjectList) {
+    if (!showHub) {
         HideProjectListHud(g_projectListHud);
         return;
     }
@@ -435,8 +440,9 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     tw.label = ResolveAlias(tw.rawLabel);
     std::wstring borderLabel = BorderLabel(tw);
 
-    if (IsIconic(target) || !IsWindowVisible(target)) {
-        LogFastDiag(L"sync hwnd=%p HIDE iconic=%d visible=%d", target, IsIconic(target), IsWindowVisible(target));
+    if (g_overlaysHidden || IsIconic(target) || !IsWindowVisible(target)) {
+        LogFastDiag(L"sync hwnd=%p HIDE overlaysHidden=%d iconic=%d visible=%d", target, g_overlaysHidden,
+                    IsIconic(target), IsWindowVisible(target));
         ShowWindow(tw.overlay, SW_HIDE);
         SyncProjectListHud();
         return;
@@ -634,7 +640,7 @@ void TrackingInit(HINSTANCE hInstance, HWND ownerWnd) {
     g_hInstance = hInstance;
     g_ownerWnd = ownerWnd;
     g_projectListHud = CreateProjectListHud(hInstance, g_config.projectListHorizontal || g_config.projectListFixed);
-    SetProjectListHudDocked(g_projectListHud, g_config.showProjectList && g_config.projectListFixed,
+    SetProjectListHudDocked(g_projectListHud, g_config.showProjectList && !g_overlaysHidden && g_config.projectListFixed,
                             g_config.labelHeight, g_config.projectListFixedMatchTaskbar);
     SetFocusStormSnapshotHook(LogTrackedWindowsSnapshot);
 }
@@ -664,6 +670,16 @@ void ForceRepaintAllTracked() {
         kv.second.lastHeight = -1;
         SyncOverlay(kv.first, kv.second);
     }
+}
+
+bool AreOverlaysHidden() { return g_overlaysHidden; }
+
+void SetOverlaysHidden(bool hidden) {
+    if (hidden == g_overlaysHidden) return;
+    g_overlaysHidden = hidden;
+    Log(L"borders and hub %ls via tray menu", hidden ? L"hidden" : L"shown");
+    for (auto& kv : g_tracked) SyncOverlay(kv.first, kv.second);
+    SyncProjectListHud(); // SyncOverlay does this too, but not when nothing is tracked
 }
 
 void PollForegroundChange() {

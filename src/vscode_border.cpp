@@ -8,7 +8,8 @@
 // tracking; a slow timer only exists as a safety net for missed events.
 //
 // Thickness / opacity / colors are read from config.ini next to the exe.
-// A tray icon is the only UI: right-click -> Reload Config / Exit.
+// A tray icon is the only UI: right-click -> Hide Borders and Hub /
+// Reload Config / Exit.
 //
 // Implementation is split across:
 //   file_util.*         - shared exe-relative path / file-read / file-write helpers
@@ -62,6 +63,7 @@ static const UINT ID_TRAY_RELOAD = 1;
 static const UINT ID_TRAY_OPEN_CONFIG = 2;
 static const UINT ID_TRAY_OPEN_LOG_FOLDER = 3;
 static const UINT ID_TRAY_EXIT = 4;
+static const UINT ID_TRAY_TOGGLE_HIDDEN = 5;
 static const UINT_PTR TIMER_RESCAN = 1;
 // TIMER id 2 is kForegroundPollTimerId (tracking.cpp), started/stopped there.
 static const int kTrayIconSize = 32; // upscaled from 16 so the warning badge/asterisk stays legible
@@ -120,7 +122,7 @@ static void AddTrayIcon(HWND hwnd) {
     wcscpy_s(g_nid.szTip, L"VS Code Window Borders");
     g_nid.dwInfoFlags = NIIF_INFO;
     wcscpy_s(g_nid.szInfoTitle, L"VS Code Window Borders is running");
-    wcscpy_s(g_nid.szInfo, L"Right-click this icon for options (Reload Config / Open Log Folder / Exit).");
+    wcscpy_s(g_nid.szInfo, L"Right-click this icon for options (Hide Borders and Hub / Reload Config / Exit).");
 
     BOOL ok = Shell_NotifyIconW(NIM_ADD, &g_nid);
     Log(L"Shell_NotifyIconW(NIM_ADD) -> %d (lastError=%lu)", ok, ok ? 0 : GetLastError());
@@ -134,6 +136,9 @@ static void ShowTrayMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | (AreOverlaysHidden() ? MF_CHECKED : MF_UNCHECKED), ID_TRAY_TOGGLE_HIDDEN,
+                L"Hide Borders and Hub");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload Config");
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_CONFIG, L"Open Config");
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_LOG_FOLDER, L"Open Log Folder");
@@ -207,6 +212,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 OpenConfigInDefaultEditor();
             } else if (LOWORD(wParam) == ID_TRAY_OPEN_LOG_FOLDER) {
                 OpenLogFolderInExplorer();
+            } else if (LOWORD(wParam) == ID_TRAY_TOGGLE_HIDDEN) {
+                SetOverlaysHidden(!AreOverlaysHidden());
             }
             return 0;
         case WM_TIMER:
