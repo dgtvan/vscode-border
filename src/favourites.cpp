@@ -23,46 +23,6 @@ std::wstring GetEnvVar(const wchar_t* name) {
     return (len > 0 && len < MAX_PATH) ? std::wstring(buf) : std::wstring();
 }
 
-// Same shim project_list_hud.cpp's ResolveVSCodeCliShim resolves (see its
-// comment for why the CLI shim, not Code.exe directly, is required for -n
-// to work) -- but found without a running window's process path to start
-// from, since this runs at app startup before any VS Code window is
-// necessarily tracked yet. Tries the shim's directory on PATH first (the
-// common case: VS Code's installer offers "Add to PATH", on by default),
-// then the well-known per-user and machine-wide install locations. Stable
-// build is tried before Insiders at each step, since there's no
-// running-window signal here to know which the user actually favours.
-bool ResolveVSCodeCliShimStandalone(std::wstring& outCmdPath) {
-    const wchar_t* kShimNames[] = {L"code.cmd", L"code-insiders.cmd"};
-    for (const wchar_t* name : kShimNames) {
-        wchar_t found[MAX_PATH] = {};
-        if (SearchPathW(nullptr, name, nullptr, MAX_PATH, found, nullptr) > 0) {
-            outCmdPath = found;
-            return true;
-        }
-    }
-
-    std::wstring localAppData = GetEnvVar(L"LOCALAPPDATA");
-    std::wstring programFiles = GetEnvVar(L"ProgramFiles");
-    std::vector<std::wstring> candidates;
-    if (!localAppData.empty()) {
-        candidates.push_back(localAppData + L"\\Programs\\Microsoft VS Code\\bin\\code.cmd");
-        candidates.push_back(localAppData + L"\\Programs\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd");
-    }
-    if (!programFiles.empty()) {
-        candidates.push_back(programFiles + L"\\Microsoft VS Code\\bin\\code.cmd");
-        candidates.push_back(programFiles + L"\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd");
-    }
-    for (const std::wstring& candidate : candidates) {
-        DWORD attrs = GetFileAttributesW(candidate.c_str());
-        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-            outCmdPath = candidate;
-            return true;
-        }
-    }
-    return false;
-}
-
 std::wstring ToLowerCopy(const std::wstring& s) {
     std::wstring out = s;
     std::transform(out.begin(), out.end(), out.begin(), ::towlower);
@@ -134,6 +94,46 @@ void EnsureLoaded() {
 }
 
 } // namespace
+
+// Same shim project_list_hud.cpp's ResolveVSCodeCliShim resolves (see its
+// comment for why the CLI shim, not Code.exe directly, is required for -n
+// to work) -- but found without a running window's process path to start
+// from, since this runs at app startup before any VS Code window is
+// necessarily tracked yet. Tries the shim's directory on PATH first (the
+// common case: VS Code's installer offers "Add to PATH", on by default),
+// then the well-known per-user and machine-wide install locations. Stable
+// build is tried before Insiders at each step, since there's no
+// running-window signal here to know which the user actually favours.
+bool ResolveVSCodeCliShimStandalone(std::wstring& outCmdPath) {
+    const wchar_t* kShimNames[] = {L"code.cmd", L"code-insiders.cmd"};
+    for (const wchar_t* name : kShimNames) {
+        wchar_t found[MAX_PATH] = {};
+        if (SearchPathW(nullptr, name, nullptr, MAX_PATH, found, nullptr) > 0) {
+            outCmdPath = found;
+            return true;
+        }
+    }
+
+    std::wstring localAppData = GetEnvVar(L"LOCALAPPDATA");
+    std::wstring programFiles = GetEnvVar(L"ProgramFiles");
+    std::vector<std::wstring> candidates;
+    if (!localAppData.empty()) {
+        candidates.push_back(localAppData + L"\\Programs\\Microsoft VS Code\\bin\\code.cmd");
+        candidates.push_back(localAppData + L"\\Programs\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd");
+    }
+    if (!programFiles.empty()) {
+        candidates.push_back(programFiles + L"\\Microsoft VS Code\\bin\\code.cmd");
+        candidates.push_back(programFiles + L"\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd");
+    }
+    for (const std::wstring& candidate : candidates) {
+        DWORD attrs = GetFileAttributesW(candidate.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            outCmdPath = candidate;
+            return true;
+        }
+    }
+    return false;
+}
 
 std::vector<FavouriteProject> LoadFavourites() {
     EnsureLoaded();

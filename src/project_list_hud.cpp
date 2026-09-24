@@ -588,7 +588,33 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index, const
 // relatively) to forward the request to the already-running instance over
 // IPC. Reusing the shim sidesteps reimplementing (and keeping in sync) that
 // internal path resolution here.
+//
+// With no VS Code window open there's no process to derive the install from
+// -- and that's exactly when the "+" button is the only way back in. So each
+// successful window-derived lookup is remembered (keeping the same build,
+// e.g. Insiders, after the last window closes), with favourites.h's
+// ResolveVSCodeCliShimStandalone (PATH / well-known install locations) as the
+// final fallback, e.g. when the hub started with no VS Code running at all.
+static std::wstring g_lastVSCodeCliShim;
+
+static bool ResolveVSCodeCliShimFromWindow(const ProjectListHudState* state, std::wstring& outCmdPath);
+
 static bool ResolveVSCodeCliShim(const ProjectListHudState* state, std::wstring& outCmdPath) {
+    if (ResolveVSCodeCliShimFromWindow(state, outCmdPath)) {
+        g_lastVSCodeCliShim = outCmdPath;
+        return true;
+    }
+    if (!g_lastVSCodeCliShim.empty() && GetFileAttributesW(g_lastVSCodeCliShim.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        outCmdPath = g_lastVSCodeCliShim;
+        return true;
+    }
+    if (ResolveVSCodeCliShimStandalone(outCmdPath)) return true;
+    LogWarn(L"vscode CLI shim: no tracked window to derive it from, and none found on PATH or in the usual "
+            L"install locations");
+    return false;
+}
+
+static bool ResolveVSCodeCliShimFromWindow(const ProjectListHudState* state, std::wstring& outCmdPath) {
     if (!state || state->entries.empty()) return false;
     HWND target = state->entries[0].target;
     if (!target || !IsWindow(target)) return false;

@@ -14,6 +14,13 @@ struct FavouriteProject {
     std::wstring path;  // absolute folder path passed to the VS Code CLI shim
 };
 
+// Locates VS Code's `code.cmd`/`code-insiders.cmd` CLI shim without a
+// running VS Code window to derive it from: PATH first, then the
+// well-known per-user and machine-wide install locations (Stable before
+// Insiders at each step). Used at startup (OpenAllFavouritesAtStartup) and
+// by the HUD's "+"/favourites menu once every VS Code window is closed.
+bool ResolveVSCodeCliShimStandalone(std::wstring& outCmdPath);
+
 // Loads the persisted favourites list, in the order they were added.
 std::vector<FavouriteProject> LoadFavourites();
 
