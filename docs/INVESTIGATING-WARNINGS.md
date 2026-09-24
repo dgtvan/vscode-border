@@ -317,7 +317,7 @@ concluding anything about a third:
    ran `code -n <path>` for every favourite without checking whether that
    folder was already open, and VS Code answers that by activating the
    existing window. If it reappears, the check in
-   `OpenAllFavouritesAtStartup` is where to look: a favourite whose path
+   `OpenAllFavourites` is where to look: a favourite whose path
    cannot be resolved is deliberately still launched, so a project VS Code
    has never recorded in workspaceStorage can re-trigger it.
 2. **The churn detector treating success as evidence.** Even with genuinely

@@ -218,7 +218,7 @@ Three things can produce the symptom, and the trace distinguishes them:
 Case 3 is what the trace caught on its very first run, and the mechanism is
 worth stating plainly because it is not obvious: `code -n <path>` on a folder
 VS Code already has open does **not** create a second window. It activates
-the existing one. `OpenAllFavouritesAtStartup` used to run that for every saved
+the existing one. `OpenAllFavourites` used to run that for every saved
 favourite unconditionally, so on a desktop where the favourites were
 already open it fired several activation requests at several existing
 windows back to back, and every window that lost the race was left

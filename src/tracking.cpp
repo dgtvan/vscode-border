@@ -726,6 +726,13 @@ std::vector<std::wstring> GetTrackedFolderPaths() {
     return paths;
 }
 
+std::vector<HWND> GetTrackedWindows() {
+    std::vector<HWND> windows;
+    windows.reserve(g_tracked.size());
+    for (const auto& kv : g_tracked) windows.push_back(kv.first);
+    return windows;
+}
+
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
     if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF || !hwnd) return;
 

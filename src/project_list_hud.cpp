@@ -8,6 +8,7 @@
 #include "monitor_scenario.h"
 #include "project_list_order.h"
 #include "taskbar_backdrop.h"
+#include "vscode_cli.h"
 
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -574,109 +575,11 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index, const
     RequestForeground(target, FocusTargetKind::ExternalWindow, reason);
 }
 
-// Resolves whichever VS Code build the tracked windows belong to (stable
-// vs. Insiders) -- from an already-tracked window's own process image -- to
-// that install's `code`/`code-insiders` CLI shim (bin\*.cmd next to the
-// exe). Shared by OpenNewVSCodeWindow and OpenFavouriteProject below.
-//
-// Passing -n to Code.exe directly does NOT work: the raw exe rejects it
-// ("bad option: -n") and exits immediately -- ShellExecuteW still reports
-// success (the process did launch), which is what made this silently no-op
-// rather than fail loudly. The CLI shim is what actually supports -n: it
-// sets ELECTRON_RUN_AS_NODE=1 and re-invokes Code.exe against its internal
-// cli.js (itself under a version-hash-named subfolder the shim resolves
-// relatively) to forward the request to the already-running instance over
-// IPC. Reusing the shim sidesteps reimplementing (and keeping in sync) that
-// internal path resolution here.
-//
-// With no VS Code window open there's no process to derive the install from
-// -- and that's exactly when the "+" button is the only way back in. So each
-// successful window-derived lookup is remembered (keeping the same build,
-// e.g. Insiders, after the last window closes), with favourites.h's
-// ResolveVSCodeCliShimStandalone (PATH / well-known install locations) as the
-// final fallback, e.g. when the hub started with no VS Code running at all.
-static std::wstring g_lastVSCodeCliShim;
-
-static bool ResolveVSCodeCliShimFromWindow(const ProjectListHudState* state, std::wstring& outCmdPath);
-
-static bool ResolveVSCodeCliShim(const ProjectListHudState* state, std::wstring& outCmdPath) {
-    if (ResolveVSCodeCliShimFromWindow(state, outCmdPath)) {
-        g_lastVSCodeCliShim = outCmdPath;
-        return true;
-    }
-    if (!g_lastVSCodeCliShim.empty() && GetFileAttributesW(g_lastVSCodeCliShim.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        outCmdPath = g_lastVSCodeCliShim;
-        return true;
-    }
-    if (ResolveVSCodeCliShimStandalone(outCmdPath)) return true;
-    LogWarn(L"vscode CLI shim: no tracked window to derive it from, and none found on PATH or in the usual "
-            L"install locations");
-    return false;
-}
-
-static bool ResolveVSCodeCliShimFromWindow(const ProjectListHudState* state, std::wstring& outCmdPath) {
-    if (!state || state->entries.empty()) return false;
-    HWND target = state->entries[0].target;
-    if (!target || !IsWindow(target)) return false;
-
-    DWORD pid = 0;
-    GetWindowThreadProcessId(target, &pid);
-    if (!pid) return false;
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!hProcess) return false;
-    wchar_t exePath[MAX_PATH] = {};
-    DWORD size = MAX_PATH;
-    bool ok = QueryFullProcessImageNameW(hProcess, 0, exePath, &size) != 0;
-    CloseHandle(hProcess);
-    if (!ok) return false;
-
-    std::wstring installDir(exePath);
-    size_t slash = installDir.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) return false;
-    installDir.resize(slash);
-
-    std::wstring searchPattern = installDir + L"\\bin\\*.cmd";
-    WIN32_FIND_DATAW findData = {};
-    HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &findData);
-    if (hFind == INVALID_HANDLE_VALUE) {
-        Log(L"vscode CLI shim: none found (bin\\*.cmd) under %ls", installDir.c_str());
-        return false;
-    }
-    outCmdPath = installDir + L"\\bin\\" + findData.cFileName;
-    FindClose(hFind);
-    return true;
-}
-
-// Launches a brand-new, empty VS Code window -- the project list HUD's "+"
-// button.
-static void OpenNewVSCodeWindow(const ProjectListHudState* state) {
-    std::wstring cmdPath;
-    if (!ResolveVSCodeCliShim(state, cmdPath)) return;
-
-    // SW_HIDE so the shim's own cmd.exe console doesn't flash on screen --
-    // it only forwards the request to the already-running instance over IPC
-    // and exits almost immediately either way.
-    NoteWindowLaunchRequest(L"hud-new-window-button", 1);
-    HINSTANCE result = ShellExecuteW(nullptr, L"open", cmdPath.c_str(), L"-n", nullptr, SW_HIDE);
-    if ((INT_PTR)result <= 32) {
-        Log(L"ShellExecuteW(open new vscode window via %ls) failed, code=%Id", cmdPath.c_str(), (INT_PTR)result);
-    }
-}
-
-// Opens `path` as a folder in a brand-new VS Code window -- same CLI shim
-// as OpenNewVSCodeWindow, just with the favourite's path forwarded as the
-// folder to open (quoted, since it may contain spaces).
-static void OpenFavouriteProject(const ProjectListHudState* state, const std::wstring& path) {
-    std::wstring cmdPath;
-    if (!ResolveVSCodeCliShim(state, cmdPath)) return;
-
-    std::wstring args = L"-n \"" + path + L"\"";
-    NoteWindowLaunchRequest(L"hud-favourite-open", 1);
-    HINSTANCE result = ShellExecuteW(nullptr, L"open", cmdPath.c_str(), args.c_str(), nullptr, SW_HIDE);
-    if ((INT_PTR)result <= 32) {
-        Log(L"ShellExecuteW(open favourite [%ls] via %ls) failed, code=%Id", path.c_str(), cmdPath.c_str(),
-            (INT_PTR)result);
-    }
+// The running VS Code window the CLI shim is derived from (see
+// vscode_cli.h's ResolveVSCodeCliShim) -- null once every window is closed,
+// which that resolver falls back from.
+static HWND AnyTrackedWindow(const ProjectListHudState* state) {
+    return (state && !state->entries.empty()) ? state->entries[0].target : nullptr;
 }
 
 // Minimizes every tracked VS Code window -- the hub's minimize-all button.
@@ -692,35 +595,19 @@ static void MinimizeAllVSCodeWindows(const ProjectListHudState* state) {
 }
 
 // Asks every tracked VS Code window to close -- the hub's close-all button.
-// Confirms first, since it sits right next to the other buttons and a stray
-// click would otherwise tear down the whole session. WM_CLOSE is the same
-// request as the window's own X button, so VS Code still gets to prompt
-// about unsaved changes per window.
+// Confirms first (see ConfirmAndCloseVSCodeWindows), since it sits right
+// next to the other buttons and a stray click would otherwise tear down the
+// whole session.
 static void CloseAllVSCodeWindows(HWND hud, ProjectListHudState* state) {
     // Snapshot first: a resync while the confirmation is up would replace
     // state->entries -- suppressed below, but the targets are all we need.
     std::vector<HWND> targets;
-    for (const ProjectListHudEntry& e : state->entries) {
-        if (e.target && IsWindow(e.target)) targets.push_back(e.target);
-    }
-    if (targets.empty()) return;
-
-    wchar_t prompt[128];
-    swprintf(prompt, 128, L"Close all %d VS Code window(s)?", (int)targets.size());
+    for (const ProjectListHudEntry& e : state->entries) targets.push_back(e.target);
     // Same resync guard as the context menus (see UpdateProjectListHud):
     // the message box runs its own modal loop.
     state->contextMenuOpen = true;
-    int choice = MessageBoxW(hud, prompt, L"VS Code Border", MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2 |
-                                                                 MB_TOPMOST | MB_SETFOREGROUND);
+    ConfirmAndCloseVSCodeWindows(hud, targets, L"hud");
     state->contextMenuOpen = false;
-    if (choice != IDOK) {
-        Log(L"hud close-all: cancelled");
-        return;
-    }
-    for (HWND target : targets) {
-        if (IsWindow(target)) PostMessageW(target, WM_CLOSE, 0, 0);
-    }
-    Log(L"hud close-all: sent WM_CLOSE to %d window(s)", (int)targets.size());
 }
 
 static void EndProjectListHoverFocus(ProjectListHudState* state, bool restorePrevious) {
@@ -959,7 +846,7 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // Right-click on the fixed "+" new-window button: lists saved favourite
 // projects (see favourites.h), each as its own submenu -- hovering a
 // favourite's name expands it to "Open in New Window" (the default/bolded
-// action, see OpenFavouriteProject) and "Remove from Favourites". A plain
+// action, see vscode_cli.h's OpenNewVSCodeWindow) and "Remove from Favourites". A plain
 // Win32 popup menu item can't both carry its own click action and expand a
 // submenu on hover, so nesting "open" one level down (rather than a bare
 // top-level click) is what buys room for "remove" to live right next to it,
@@ -1026,7 +913,7 @@ static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state,
     size_t i = (size_t)(cmd - 1) / 2;
     bool isOpen = (cmd - 1) % 2 == 0;
     if (i >= favourites.size()) return;
-    if (isOpen) OpenFavouriteProject(state, favourites[i].path);
+    if (isOpen) OpenNewVSCodeWindow(AnyTrackedWindow(state), favourites[i].path, L"hud-favourite-open");
     else RemoveFavourite(favourites[i].path);
 }
 
@@ -1307,7 +1194,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 EndProjectListHoverFocus(state, false);
             } else if (state) {
                 switch (ActionButtonForIndex(state, state->hoverIndex)) {
-                    case HudActionNewWindow: OpenNewVSCodeWindow(state); break;
+                    case HudActionNewWindow: OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button"); break;
                     case HudActionMinimizeAll:
                         EndProjectListHoverFocus(state, false);
                         MinimizeAllVSCodeWindows(state);

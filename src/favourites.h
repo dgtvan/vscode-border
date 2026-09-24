@@ -1,11 +1,14 @@
 #pragma once
 
+#include <windows.h>
+
 #include <string>
 #include <vector>
 
 // One user-saved project/folder, offered from the project list HUD's "+"
 // new-window button's right-click menu -- clicking it opens `path` in a
-// brand-new VS Code window (see project_list_hud.cpp's OpenFavouriteProject).
+// brand-new VS Code window (see vscode_cli.h's OpenNewVSCodeWindow). Also
+// listed under the tray icon's Favourites submenu.
 struct FavouriteProject {
     std::wstring label; // display text shown in the favourites menu -- the item's label (alias, if any)
                         // as of the last time this path was seen open as a hub item (see
@@ -13,13 +16,6 @@ struct FavouriteProject {
                         // currently open
     std::wstring path;  // absolute folder path passed to the VS Code CLI shim
 };
-
-// Locates VS Code's `code.cmd`/`code-insiders.cmd` CLI shim without a
-// running VS Code window to derive it from: PATH first, then the
-// well-known per-user and machine-wide install locations (Stable before
-// Insiders at each step). Used at startup (OpenAllFavouritesAtStartup) and
-// by the HUD's "+"/favourites menu once every VS Code window is closed.
-bool ResolveVSCodeCliShimStandalone(std::wstring& outCmdPath);
 
 // Loads the persisted favourites list, in the order they were added.
 std::vector<FavouriteProject> LoadFavourites();
@@ -45,13 +41,17 @@ void RemoveFavourite(const std::wstring& path);
 // label's comment.
 void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label);
 
-// Opens every saved favourite that isn't already open in its own new VS
-// Code window. Called once from vscode_border.cpp's wWinMain, so -- unlike
-// OpenFavouriteProject -- this can't lean on an already-tracked window's
-// process path to find the VS Code CLI shim: no VS Code window is
-// necessarily running yet this early. Resolves the shim independently
-// instead (PATH, then well-known install locations -- see favourites.cpp);
-// logs a warning and no-ops if none can be found.
+// True if `path` is one of `openFolderPaths` (what tracking.h's
+// GetTrackedFolderPaths returns) -- case-insensitive, tolerant of a
+// trailing separator on either side.
+bool IsFavouriteOpen(const std::wstring& path, const std::vector<std::wstring>& openFolderPaths);
+
+// Opens every saved favourite that isn't already open, each in its own new
+// VS Code window. Called once from vscode_border.cpp's wWinMain at startup
+// and from the tray icon's Favourites > Open All. `runningWindow` (null if
+// no VS Code window is running) picks which VS Code install's CLI shim is used (see vscode_cli.h's
+// ResolveVSCodeCliShim); logs a warning and no-ops if no shim can be found.
+// `reason` tags the log lines and the focus-trace launch record.
 //
 // `alreadyOpenFolderPaths` is what tracking.h's GetTrackedFolderPaths
 // returns. Skipping those matters for more than saving a redundant launch:
@@ -60,7 +60,7 @@ void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label);
 // already-open favourites in a row makes them fight over the foreground,
 // and every window that loses the race is left showing the highlighted
 // wants-attention state on its taskbar button -- i.e. the whole row of VS
-// Code windows lights up at startup. That was a real, reproducible bug
+// Code windows lights up. That was a real, reproducible bug
 // (see docs/ARCHITECTURE.md's "Focus tracing" section); this parameter is
 // the fix, not an optimisation.
 //
@@ -69,4 +69,5 @@ void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label);
 // pre-existing behaviour. Erring that way keeps the feature working (the
 // project does open) instead of silently skipping something the user
 // expects to see.
-void OpenAllFavouritesAtStartup(const std::vector<std::wstring>& alreadyOpenFolderPaths);
+void OpenAllFavourites(HWND runningWindow, const std::vector<std::wstring>& alreadyOpenFolderPaths,
+                       const wchar_t* reason);

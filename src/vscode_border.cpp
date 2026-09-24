@@ -8,8 +8,8 @@
 // tracking; a slow timer only exists as a safety net for missed events.
 //
 // Thickness / opacity / colors are read from config.ini next to the exe.
-// A tray icon is the only UI: right-click -> Hide Borders and Hub /
-// Reload Config / Exit.
+// A tray icon is the only UI: right-click -> Favourites / Close All
+// Windows / Hide Borders and Hub / Reload Config / Exit.
 //
 // Implementation is split across:
 //   file_util.*         - shared exe-relative path / file-read / file-write helpers
@@ -31,6 +31,8 @@
 //   ai_provider.*        - abstract interface an AI coding assistant integration implements
 //   claude_provider.*   - Claude Code's AiProvider implementation (hooks + status file reading)
 //   tracking.*          - tracked-window bookkeeping, WinEvent hooks, sync
+//   vscode_cli.*        - VS Code CLI shim lookup, opening/closing VS Code windows
+//   favourites.*        - persisted favourite projects, open-all
 
 #include <windows.h>
 #include <shellapi.h>
@@ -47,6 +49,7 @@
 #include "tray_icon.h"
 #include "worktree_resolver.h"
 #include "vscode_settings.h"
+#include "vscode_cli.h"
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
@@ -64,6 +67,10 @@ static const UINT ID_TRAY_OPEN_CONFIG = 2;
 static const UINT ID_TRAY_OPEN_LOG_FOLDER = 3;
 static const UINT ID_TRAY_EXIT = 4;
 static const UINT ID_TRAY_TOGGLE_HIDDEN = 5;
+static const UINT ID_TRAY_CLOSE_ALL = 6;
+static const UINT ID_TRAY_FAV_OPEN_ALL = 7;
+// Favourite i is ID_TRAY_FAV_FIRST + i, indexing g_trayMenuFavourites.
+static const UINT ID_TRAY_FAV_FIRST = 1000;
 static const UINT_PTR TIMER_RESCAN = 1;
 // TIMER id 2 is kForegroundPollTimerId (tracking.cpp), started/stopped there.
 static const int kTrayIconSize = 32; // upscaled from 16 so the warning badge/asterisk stays legible
@@ -132,10 +139,46 @@ static void RemoveTrayIcon() {
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
 }
 
+// The favourites list as it was when the tray menu was built -- the menu
+// posts its WM_COMMAND after TrackPopupMenu returns, and an ID_TRAY_FAV_FIRST
+// + i id has to be decoded against the same list it was built from.
+static std::vector<FavouriteProject> g_trayMenuFavourites;
+
+// Favourites submenu: "Open All" (every favourite not already open -- see
+// OpenAllFavourites for why open ones are skipped), a separator, then each
+// favourite on its own, checked if it's already open. Picking an open one
+// just re-activates its window (`code -n` on an open folder does that).
+static HMENU BuildTrayFavouritesMenu() {
+    g_trayMenuFavourites = LoadFavourites();
+    std::vector<std::wstring> openPaths = GetTrackedFolderPaths();
+    HMENU sub = CreatePopupMenu();
+    if (g_trayMenuFavourites.empty()) {
+        AppendMenuW(sub, MF_STRING | MF_GRAYED, 0, L"(No Favourites)");
+        return sub;
+    }
+    AppendMenuW(sub, MF_STRING, ID_TRAY_FAV_OPEN_ALL, L"Open All");
+    AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+    for (size_t i = 0; i < g_trayMenuFavourites.size(); i++) {
+        const FavouriteProject& f = g_trayMenuFavourites[i];
+        UINT flags = MF_STRING | (IsFavouriteOpen(f.path, openPaths) ? MF_CHECKED : MF_UNCHECKED);
+        AppendMenuW(sub, flags, ID_TRAY_FAV_FIRST + (UINT)i, f.label.c_str());
+    }
+    return sub;
+}
+
+static HWND AnyTrackedWindow() {
+    std::vector<HWND> windows = GetTrackedWindows();
+    return windows.empty() ? nullptr : windows[0];
+}
+
 static void ShowTrayMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)BuildTrayFavouritesMenu(), L"Favourites");
+    AppendMenuW(menu, MF_STRING | (TrackedWindowCount() == 0 ? MF_GRAYED : 0), ID_TRAY_CLOSE_ALL,
+                L"Close All Windows");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (AreOverlaysHidden() ? MF_CHECKED : MF_UNCHECKED), ID_TRAY_TOGGLE_HIDDEN,
                 L"Hide Borders and Hub");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -147,7 +190,7 @@ static void ShowTrayMenu(HWND hwnd) {
     RequestForeground(hwnd, FocusTargetKind::OwnUi,
                       L"tray-menu"); // required so the menu dismisses correctly
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
-    DestroyMenu(menu);
+    DestroyMenu(menu); // recursively destroys the Favourites submenu too
 }
 
 static void ReloadConfig() {
@@ -214,6 +257,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 OpenLogFolderInExplorer();
             } else if (LOWORD(wParam) == ID_TRAY_TOGGLE_HIDDEN) {
                 SetOverlaysHidden(!AreOverlaysHidden());
+            } else if (LOWORD(wParam) == ID_TRAY_CLOSE_ALL) {
+                ConfirmAndCloseVSCodeWindows(hwnd, GetTrackedWindows(), L"tray");
+            } else if (LOWORD(wParam) == ID_TRAY_FAV_OPEN_ALL) {
+                OpenAllFavourites(AnyTrackedWindow(), GetTrackedFolderPaths(), L"tray-favourites-open-all");
+            } else if (LOWORD(wParam) >= ID_TRAY_FAV_FIRST &&
+                       LOWORD(wParam) < ID_TRAY_FAV_FIRST + g_trayMenuFavourites.size()) {
+                const FavouriteProject& f = g_trayMenuFavourites[LOWORD(wParam) - ID_TRAY_FAV_FIRST];
+                OpenNewVSCodeWindow(AnyTrackedWindow(), f.path, L"tray-favourite-open");
             }
             return 0;
         case WM_TIMER:
@@ -274,7 +325,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     Log(L"initial rescan complete, tracked=%zu", TrackedWindowCount());
     // After RescanAllWindows above, so the already-open list it is given
     // reflects the VS Code windows that were up before this app started.
-    OpenAllFavouritesAtStartup(GetTrackedFolderPaths());
+    OpenAllFavourites(AnyTrackedWindow(), GetTrackedFolderPaths(), L"favourites-startup-autoopen");
     UpdateTrayIconWarningState(); // picks up any warnings from config load / rescan above / favourites auto-open
 
     g_hookCreate = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_CREATE,

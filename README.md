@@ -45,9 +45,15 @@ there.
 Start-Process bin\vscode_border.exe
 ```
 
-It runs in the background with a tray icon (right-click for **Hide Borders
-and Hub** / **Reload Config** / **Open Config** / **Open Log Folder** /
-**Exit**). **Hide Borders and Hub** is a checkable toggle that quickly hides
+It runs in the background with a tray icon (right-click for **Favourites** /
+**Close All Windows** / **Hide Borders and Hub** / **Reload Config** / **Open
+Config** / **Open Log Folder** / **Exit**). **Favourites** lists your saved
+favourite projects (see the hub's "+" button below) under an **Open All**
+item that opens every favourite not already open; pick a single favourite to
+open just that one (already-open ones are checked, and picking one just
+brings its window forward). **Close All Windows** asks for confirmation, then
+closes every VS Code window (VS Code still prompts about unsaved changes).
+**Hide Borders and Hub** is a checkable toggle that quickly hides
 every border overlay and the project list HUD together; it isn't saved, so
 the next launch shows everything again (to turn one off for good, use its
 flag in `config.ini`, e.g. `show_project_list=false`). To launch it
@@ -531,6 +537,7 @@ to pick up worktrees created after the app started.
 - `src/project_list_hud.*` -- interactive desktop project-list HUD: sorts/sizes/positions itself from the entries it's given, plus hover focus, click, move, and resize behavior.
 - `src/layered_rendering.*` -- shared alpha-blended text helpers for layered windows.
 - `src/tray_icon.*` -- tray icon warning-badge compositing.
+- `src/vscode_cli.*` -- locates VS Code's `code`/`code-insiders` CLI shim; opens new VS Code windows and closes all of them (shared by the hub and the tray menu).
 - `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, border sync, and feeding the HUD its entries.
 - `src/resource.rc`, `assets/app.ico`, `assets/square-dashed.png` -- tray icon resource (`app.ico` is generated from the PNG; see [Credits](#credits)).
 - `config.ini` -- default config template (copied to `bin\` on first build).

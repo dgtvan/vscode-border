@@ -58,6 +58,10 @@ size_t TrackedWindowCount();
 // already on screen (see favourites.h).
 std::vector<std::wstring> GetTrackedFolderPaths();
 
+// Every currently tracked VS Code top-level window, in no particular order
+// (e.g. for the tray icon's Close All Windows).
+std::vector<HWND> GetTrackedWindows();
+
 // Registered both globally (to discover new windows) and per-process (to
 // track location/destroy events for already-tracked windows).
 void CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG idObject, LONG idChild,
