@@ -239,7 +239,8 @@ for an AI coding assistant running in that VS Code window's terminal(s):
 
 - **Working** -- amber, a small square chasing itself around an 8-position
   ring -- actively generating a response or running a tool (from
-  `UserPromptSubmit` until the turn's `Stop`/`StopFailure`/`SubagentStop`).
+  `UserPromptSubmit` until the turn's `Stop`/`StopFailure`/`SubagentStop`,
+  or longer while background work it started is still running -- see below).
 - **Attention** -- red, a single pulsing square -- blocked mid-turn on a
   permission prompt or an MCP server asking the user something. This is
   the state that most needs you to look at it.
@@ -247,22 +248,29 @@ for an AI coding assistant running in that VS Code window's terminal(s):
   ready for your next prompt.
 - No indicator at all if nothing's running there.
 
-Claude Code's `Stop`/`StopFailure`/`SubagentStop` payloads also carry a live
-`background_tasks` list (anything still running in the background -- a dev
-server, a watcher, a subagent). An earlier version of this feature treated a
-non-empty list as still "Working", but real usage showed that doesn't work:
-a background task has no way to signal "about to finish" versus "started
-once and will just sit there running for the rest of the session" -- both
-report the same live status on every check, so a long-lived process (e.g. a
-dev server) pinned the indicator to "Working" indefinitely, long after the
-conversation itself was done. Rather than chase staleness thresholds that
-can't fix that (a window short enough to avoid the false positive provides
-no signal either way), this was removed -- `background_tasks` is still
-logged for visibility (`bin\logs\claude_hook_events.log`) but no longer
-affects the indicator.
+A turn can end while Claude is still due to carry on by itself: it started
+background work (a subagent, a build, a "poll the PR until checks finish"
+loop) and Claude Code will wake it with the result, or it scheduled a
+wakeup (`ScheduleWakeup`, `/loop`). The `Stop`/`StopFailure`/`SubagentStop`
+payloads list both (`background_tasks`, `session_crons`), and either keeps
+the indicator on **Working**.
 
-**Attention** can also go stale in a way `background_tasks` couldn't self-heal
-from at all: there's no "permission granted, resuming" hook (unlike MCP
+This follows Claude Code's own rule for "is this session still busy" (its
+session runner's "follow-up hold") and doesn't try to be smarter than it:
+
+- Any live background task counts, whatever it is. Claude Code doesn't
+  record whether Claude means to wait for a task, and neither does this. A
+  dev server left running keeps the indicator on Working until it stops,
+  just as the runner counts it.
+- Except monitors (including the artifact live-update watchers Claude Code
+  starts by itself) and teammates, which the runner leaves out.
+- A pending one-shot wakeup counts. A recurring one (a cron) doesn't, since
+  it never ends.
+
+Every task and whether it counted is logged in
+`bin\logs\claude_hook_events.log`.
+
+**Attention** can go stale on its own: there's no "permission granted, resuming" hook (unlike MCP
 elicitation, which has `ElicitationResult`), so once a permission prompt
 fires, nothing updates the status again until the turn's eventual `Stop` --
 even if you answered it seconds later and Claude went right back to work.
