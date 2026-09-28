@@ -323,10 +323,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     AddTrayIcon(hwnd);
     RescanAllWindows();
     Log(L"initial rescan complete, tracked=%zu", TrackedWindowCount());
-    // After RescanAllWindows above, so the already-open list it is given
-    // reflects the VS Code windows that were up before this app started.
-    OpenAllFavourites(AnyTrackedWindow(), GetTrackedFolderPaths(), L"favourites-startup-autoopen");
-    UpdateTrayIconWarningState(); // picks up any warnings from config load / rescan above / favourites auto-open
+    UpdateTrayIconWarningState(); // picks up any warnings from config load / rescan above
 
     g_hookCreate = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_CREATE,
                                     nullptr, WinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT);

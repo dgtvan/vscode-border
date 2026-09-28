@@ -54,7 +54,7 @@ size_t TrackedWindowCount();
 // resolved -- a multi-root workspace, or a folder VS Code has never
 // recorded in workspaceStorage -- are omitted, so this is "definitely open
 // at these paths", never "these are all the open windows". Used by the
-// favourites startup auto-open to avoid reopening a project that is
+// favourites Open All to avoid reopening a project that is
 // already on screen (see favourites.h).
 std::vector<std::wstring> GetTrackedFolderPaths();
 

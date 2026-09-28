@@ -25,8 +25,8 @@
 //  2. A burst of activation requests in general -- e.g. sweeping the mouse
 //     across the project-list HUD with project_list_activate_on_hover=true
 //     asks to activate every item the cursor crosses, one after another.
-//  3. Launching several VS Code windows at once (favourites auto-open at
-//     startup). Those windows request the foreground *themselves*; the last
+//  3. Launching several VS Code windows at once (favourites Open All from
+//     the tray). Those windows request the foreground *themselves*; the last
 //     one wins and the rest flash. Nothing in this app calls
 //     SetForegroundWindow on that path, so without the launch being logged
 //     it looks like an unexplained storm.

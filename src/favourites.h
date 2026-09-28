@@ -47,8 +47,8 @@ void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label);
 bool IsFavouriteOpen(const std::wstring& path, const std::vector<std::wstring>& openFolderPaths);
 
 // Opens every saved favourite that isn't already open, each in its own new
-// VS Code window. Called once from vscode_border.cpp's wWinMain at startup
-// and from the tray icon's Favourites > Open All. `runningWindow` (null if
+// VS Code window. Called from the tray icon's Favourites > Open All (never
+// automatically at startup). `runningWindow` (null if
 // no VS Code window is running) picks which VS Code install's CLI shim is used (see vscode_cli.h's
 // ResolveVSCodeCliShim); logs a warning and no-ops if no shim can be found.
 // `reason` tags the log lines and the focus-trace launch record.

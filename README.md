@@ -234,7 +234,9 @@ Once that folder is a favourite, the same item's menu offers **Remove from
 Favourites** in its place. That only reaches a favourite while its window is
 open, though -- the "+" button's own menu is the way to remove one that
 isn't. Favourites are matched by folder path, not label text, and stored in
-`favourites.ini` next to `config.ini`.
+`favourites.ini` next to `config.ini`. Favourites are never opened
+automatically when the app starts -- use the tray icon's **Favourites >
+Open All** to open them all at once.
 
 ### AI status indicator
 
