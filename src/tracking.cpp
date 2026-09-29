@@ -716,16 +716,6 @@ size_t TrackedWindowCount() {
     return g_tracked.size();
 }
 
-std::vector<std::wstring> GetTrackedFolderPaths() {
-    std::vector<std::wstring> paths;
-    for (const auto& kv : g_tracked) {
-        if (kv.second.folderName.empty()) continue;
-        std::wstring path = ResolveFolderPath(kv.second.folderName);
-        if (!path.empty()) paths.push_back(path);
-    }
-    return paths;
-}
-
 std::vector<HWND> GetTrackedWindows() {
     std::vector<HWND> windows;
     windows.reserve(g_tracked.size());

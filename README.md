@@ -45,13 +45,9 @@ there.
 Start-Process bin\vscode_border.exe
 ```
 
-It runs in the background with a tray icon (right-click for **Favourites** /
-**Close All Windows** / **Hide Borders and Hub** / **Reload Config** / **Open
-Config** / **Open Log Folder** / **Exit**). **Favourites** lists your saved
-favourite projects (see the hub's "+" button below) under an **Open All**
-item that opens every favourite not already open; pick a single favourite to
-open just that one (already-open ones are checked, and picking one just
-brings its window forward). **Close All Windows** asks for confirmation, then
+It runs in the background with a tray icon (right-click for **Close All
+Windows** / **Hide Borders and Hub** / **Reload Config** / **Open Config** /
+**Open Log Folder** / **Exit**). **Close All Windows** asks for confirmation, then
 closes every VS Code window (VS Code still prompts about unsaved changes).
 **Hide Borders and Hub** is a checkable toggle that quickly hides
 every border overlay and the project list HUD together; it isn't saved, so
@@ -222,9 +218,12 @@ startup.
 
 The fixed "+" square at the end of the project list HUD opens a brand-new,
 empty VS Code window on a plain click. Right-clicking it instead opens a
-menu of saved favourite projects/folders, one submenu per favourite --
-hover a favourite's name to expand it to **Open in New Window** (bolded as
-the default action) and **Remove from Favourites**.
+menu with a **Favourites** submenu: **Open All** first (opens every
+favourite not already open), then your saved favourite projects/folders,
+one submenu per favourite (already-open ones are checked) -- hover a
+favourite's name to expand it to **Open in New Window** (bolded as the
+default action; on an open one it just brings its window forward) and
+**Remove from Favourites**.
 
 To add a favourite, right-click any regular item (or its border label
 chip) and choose **Add to Favourites** -- this saves the window's currently
@@ -235,7 +234,7 @@ Favourites** in its place. That only reaches a favourite while its window is
 open, though -- the "+" button's own menu is the way to remove one that
 isn't. Favourites are matched by folder path, not label text, and stored in
 `favourites.ini` next to `config.ini`. Favourites are never opened
-automatically when the app starts -- use the tray icon's **Favourites >
+automatically when the app starts -- use the "+" button's **Favourites >
 Open All** to open them all at once.
 
 ### AI status indicator

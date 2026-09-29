@@ -226,10 +226,9 @@ highlighted. Confirmed from the log: 4 windows tracked before the launch,
 still 4 after, with the foreground bouncing across 3 of them inside about
 1.7s.
 
-The fix is that startup auto-open now takes the list of folder paths that
-are already open (`GetTrackedFolderPaths`, resolved exactly the way the
-project-list HUD resolves an entry path) and launches only the favourites
-missing from it. The list is best-effort: a window whose path cannot be
+The fix is that Open All now takes the list of folder paths that are
+already open (the project-list HUD entries' resolved paths) and launches
+only the favourites missing from it. The list is best-effort: a window whose path cannot be
 resolved is simply absent, so its favourite is still launched, which is the
 old behaviour rather than a silent skip.
 

@@ -843,10 +843,14 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     }
 }
 
-// Right-click on the fixed "+" new-window button: lists saved favourite
-// projects (see favourites.h), each as its own submenu -- hovering a
-// favourite's name expands it to "Open in New Window" (the default/bolded
-// action, see vscode_cli.h's OpenNewVSCodeWindow) and "Remove from Favourites". A plain
+// Right-click on the fixed "+" new-window button: a "Favourites" submenu
+// holding "Open All" (every favourite not already open -- see
+// OpenAllFavourites for why open ones are skipped), then the saved favourite
+// projects (see favourites.h), each as its own submenu, checked if it's
+// already open -- hovering a favourite's name expands it to "Open in New
+// Window" (the default/bolded action, see vscode_cli.h's OpenNewVSCodeWindow;
+// on an open one it just re-activates its window) and "Remove from
+// Favourites". A plain
 // Win32 popup menu item can't both carry its own click action and expand a
 // submenu on hover, so nesting "open" one level down (rather than a bare
 // top-level click) is what buys room for "remove" to live right next to it,
@@ -885,33 +889,49 @@ static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state,
         return ia < ib;
     });
 
-    HMENU menu = CreatePopupMenu();
+    // Command ids: Open All = 1; per favourite i, open = 2 + i*2, remove =
+    // 3 + i*2 -- decoded back on return below.
+    const UINT kOpenAllId = 1;
+    HMENU favMenu = CreatePopupMenu();
     if (favourites.empty()) {
-        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"(No Favourites)");
+        AppendMenuW(favMenu, MF_STRING | MF_GRAYED, 0, L"(No Favourites)");
     } else {
-        // Command ids per favourite i: open = 1 + i*2, remove = 2 + i*2 --
-        // decoded back on return below.
+        AppendMenuW(favMenu, MF_STRING, kOpenAllId, L"Open All");
+        AppendMenuW(favMenu, MF_SEPARATOR, 0, nullptr);
         for (size_t i = 0; i < favourites.size(); i++) {
-            UINT openId = (UINT)(1 + i * 2);
-            UINT removeId = (UINT)(2 + i * 2);
+            UINT openId = (UINT)(2 + i * 2);
+            UINT removeId = (UINT)(3 + i * 2);
             HMENU sub = CreatePopupMenu();
             AppendMenuW(sub, MF_STRING, openId, L"Open in New Window");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(sub, MF_STRING, removeId, L"Remove from Favourites");
             SetMenuDefaultItem(sub, openId, FALSE);
-            AppendMenuW(menu, MF_POPUP, (UINT_PTR)sub, favourites[i].label.c_str());
+            UINT flags = MF_POPUP | (findOpenHudIndex(favourites[i].path) >= 0 ? MF_CHECKED : MF_UNCHECKED);
+            AppendMenuW(favMenu, flags, (UINT_PTR)sub, favourites[i].label.c_str());
         }
     }
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)favMenu, L"Favourites");
 
     RequestForeground(hud, FocusTargetKind::OwnUi, L"favourites-context-menu");
     state->contextMenuOpen = true; // see UpdateProjectListHud's guard
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
     state->contextMenuOpen = false;
-    DestroyMenu(menu); // recursively destroys the per-favourite submenus too
+    DestroyMenu(menu); // recursively destroys the Favourites and per-favourite submenus too
 
     if (cmd <= 0) return;
-    size_t i = (size_t)(cmd - 1) / 2;
-    bool isOpen = (cmd - 1) % 2 == 0;
+    if (cmd == (int)kOpenAllId) {
+        // Open-ness comes from the HUD's own entries (see
+        // ProjectListHudEntry::path for which windows have no path).
+        std::vector<std::wstring> openPaths;
+        for (const ProjectListHudEntry& e : state->entries) {
+            if (!e.path.empty()) openPaths.push_back(e.path);
+        }
+        OpenAllFavourites(AnyTrackedWindow(state), openPaths, L"hud-favourites-open-all");
+        return;
+    }
+    size_t i = (size_t)(cmd - 2) / 2;
+    bool isOpen = (cmd - 2) % 2 == 0;
     if (i >= favourites.size()) return;
     if (isOpen) OpenNewVSCodeWindow(AnyTrackedWindow(state), favourites[i].path, L"hud-favourite-open");
     else RemoveFavourite(favourites[i].path);
