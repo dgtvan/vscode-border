@@ -55,7 +55,9 @@ struct TrackedWindow {
     int lastHeight = -1;
     DWORD pid = 0;
     std::wstring label;     // display text: rawLabel with any user-set alias applied (see label_alias.h)
-    std::wstring rawLabel;  // folder name derived from the target's title -- the alias map's key
+    std::wstring rawLabel;  // folder name derived from the target's title
+    std::wstring aliasKey;  // key for this window's alias and manual-order slot: rawLabel, or a
+                            // session-only per-window key when no folder/repo is open (see label_alias.h)
     std::wstring branch;    // ${activeRepositoryBranchName} from the title, empty outside a git repo --
                             // fills label_alias_format's <Branch> on the border's label chip (see BorderLabel)
     std::wstring folderName; // pre-worktree-substitution repo/folder name, i.e. what VS Code's own
@@ -108,8 +110,11 @@ static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
     tw.hasRepoInTitle = !parts.repo.empty();
     tw.hasFolderOrRepoInTitle = !parts.repo.empty() || !parts.folder.empty();
     tw.rawLabel = BuildFolderLabel(parts);
+    // Every bare window shares the same "(no folder)" rawLabel, so key it
+    // per-window instead -- otherwise aliasing one would alias them all.
+    tw.aliasKey = tw.hasFolderOrRepoInTitle ? tw.rawLabel : SessionAliasKey(tw.trackSeq);
     tw.branch = parts.branch;
-    tw.label = ResolveAlias(tw.rawLabel);
+    tw.label = ResolveAlias(tw.aliasKey, tw.rawLabel);
 }
 
 // See kLoadingGraceMs: true while this window's rawLabel might still
@@ -281,7 +286,7 @@ static void SyncProjectListHud() {
         // up here until the next title change, and would look like it
         // "reverted" the moment this sync next overwrote the HUD's own
         // locally-updated copy with the stale cached one.
-        kv.second.label = ResolveAlias(kv.second.rawLabel);
+        kv.second.label = ResolveAlias(kv.second.aliasKey, kv.second.rawLabel);
 
         ProjectListHudEntry entry;
         entry.target = kv.first;
@@ -289,6 +294,7 @@ static void SyncProjectListHud() {
         entry.trackSeq = kv.second.trackSeq;
         entry.label = kv.second.label;
         entry.rawLabel = kv.second.rawLabel;
+        entry.aliasKey = kv.second.aliasKey;
         entry.path = kv.second.folderName.empty() ? L"" : ResolveFolderPath(kv.second.folderName);
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
@@ -437,7 +443,7 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     // freshly-set alias (see project_list_hud.cpp's BeginAliasEdit) shows
     // up in the border's label chip promptly, not just the next time the
     // window's title itself changes.
-    tw.label = ResolveAlias(tw.rawLabel);
+    tw.label = ResolveAlias(tw.aliasKey, tw.rawLabel);
     std::wstring borderLabel = BorderLabel(tw);
 
     if (g_overlaysHidden || IsIconic(target) || !IsWindowVisible(target)) {
@@ -599,6 +605,7 @@ static void UntrackWindow(HWND hwnd) {
     auto it = g_tracked.find(hwnd);
     if (it == g_tracked.end()) return;
     FreeColorIndex(it->second.colorIndex);
+    ForgetSessionAlias(SessionAliasKey(it->second.trackSeq));
     ReleasePidHooks(it->second.pid);
     DestroyWindow(it->second.overlay);
     g_tracked.erase(it);

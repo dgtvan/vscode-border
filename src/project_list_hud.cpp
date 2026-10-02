@@ -96,7 +96,7 @@ struct ProjectListHudState {
     RECT dragStartRect = {0, 0, 0, 0};
     bool manualOrderMode = false; // mirrors style.manualOrder, cached here since WM_LBUTTONDOWN needs it
                                   // without going through UpdateProjectListHud
-    std::vector<std::wstring> manualOrder; // rawLabels in last-dragged display order (see project_list_order.h)
+    std::vector<std::wstring> manualOrder; // aliasKeys in last-dragged display order (see project_list_order.h)
     int pendingDragIndex = -1;   // item index under the cursor at WM_LBUTTONDOWN, before a plain-left-drag
                                   // has moved far enough to commit to DragReorder (vs. a plain click)
     int reorderIndex = -1;       // during DragReorder: dragged entry's current position in state->entries
@@ -630,7 +630,7 @@ static std::wstring TrimWhitespace(const std::wstring& s) {
 }
 
 // Ends the in-progress alias edit (if any): on commit, saves the trimmed
-// text as the new alias for that item's rawLabel (an empty result removes
+// text as the new alias for that item's aliasKey (an empty result removes
 // the alias, reverting to the raw label) and updates the entry's displayed
 // text immediately. Guarding on editIndex/editControl up front, and
 // clearing them *before* DestroyWindow, makes this safe to call
@@ -650,9 +650,9 @@ static void EndAliasEdit(HWND hud, ProjectListHudState* state, bool commit) {
         wchar_t buf[256] = {};
         GetWindowTextW(edit, buf, 255);
         std::wstring newAlias = TrimWhitespace(buf);
-        const std::wstring& rawLabel = state->entries[index].rawLabel;
-        SetAlias(rawLabel, newAlias);
-        state->entries[index].label = newAlias.empty() ? rawLabel : newAlias;
+        const ProjectListHudEntry& entry = state->entries[index];
+        SetAlias(entry.aliasKey, newAlias);
+        state->entries[index].label = newAlias.empty() ? entry.rawLabel : newAlias;
     }
 
     DestroyWindow(edit);
@@ -726,9 +726,8 @@ static void BeginAliasEdit(HWND hud, ProjectListHudState* state, int index) {
 // box first.
 static void ClearAlias(HWND hud, ProjectListHudState* state, int index) {
     if (!state || index < 0 || index >= (int)state->entries.size()) return;
-    const std::wstring& rawLabel = state->entries[index].rawLabel;
-    SetAlias(rawLabel, L"");
-    state->entries[index].label = rawLabel;
+    SetAlias(state->entries[index].aliasKey, L"");
+    state->entries[index].label = state->entries[index].rawLabel;
     RenderProjectListHud(hud, state);
 }
 
@@ -947,7 +946,7 @@ static void EndReorderDrag(HWND hwnd, ProjectListHudState* state, int mouseX, in
     if (GetCapture() == hwnd) ReleaseCapture();
     std::vector<std::wstring> order;
     order.reserve(state->entries.size());
-    for (const ProjectListHudEntry& e : state->entries) order.push_back(e.rawLabel);
+    for (const ProjectListHudEntry& e : state->entries) order.push_back(e.aliasKey);
     state->manualOrder = order;
     SaveItemOrder(order);
     if (state->dragGhost) ShowWindow(state->dragGhost, SW_HIDE);
@@ -1997,8 +1996,8 @@ static int MeasureRequiredWidth(const std::vector<ProjectListHudEntry>& entries,
     return ClampInt(width, kProjectListMinWidth, kProjectListAutoMaxWidth);
 }
 
-// Rearranges `entries` to match `order` (a list of rawLabels in the user's
-// last-dragged order): entries whose rawLabel appears in `order` come
+// Rearranges `entries` to match `order` (a list of aliasKeys in the user's
+// last-dragged order): entries whose aliasKey appears in `order` come
 // first, in that relative order; any not found (e.g. a project the user
 // has never dragged, so it has no saved position) are appended afterward,
 // oldest-tracked first (trackSeq) -- i.e. plain append order, not wherever
@@ -2006,8 +2005,8 @@ static int MeasureRequiredWidth(const std::vector<ProjectListHudEntry>& entries,
 static void ApplyManualOrder(std::vector<ProjectListHudEntry>& entries, const std::vector<std::wstring>& order) {
     std::stable_sort(entries.begin(), entries.end(),
                      [&order](const ProjectListHudEntry& a, const ProjectListHudEntry& b) {
-        auto ia = std::find(order.begin(), order.end(), a.rawLabel);
-        auto ib = std::find(order.begin(), order.end(), b.rawLabel);
+        auto ia = std::find(order.begin(), order.end(), a.aliasKey);
+        auto ib = std::find(order.begin(), order.end(), b.aliasKey);
         bool aFound = ia != order.end(), bFound = ib != order.end();
         if (aFound != bFound) return aFound;
         if (aFound) return (ia - ib) < 0;

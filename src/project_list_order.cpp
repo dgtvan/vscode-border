@@ -1,6 +1,7 @@
 #include "project_list_order.h"
 
 #include "file_util.h"
+#include "label_alias.h"
 #include "text_util.h"
 
 namespace {
@@ -31,8 +32,9 @@ std::vector<std::wstring> LoadItemOrder() {
 
 void SaveItemOrder(const std::vector<std::wstring>& order) {
     std::string out;
-    for (const std::wstring& label : order) {
-        out += EscapeTextLine(label) + "\n";
+    for (const std::wstring& key : order) {
+        if (IsSessionAliasKey(key)) continue;
+        out += EscapeTextLine(key) + "\n";
     }
     WriteFileBytes(GetOrderFilePath(), out);
 }

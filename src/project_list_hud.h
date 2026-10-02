@@ -20,8 +20,10 @@ struct ProjectListHudEntry {
     long long trackSeq = 0; // this window's track order, oldest first -- the append order for a manual-mode
                              // entry that has no saved position yet (see ApplyManualOrder in
                              // project_list_hud.cpp)
-    std::wstring label;    // display text (an alias, if the user set one for rawLabel -- see label_alias.h)
-    std::wstring rawLabel; // the un-aliased label, i.e. the alias map's key
+    std::wstring label;    // display text (an alias, if the user set one for aliasKey -- see label_alias.h)
+    std::wstring rawLabel; // the un-aliased label
+    std::wstring aliasKey; // key for this window's alias and manual-order slot -- rawLabel, or a
+                            // session-only per-window key when no folder is open (see label_alias.h)
     std::wstring path;     // absolute folder path this window has open, resolved via worktree_resolver's
                             // ResolveFolderPath -- empty if VS Code hasn't recorded it (e.g. a plain
                             // folder it's never logged to workspaceStorage, or a multi-root workspace).

@@ -164,7 +164,8 @@ following the cursor, so you can always tell exactly where it'll land
 before you let go. Windows that appear for the first time are appended at
 the end until you place them. The order is matched by label text (same
 caveat as aliases: two windows sharing an identical label are kept
-adjacent to each other, not independently ordered) and is remembered
+adjacent to each other, not independently ordered, and a `(no folder)`
+window keeps its place only while it stays open) and is remembered
 across restarts, stored in `project_list_order.ini` next to `config.ini`.
 Switching `project_list_order` back to `auto` falls back to window-left-edge
 sorting; switching back to `manual` restores the last saved arrangement.
@@ -213,6 +214,13 @@ the label's exact text, so if two windows ever happen to produce the
 identical label, aliasing one aliases both. Stored in `label_aliases.ini`
 next to `config.ini`, and re-read on **Reload Config** as well as at
 startup.
+
+The exception is a window with no folder open at all (shown as
+`(no folder)`): every such window shares that label, so its alias belongs
+to that one window instead. It lasts only while the window stays open and
+is never saved to `label_aliases.ini`, since there's nothing to recognize
+the window by after it closes or the app restarts. Opening a folder in that
+window switches it over to the folder's own alias, if any.
 
 ### Project list HUD favourites
 

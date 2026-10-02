@@ -3,6 +3,7 @@
 #include "file_util.h"
 #include "text_util.h"
 
+#include <cwchar>
 #include <map>
 
 namespace {
@@ -43,8 +44,11 @@ void SaveAll(const std::map<std::wstring, std::wstring>& all) {
     WriteFileBytes(GetAliasFilePath(), out);
 }
 
-std::map<std::wstring, std::wstring> g_aliases;
+std::map<std::wstring, std::wstring> g_aliases;        // persisted (label_aliases.ini)
+std::map<std::wstring, std::wstring> g_sessionAliases; // in-memory only -- see SessionAliasKey
 bool g_loaded = false;
+
+const wchar_t kSessionKeyPrefix[] = L"(no folder):";
 
 void EnsureLoaded() {
     if (!g_loaded) {
@@ -55,17 +59,32 @@ void EnsureLoaded() {
 
 } // namespace
 
-std::wstring ResolveAlias(const std::wstring& label) {
-    EnsureLoaded();
-    auto it = g_aliases.find(label);
-    return it != g_aliases.end() ? it->second : label;
+std::wstring SessionAliasKey(long long trackSeq) {
+    return kSessionKeyPrefix + std::to_wstring(trackSeq);
 }
 
-void SetAlias(const std::wstring& label, const std::wstring& alias) {
+bool IsSessionAliasKey(const std::wstring& key) {
+    return key.compare(0, wcslen(kSessionKeyPrefix), kSessionKeyPrefix) == 0;
+}
+
+std::wstring ResolveAlias(const std::wstring& key, const std::wstring& fallback) {
     EnsureLoaded();
-    if (alias.empty()) g_aliases.erase(label);
-    else g_aliases[label] = alias;
-    SaveAll(g_aliases);
+    const auto& aliases = IsSessionAliasKey(key) ? g_sessionAliases : g_aliases;
+    auto it = aliases.find(key);
+    return it != aliases.end() ? it->second : fallback;
+}
+
+void SetAlias(const std::wstring& key, const std::wstring& alias) {
+    EnsureLoaded();
+    bool session = IsSessionAliasKey(key);
+    auto& aliases = session ? g_sessionAliases : g_aliases;
+    if (alias.empty()) aliases.erase(key);
+    else aliases[key] = alias;
+    if (!session) SaveAll(g_aliases);
+}
+
+void ForgetSessionAlias(const std::wstring& key) {
+    g_sessionAliases.erase(key);
 }
 
 void ReloadAliases() {
