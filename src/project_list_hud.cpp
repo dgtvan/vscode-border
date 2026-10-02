@@ -781,7 +781,7 @@ static void OpenPathInExplorer(const std::wstring& path) {
 }
 
 static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
-    // Groups top to bottom: directory, alias, favourites. No path means VS
+    // Groups top to bottom: directory, alias, favourites, close. No path means VS
     // Code hasn't recorded this window's folder in its own workspaceStorage
     // (e.g. a multi-root workspace) -- nothing to copy/open in Explorer or
     // for a favourite to reopen later, so the directory and favourites
@@ -817,6 +817,11 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, itemFlags, alreadyFav ? 4 : 3, alreadyFav ? L"Remove from Favourites" : L"Add to Favourites");
     }
+    // Always last, in its own group. Stays enabled while loading: closing
+    // doesn't depend on the path/alias that's still settling, and a window
+    // stuck loading is exactly one you might want gone.
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 7, L"Close Window");
 
     RequestForeground(hud, FocusTargetKind::OwnUi,
                       L"item-context-menu"); // required so the menu dismisses correctly on an outside click
@@ -839,6 +844,12 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         CopyPathToClipboard(hud, state->entries[index].path);
     } else if (cmd == 6) {
         OpenPathInExplorer(state->entries[index].path);
+    } else if (cmd == 7 && index >= 0 && index < (int)state->entries.size()) {
+        // Same request as the window's own X button -- VS Code still gets
+        // to prompt about unsaved changes.
+        HWND target = state->entries[index].target;
+        if (target && IsWindow(target)) PostMessageW(target, WM_CLOSE, 0, 0);
+        Log(L"hud item close: sent WM_CLOSE to [%ls]", state->entries[index].label.c_str());
     }
 }
 
