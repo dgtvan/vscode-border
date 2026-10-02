@@ -5,7 +5,7 @@
 struct VSCodeTitleParts {
     std::wstring repo;   // ${activeRepositoryName}, empty if not present/placeholder
     std::wstring branch; // ${activeRepositoryBranchName}, empty if not present/placeholder
-    std::wstring folder; // ${folderName}, empty if not present
+    std::wstring folder; // ${folderName}, empty if not present -- set alongside repo/branch too
 };
 
 // VS Code's window.title is configured as

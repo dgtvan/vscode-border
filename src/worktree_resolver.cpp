@@ -11,10 +11,19 @@
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
 
 static std::unordered_map<std::wstring, std::wstring> g_cache; // lowercased worktree leaf name -> main repo name
-static std::unordered_map<std::wstring, std::wstring> g_pathCache; // lowercased leaf name -> full path (every
-                                                                     // entry, not just worktrees)
+// One workspaceStorage entry: a folder VS Code has opened, plus the storage
+// directory VS Code keeps for it -- written to while that folder is open in
+// a window, which is what ResolveFolderPath uses to tell apart several
+// recorded folders sharing one leaf name.
+struct FolderCandidate {
+    std::wstring path;
+    std::wstring storageDir;
+};
+static std::unordered_map<std::wstring, std::vector<FolderCandidate>>
+    g_pathCache; // lowercased leaf name -> every recorded folder with that leaf (every entry, not just worktrees)
 static bool g_cacheBuilt = false;
 
 static std::wstring ToLowerCopy(const std::wstring& s) {
@@ -75,7 +84,8 @@ static bool ReadFolderUri(const std::wstring& jsonPath, std::string& outUri) {
 
 static const wchar_t* kWorktreesSuffix = L".worktrees";
 
-static void ProcessWorkspaceJson(const std::wstring& jsonPath) {
+static void ProcessWorkspaceJson(const std::wstring& storageDir) {
+    std::wstring jsonPath = storageDir + L"\\workspace.json";
     std::string uri;
     if (!ReadFolderUri(jsonPath, uri)) return;
 
@@ -93,27 +103,31 @@ static void ProcessWorkspaceJson(const std::wstring& jsonPath) {
 
     // Every workspace.json entry maps its own leaf folder name to its real
     // path, not just worktrees -- kept separately from the worktree-name
-    // mapping below since most entries aren't worktrees at all.
-    g_pathCache[ToLowerCopy(leaf)] = path;
+    // mapping below since most entries aren't worktrees at all. A list, not
+    // a single path: leaf names repeat (every repo's "src", a worktree named
+    // after the same branch in two repos), and whichever entry happened to
+    // be scanned last would otherwise hand a window some other project's
+    // folder.
+    g_pathCache[ToLowerCopy(leaf)].push_back({path, storageDir});
 
     size_t parentSlash = parent.find_last_of(L"\\/");
     std::wstring parentName = (parentSlash == std::wstring::npos) ? parent : parent.substr(parentSlash + 1);
 
     size_t suffixLen = wcslen(kWorktreesSuffix);
     if (parentName.size() <= suffixLen) {
-        Log(L"worktree resolver: path=[%ls] parent=[%ls] -- not a worktree layout (parent too short)", path.c_str(),
+        LogDiag(L"worktree resolver: path=[%ls] parent=[%ls] -- not a worktree layout (parent too short)", path.c_str(),
             parentName.c_str());
         return;
     }
     std::wstring parentTail = ToLowerCopy(parentName.substr(parentName.size() - suffixLen));
     if (parentTail != kWorktreesSuffix) {
-        Log(L"worktree resolver: path=[%ls] parent=[%ls] -- not a worktree layout (no .worktrees suffix)",
+        LogDiag(L"worktree resolver: path=[%ls] parent=[%ls] -- not a worktree layout (no .worktrees suffix)",
             path.c_str(), parentName.c_str());
         return;
     }
 
     std::wstring mainRepoName = parentName.substr(0, parentName.size() - suffixLen);
-    Log(L"worktree resolver: leaf=[%ls] -> mainRepo=[%ls] (from path=[%ls])", leaf.c_str(), mainRepoName.c_str(),
+    LogDiag(L"worktree resolver: leaf=[%ls] -> mainRepo=[%ls] (from path=[%ls])", leaf.c_str(), mainRepoName.c_str(),
         path.c_str());
     g_cache[ToLowerCopy(leaf)] = mainRepoName;
 }
@@ -123,7 +137,7 @@ static void ScanUserDataDir(const std::wstring& userDir) {
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) {
-        Log(L"worktree resolver: no workspaceStorage under [%ls] (lastError=%lu)", userDir.c_str(), GetLastError());
+        LogDiag(L"worktree resolver: no workspaceStorage under [%ls] (lastError=%lu)", userDir.c_str(), GetLastError());
         return;
     }
     int entryCount = 0;
@@ -131,10 +145,10 @@ static void ScanUserDataDir(const std::wstring& userDir) {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
         entryCount++;
-        ProcessWorkspaceJson(userDir + L"\\workspaceStorage\\" + fd.cFileName + L"\\workspace.json");
+        ProcessWorkspaceJson(userDir + L"\\workspaceStorage\\" + fd.cFileName);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
-    Log(L"worktree resolver: scanned %d workspaceStorage entries under [%ls]", entryCount, userDir.c_str());
+    LogDiag(L"worktree resolver: scanned %d workspaceStorage entries under [%ls]", entryCount, userDir.c_str());
 }
 
 static void BuildCache() {
@@ -152,7 +166,8 @@ static void BuildCache() {
     ScanUserDataDir(base + L"\\Code\\User");
     ScanUserDataDir(base + L"\\Code - Insiders\\User");
 
-    Log(L"worktree resolver: cache built, %zu worktree(s) mapped", g_cache.size());
+    Log(L"worktree resolver: cache built, %zu folder name(s), %zu worktree(s) mapped", g_pathCache.size(),
+        g_cache.size());
 }
 
 static ULONGLONG g_lastRebuildTick = 0;
@@ -192,7 +207,49 @@ std::wstring ResolveMainRepoName(const std::wstring& repoName) {
     return it->second;
 }
 
-std::wstring ResolveFolderPath(const std::wstring& name) {
+static bool IsExistingDirectory(const std::wstring& path) {
+    DWORD attrs = GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// When VS Code last wrote this folder's storage: the newer of the storage
+// directory itself (bumped as files come and go in it, e.g. SQLite's
+// journal) and its state.vscdb (rewritten while the folder is open in a
+// window). Read live rather than cached, since it keeps moving for as long
+// as a window has the folder open.
+static ULONGLONG LastUsedTime(const FolderCandidate& c) {
+    ULONGLONG newest = 0;
+    for (const std::wstring& p : {c.storageDir, c.storageDir + L"\\state.vscdb"}) {
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &data)) continue;
+        ULONGLONG t = ((ULONGLONG)data.ftLastWriteTime.dwHighDateTime << 32) | data.ftLastWriteTime.dwLowDateTime;
+        if (t > newest) newest = t;
+    }
+    return newest;
+}
+
+// True if one of `path`'s components is `repo` itself or the
+// "<repo>.worktrees" folder holding its worktrees -- i.e. `path` is that
+// repo's root, somewhere inside it, or one of its worktrees.
+static bool PathBelongsToRepo(const std::wstring& path, const std::wstring& repo) {
+    if (repo.empty()) return false;
+    std::wstring worktrees = repo + kWorktreesSuffix;
+    size_t start = 0;
+    while (start <= path.size()) {
+        size_t end = path.find_first_of(L"\\/", start);
+        if (end == std::wstring::npos) end = path.size();
+        std::wstring part = path.substr(start, end - start);
+        if (_wcsicmp(part.c_str(), repo.c_str()) == 0 || _wcsicmp(part.c_str(), worktrees.c_str()) == 0) return true;
+        start = end + 1;
+    }
+    return false;
+}
+
+std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& repoName) {
+    // Up front, not where the ranking below uses it: on a miss it can
+    // rebuild the cache, which would free the candidate list being ranked.
+    std::wstring mainRepo = repoName.empty() ? L"" : ResolveMainRepoName(repoName);
+
     if (!g_cacheBuilt) {
         BuildCache();
         g_cacheBuilt = true;
@@ -215,11 +272,43 @@ std::wstring ResolveFolderPath(const std::wstring& name) {
     }
 
     if (it == g_pathCache.end()) return L"";
-    return it->second;
+    const std::vector<FolderCandidate>& candidates = it->second;
+    if (candidates.size() == 1) return candidates[0].path;
+
+    // Several recorded folders share this leaf name. Rank them: one that
+    // still exists, then one inside the window's own repo (the title's
+    // ${activeRepositoryName}, matched both raw and worktree-substituted),
+    // then whichever VS Code wrote to most recently -- for a folder open
+    // right now, that's its own window.
+    const FolderCandidate* best = nullptr;
+    bool bestExists = false, bestInRepo = false;
+    ULONGLONG bestTime = 0;
+    for (const FolderCandidate& c : candidates) {
+        bool exists = IsExistingDirectory(c.path);
+        bool inRepo = PathBelongsToRepo(c.path, repoName) || PathBelongsToRepo(c.path, mainRepo);
+        ULONGLONG time = LastUsedTime(c);
+        bool better;
+        if (!best) better = true;
+        else if (exists != bestExists) better = exists;
+        else if (inRepo != bestInRepo) better = inRepo;
+        else better = time > bestTime;
+        if (!better) continue;
+        best = &c;
+        bestExists = exists;
+        bestInRepo = inRepo;
+        bestTime = time;
+    }
+    LogDiag(L"worktree resolver: %zu folders named [%ls] (repo=[%ls]) -> [%ls] exists=%d inRepo=%d",
+            candidates.size(), name.c_str(), repoName.c_str(), best->path.c_str(), bestExists, bestInRepo);
+    return best->path;
 }
 
 void RefreshWorktreeCache() {
     BuildCache();
     g_cacheBuilt = true;
     g_lastRebuildTick = GetTickCount64();
+}
+
+void InvalidateWorktreeCache() {
+    g_cacheBuilt = false;
 }

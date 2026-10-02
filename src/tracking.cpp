@@ -60,11 +60,16 @@ struct TrackedWindow {
                             // session-only per-window key when no folder/repo is open (see label_alias.h)
     std::wstring branch;    // ${activeRepositoryBranchName} from the title, empty outside a git repo --
                             // fills label_alias_format's <Branch> on the border's label chip (see BorderLabel)
-    std::wstring folderName; // pre-worktree-substitution repo/folder name, i.e. what VS Code's own
-                              // workspaceStorage records as the leaf folder name -- distinct from rawLabel,
-                              // which shows the substituted *main* repo name for a worktree checkout (see
-                              // ApplyLabelForTitle). Used only to resolve a real path via
+    std::wstring folderName; // leaf name of the folder VS Code actually opened (${folderName}, falling back
+                              // to the pre-worktree-substitution repo name when the title has none), i.e. what
+                              // VS Code's own workspaceStorage records -- distinct from rawLabel, which shows
+                              // the substituted *main* repo name for a worktree checkout, and from the repo
+                              // name, which is the repo root even when a subdirectory of it is what's open
+                              // (see ApplyLabelForTitle). Used only to resolve a real path via
                               // worktree_resolver's ResolveFolderPath (see SyncProjectListHud).
+    std::wstring repoName;   // the title's raw ${activeRepositoryName} (pre-worktree-substitution), empty
+                              // outside a git repo -- ResolveFolderPath's hint for picking between several
+                              // recorded folders that share folderName
     std::wstring lastLabel; // label last painted, to detect changes
     RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized -- lets a minimized
                               // window's project-list HUD entry keep sorting where it normally sits
@@ -97,7 +102,17 @@ static long long g_nextTrackSeq = 0;
 // display label.
 static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
     VSCodeTitleParts parts = ParseVSCodeTitle(title);
-    tw.folderName = !parts.repo.empty() ? parts.repo : parts.folder;
+    std::wstring folderName = !parts.folder.empty() ? parts.folder : parts.repo;
+    // A window that just opened, or switched to, a different folder may be
+    // one VS Code recorded after worktree_resolver's last scan -- rescan
+    // (lazily, on the next lookup) so its path resolves to that folder
+    // rather than an older one with the same name. Also on the repo
+    // appearing: VS Code's git extension fills it in some time after the
+    // folder itself is open, by which point its workspaceStorage entry
+    // certainly exists.
+    if (folderName != tw.folderName || parts.repo != tw.repoName) InvalidateWorktreeCache();
+    tw.folderName = folderName;
+    tw.repoName = parts.repo;
 
     // Inside a git worktree checkout, VS Code's ${activeRepositoryName} is
     // the *worktree's* folder name rather than the main repo's -- substitute
@@ -206,7 +221,7 @@ static std::wstring LastPathSegment(const std::wstring& path) {
 static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<AiSessionStatus>& sessions) {
     if (sessions.empty() || tw.folderName.empty()) return ClaudeStatus::None;
 
-    std::wstring folderPath = ResolveFolderPath(tw.folderName);
+    std::wstring folderPath = ResolveFolderPath(tw.folderName, tw.repoName);
     LogDiag(L"ai_status: matching window folderName=[%ls] resolvedFolderPath=[%ls] against %zu session(s)",
             tw.folderName.c_str(), folderPath.c_str(), sessions.size());
     bool anyAttention = false, anyWorking = false, anyWaiting = false;
@@ -295,7 +310,7 @@ static void SyncProjectListHud() {
         entry.label = kv.second.label;
         entry.rawLabel = kv.second.rawLabel;
         entry.aliasKey = kv.second.aliasKey;
-        entry.path = kv.second.folderName.empty() ? L"" : ResolveFolderPath(kv.second.folderName);
+        entry.path = kv.second.folderName.empty() ? L"" : ResolveFolderPath(kv.second.folderName, kv.second.repoName);
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
         entry.loading = IsWindowLoading(kv.second, kv.first);

@@ -45,6 +45,11 @@ VSCodeTitleParts ParseVSCodeTitle(const std::wstring& title) {
         } else {
             parts.repo = segments[0];
             parts.branch = segments[1];
+            // Kept even though the label ignores it: it's the folder VS Code
+            // actually opened, which can be a subdirectory of the repo, so
+            // it's what a real path is resolved from (see tracking.cpp's
+            // ApplyLabelForTitle).
+            parts.folder = segments[2];
         }
     } else if (segments.size() == 2) {
         // Either the default un-customized "file - folder" title, or this

@@ -17,16 +17,26 @@
 // (caller should keep showing `repoName` unchanged in that case).
 std::wstring ResolveMainRepoName(const std::wstring& repoName);
 
-// Given a folder/repo name as shown in a tracked window's label, looks up
-// the real absolute path VS Code has it open at, via the same
-// workspaceStorage scan ResolveMainRepoName uses -- for every entry, not
-// just worktree ones. Returns an empty string if no matching entry is
-// found (e.g. a plain non-git folder VS Code has never recorded, or a
-// multi-root workspace, which workspace.json doesn't expose as a single
-// folder path).
-std::wstring ResolveFolderPath(const std::wstring& name);
+// Given the leaf name of the folder a window has open (its title's
+// ${folderName}), looks up the real absolute path VS Code has it open at,
+// via the same workspaceStorage scan ResolveMainRepoName uses -- for every
+// entry, not just worktree ones. When several recorded folders share that
+// leaf name, `repoName` (the title's raw ${activeRepositoryName}, empty
+// outside a git repo) and how recently VS Code used each one pick between
+// them -- see the ranking in the definition. Returns an empty string if no
+// matching entry is found (e.g. a plain non-git folder VS Code has never
+// recorded, or a multi-root workspace, which workspace.json doesn't expose
+// as a single folder path).
+std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& repoName);
 
-// Forces the next call to ResolveMainRepoName/ResolveFolderPath to rescan
-// from disk. Wired up to the tray's "Reload Config" action so newly
-// created worktrees can be picked up without restarting the app.
+// Rescans from disk right away. Wired up to the tray's "Reload Config"
+// action so newly created worktrees can be picked up without restarting
+// the app.
 void RefreshWorktreeCache();
+
+// Marks the cache stale so the next ResolveMainRepoName/ResolveFolderPath
+// call rescans -- for when a window opens a different folder, which may be
+// one VS Code recorded after the last scan under a leaf name the cache
+// already holds for some other folder (so no lookup would ever miss and
+// trigger a rescan by itself).
+void InvalidateWorktreeCache();

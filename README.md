@@ -190,9 +190,13 @@ grouped top to bottom: directory actions, alias actions, favourites.
   folder from the "+" button's favourites menu -- see
   [favourites](#project-list-hud-favourites) below.
 
-The directory and favourites groups act on the window's open folder, which
-is resolved to a real absolute path via the same workspaceStorage lookup
-the AI status indicator and worktree name substitution use. When VS Code
+The directory and favourites groups act on the folder the window actually
+has open -- a worktree or a subdirectory of a repo, not the repo's root --
+which is resolved to a real absolute path via the same workspaceStorage
+lookup the AI status indicator and worktree name substitution use. When
+several folders VS Code has opened share that folder's name (every repo's
+`src`, say), the one inside the window's repo wins, then the one VS Code
+used most recently. When VS Code
 hasn't recorded a folder for that window (a multi-root workspace, for
 instance), there's nothing for those items to act on, so both groups are
 left off entirely rather than shown greyed out, leaving just the alias
