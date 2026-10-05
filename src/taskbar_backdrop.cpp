@@ -2,6 +2,7 @@
 
 #include "logger.h"
 
+#include <dwmapi.h>
 #include <shellapi.h>
 
 #include <algorithm>
@@ -89,6 +90,30 @@ static COLORREF MedianColor(std::vector<COLORREF>& samples) {
 
 enum class SampleResult { Sampled, Deferred, Unavailable };
 
+// True if a visible window sits in front of the taskbar in z-order over
+// `strip` -- a menu, flyout or tooltip hanging down over it (e.g. the HUD's
+// own context menus, which open right on top of the taskbar). The capture
+// is a plain screen copy, so it would take that window's pixels as the
+// taskbar's and stretch them up the whole band.
+static bool IsTaskbarStripCovered(HWND taskbar, const RECT& strip) {
+    for (HWND w = GetWindow(taskbar, GW_HWNDPREV); w; w = GetWindow(w, GW_HWNDPREV)) {
+        if (!IsWindowVisible(w)) continue;
+        // Visible-but-cloaked: suspended UWP apps, windows on other virtual
+        // desktops -- present in the z-order, not on screen.
+        BOOL cloaked = FALSE;
+        DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+        if (cloaked) continue;
+        RECT r, overlap;
+        if (GetWindowRect(w, &r) && IntersectRect(&overlap, &strip, &r)) {
+            wchar_t cls[64] = {};
+            GetClassNameW(w, cls, 64);
+            LogDiag(L"backdrop: taskbar covered by hwnd=%p class=[%ls] -- deferring sample", w, cls);
+            return true;
+        }
+    }
+    return false;
+}
+
 // Box blur across columns (clamped at the ends), evening out any stray
 // pixel the sampling let through.
 static void SmoothColumns(std::vector<COLORREF>& columns) {
@@ -142,6 +167,8 @@ static SampleResult SampleTaskbar(const RECT& band, BackdropColors& out) {
         // Strip rows are indexed from the edge inward, whichever way up the
         // taskbar is.
         int y = atBottom ? tb.top : tb.bottom - stripDepth;
+        RECT strip = {band.left, y, band.right, y + stripDepth};
+        if (IsTaskbarStripCovered(taskbar, strip)) return SampleResult::Deferred;
         if (!CaptureScreenRect(band.left, y, bandWidth, stripDepth, pixels)) return SampleResult::Unavailable;
         auto rowFromEdge = [&](int i) { return atBottom ? i : stripDepth - 1 - i; };
         std::vector<COLORREF> samples(kSampleRows);
@@ -159,6 +186,8 @@ static SampleResult SampleTaskbar(const RECT& band, BackdropColors& out) {
         bool atLeft = tb.left <= band.left;
         int x = atLeft ? tb.right - stripDepth : tb.left;
         int height = tb.bottom - tb.top;
+        RECT strip = {x, tb.top, x + stripDepth, tb.bottom};
+        if (IsTaskbarStripCovered(taskbar, strip)) return SampleResult::Deferred;
         if (!CaptureScreenRect(x, tb.top, stripDepth, height, pixels)) return SampleResult::Unavailable;
         auto colFromEdge = [&](int i) { return atLeft ? stripDepth - 1 - i : i; };
         std::vector<COLORREF> fill, edge;

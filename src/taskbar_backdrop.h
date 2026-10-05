@@ -16,8 +16,9 @@
 //
 // Resampled when the backdrop is (re)shown, on any WM_SETTINGCHANGE (theme,
 // accent, wallpaper, ...) or display change, and every 30s as a safety
-// net -- but never while the cursor is over the taskbar, so a hover
-// highlight can't get baked in. When there's nothing to sample (auto-hide
+// net -- but never while the cursor is over the taskbar, or while another
+// window (a menu, flyout, tooltip) is drawn over the sampled rows, so
+// neither a hover highlight nor someone else's pixels get baked in. When there's nothing to sample (auto-hide
 // taskbar), it falls back to a plain dark or light color matching the
 // Windows theme.
 //
