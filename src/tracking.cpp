@@ -218,16 +218,44 @@ static std::wstring LastPathSegment(const std::wstring& path) {
 // comment), falling back to a same-name comparison against just the last
 // path segment when no path is on record, e.g. a plain folder VS Code has
 // never logged to workspaceStorage.
+//
+// A window with no folder open at all has nothing to match by folder, but
+// Claude Code started in one runs from the user's home directory (observed:
+// cwd=%USERPROFILE% for the VS Code extension in a bare "File > New
+// Window"), so such a window takes the sessions whose cwd is exactly that.
+// Exact rather than PathIsWithinFolder: plenty of real project folders live
+// under the home directory and belong to their own windows. Every no-folder
+// window matches the same sessions -- nothing on the session side says
+// which of several bare windows it runs in.
 static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<AiSessionStatus>& sessions) {
-    if (sessions.empty() || tw.folderName.empty()) return ClaudeStatus::None;
+    if (sessions.empty()) return ClaudeStatus::None;
 
-    std::wstring folderPath = ResolveFolderPath(tw.folderName, tw.repoName);
-    LogDiag(L"ai_status: matching window folderName=[%ls] resolvedFolderPath=[%ls] against %zu session(s)",
-            tw.folderName.c_str(), folderPath.c_str(), sessions.size());
+    std::wstring folderPath;
+    bool noFolderWindow = !tw.hasFolderOrRepoInTitle;
+    if (noFolderWindow) {
+        wchar_t buf[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) return ClaudeStatus::None;
+        folderPath = buf;
+    } else {
+        if (tw.folderName.empty()) return ClaudeStatus::None;
+        folderPath = ResolveFolderPath(tw.folderName, tw.repoName);
+    }
+    while (!folderPath.empty() && (folderPath.back() == L'\\' || folderPath.back() == L'/')) folderPath.pop_back();
+    LogDiag(L"ai_status: matching window folderName=[%ls] resolvedFolderPath=[%ls]%ls against %zu session(s)",
+            tw.folderName.c_str(), folderPath.c_str(), noFolderWindow ? L" (no folder: home dir)" : L"",
+            sessions.size());
     bool anyAttention = false, anyWorking = false, anyWaiting = false;
     for (const AiSessionStatus& s : sessions) {
-        bool matches = !folderPath.empty() ? PathIsWithinFolder(s.cwd, folderPath)
-                                            : _wcsicmp(LastPathSegment(s.cwd).c_str(), tw.folderName.c_str()) == 0;
+        bool matches;
+        if (noFolderWindow) {
+            std::wstring cwd = s.cwd;
+            while (!cwd.empty() && (cwd.back() == L'\\' || cwd.back() == L'/')) cwd.pop_back();
+            matches = !cwd.empty() && _wcsicmp(cwd.c_str(), folderPath.c_str()) == 0;
+        } else {
+            matches = !folderPath.empty() ? PathIsWithinFolder(s.cwd, folderPath)
+                                          : _wcsicmp(LastPathSegment(s.cwd).c_str(), tw.folderName.c_str()) == 0;
+        }
         LogDiag(L"ai_status:   session cwd=[%ls] status=[%ls] -> %ls", s.cwd.c_str(), s.status.c_str(),
                 matches ? L"MATCH" : L"no match");
         if (!matches) continue;

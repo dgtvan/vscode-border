@@ -406,7 +406,11 @@ few seconds), so nothing needs restarting for it to take effect. Each
 status file is matched to a tracked window by folder (a real absolute-path
 match when VS Code has recorded one, e.g. via `workspaceStorage`, falling
 back to a plain name comparison otherwise -- see `src/claude_provider.*`
-and `src/worktree_resolver.*`). Stale/abandoned status files are cleaned
+and `src/worktree_resolver.*`). A window with no folder open (`(no folder)`)
+takes the sessions whose cwd is exactly your home directory, which is where
+Claude Code starts in such a window. If several no-folder windows are open
+they all show the same status, because nothing in a session says which of them
+it runs in. Stale/abandoned status files are cleaned
 up automatically -- see "Known limitations" below for exactly how.
 
 ### Project list HUD position/size memory
