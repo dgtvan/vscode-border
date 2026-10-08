@@ -10,6 +10,10 @@
 # Writes one file per Claude Code session -- bin\claude_status\<session_id>.ini
 # -- read by src/claude_provider.cpp. One file per session (not one shared
 # file) means concurrent sessions never race on the same file.
+#
+# Design rule: the status written here always follows what Claude Code itself
+# reports for the session (idle vs. running), never our own idea of "busy".
+# See docs/ARCHITECTURE.md, "AI status: always follow what Claude Code reports".
 
 $ErrorActionPreference = "SilentlyContinue"
 
@@ -80,42 +84,19 @@ $status = switch ($data.hook_event_name) {
     "ElicitationResult" { "working" } # MCP prompt answered -- resuming
     "PermissionRequest" { "attention" } # blocked: waiting on an Allow/Deny decision
     "Elicitation" { "attention" }       # blocked: an MCP server is asking the user something
-    default { "waiting" } # SessionStart, Stop, StopFailure, SubagentStop -- see background_tasks below
+    default { "waiting" } # SessionStart, Stop, StopFailure, SubagentStop
 }
 
-# A turn can end while Claude is still due to carry on by itself: it started
-# background work (a subagent, a build, a "poll the PR until checks finish"
-# loop) and Claude Code will wake it up with the result, or it scheduled a
-# wakeup (ScheduleWakeup, /loop). Stop/StopFailure/SubagentStop's payload
-# lists both -- background_tasks and session_crons -- and either keeps the
-# session "working" rather than "waiting".
-#
-# This deliberately follows Claude Code's own rule for "is this session
-# still busy" -- its session runner (claude.exe 2.1.281, the "follow-up
-# hold" logic) -- and does not try to be smarter than it:
-#   - Any live background task counts, whatever it is. Claude Code tells
-#     Claude "you will be notified when it completes" for every one, a dev
-#     server included, and doesn't record whether Claude means to wait. So a
-#     dev server left running keeps the session "working" until it stops,
-#     exactly as the runner counts it.
-#   - Except "monitor" tasks (MCP/websocket monitors, including the artifact
-#     live-update watchers Claude Code starts by itself) and "teammate"
-#     tasks, which the runner leaves out.
-#   - A pending one-shot wakeup counts, as the runner holds the session busy
-#     until a ScheduleWakeup is due. A recurring cron never ends, so doesn't.
-#
-# When a task finishes or a wakeup fires, Claude runs a new turn that ends
-# in another Stop, which rewrites this with the updated lists.
-function Test-CountedBackgroundTask {
-    param($Task)
-    return $Task.status -in "running", "pending" -and $Task.type -notin "monitor", "teammate"
-}
-
-$countedBgTasks = @($data.background_tasks | Where-Object { $_ -and (Test-CountedBackgroundTask $_) })
+# Background work still running at Stop (background_tasks, session_crons in
+# the payload) does not keep the session "working". This mirrors what Claude
+# Code itself reports: its session state goes to idle the moment a turn ends,
+# whatever is still running in the background, and only goes back to running
+# when a task finishes or a wakeup fires and it starts a new turn -- checked
+# against claude.exe 2.1.292's session_state_changed events, for a command
+# Claude backgrounded and one the user backgrounded with Ctrl+B alike. That
+# new turn ends in another Stop, which rewrites this file. The lists are
+# still logged below.
 $pendingWakeups = @($data.session_crons | Where-Object { $_ -and -not $_.recurring })
-if ($status -eq "waiting" -and ($countedBgTasks.Count -gt 0 -or $pendingWakeups.Count -gt 0)) {
-    $status = "working"
-}
 
 if (-not (Test-Path $statusDir)) {
     New-Item -ItemType Directory -Path $statusDir -Force | Out-Null
@@ -398,10 +379,7 @@ if ($data.hook_event_name -eq "PermissionRequest") {
 $bgCount = if ($data.background_tasks) { $data.background_tasks.Count } else { 0 }
 $bgDetail = ""
 if ($bgCount -gt 0) {
-    $parts = $data.background_tasks | ForEach-Object {
-        $counted = if (Test-CountedBackgroundTask $_) { "counted" } else { "ignored" }
-        "$($_.id):$($_.status):$($_.type):$($counted):$($_.description)"
-    }
+    $parts = $data.background_tasks | ForEach-Object { "$($_.id):$($_.status):$($_.type):$($_.description)" }
     $bgDetail = " bgDetail=[" + ($parts -join "; ") + "]"
 }
 if ($pendingWakeups.Count -gt 0) {

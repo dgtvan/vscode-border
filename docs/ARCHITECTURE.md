@@ -188,6 +188,36 @@ every relevant WinEvent for a tracked window, plus the periodic rescan --
 so this doesn't introduce a new I/O cadence, just adds a bit of work to one
 that already exists.
 
+## AI status: always follow what Claude Code reports
+
+The AI status indicator mirrors Claude Code's own view of a session and
+never makes up its own idea of "busy". If Claude Code reports a session as
+active, the indicator shows Working. If it reports the session as idle, the
+indicator shows Waiting, even when something we might count as work (a
+background command, a subagent, a pending wakeup) is still around.
+
+Claude Code's own report is its `session_state_changed` events
+(`running` / `requires_action` / `idle`). Run `claude.exe` with
+`--output-format stream-json` and `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`
+to see them. The hooks only see a few points in that timeline, so
+`claude_status_hook.ps1` and `claude_provider.cpp` exist to bring the
+indicator back to the state Claude Code reports, never to add our own
+judgement on top.
+
+When the indicator looks wrong, first find out what Claude Code reports for
+that moment: reproduce the case headless and record its session-state
+events. Then make the indicator match. If Claude Code itself shows the
+session as active, the indicator is right.
+
+This rule came from a real mistake. A Stop with a running background task
+used to stay on Working, on the theory that Claude Code holds such sessions
+open. It doesn't: that came from the logic for cloud-hosted sessions, not
+the local ones the indicator watches. Checked against claude.exe 2.1.292, a
+local session goes idle the moment the turn ends, and goes active again
+(firing `UserPromptSubmit`) only when the task finishes and wakes Claude. A
+hung command that had been sent to the background left the indicator on
+Working forever, while Claude Code showed the session idle.
+
 ## Focus tracing: why every activation goes through one wrapper
 
 Reported symptom: "all the VS Code taskbar thumbnails are highlighted at

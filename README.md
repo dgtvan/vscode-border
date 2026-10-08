@@ -258,8 +258,7 @@ for an AI coding assistant running in that VS Code window's terminal(s):
 
 - **Working** -- amber, a small square chasing itself around an 8-position
   ring -- actively generating a response or running a tool (from
-  `UserPromptSubmit` until the turn's `Stop`/`StopFailure`/`SubagentStop`,
-  or longer while background work it started is still running -- see below).
+  `UserPromptSubmit` until the turn's `Stop`/`StopFailure`/`SubagentStop`).
 - **Attention** -- red, a single pulsing square -- blocked mid-turn on a
   permission prompt or an MCP server asking the user something. This is
   the state that most needs you to look at it.
@@ -267,26 +266,15 @@ for an AI coding assistant running in that VS Code window's terminal(s):
   ready for your next prompt.
 - No indicator at all if nothing's running there.
 
-A turn can end while Claude is still due to carry on by itself: it started
-background work (a subagent, a build, a "poll the PR until checks finish"
-loop) and Claude Code will wake it with the result, or it scheduled a
-wakeup (`ScheduleWakeup`, `/loop`). The `Stop`/`StopFailure`/`SubagentStop`
-payloads list both (`background_tasks`, `session_crons`), and either keeps
-the indicator on **Working**.
+The indicator always follows what Claude Code itself reports about the
+session -- see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#ai-status-always-follow-what-claude-code-reports).
 
-This follows Claude Code's own rule for "is this session still busy" (its
-session runner's "follow-up hold") and doesn't try to be smarter than it:
-
-- Any live background task counts, whatever it is. Claude Code doesn't
-  record whether Claude means to wait for a task, and neither does this. A
-  dev server left running keeps the indicator on Working until it stops,
-  just as the runner counts it.
-- Except monitors (including the artifact live-update watchers Claude Code
-  starts by itself) and teammates, which the runner leaves out.
-- A pending one-shot wakeup counts. A recurring one (a cron) doesn't, since
-  it never ends.
-
-Every task and whether it counted is logged in
+Background work still running when a turn ends (a backgrounded command, a
+subagent, a pending `ScheduleWakeup`) doesn't keep the indicator on
+**Working**. That's what Claude Code itself reports: the session goes idle
+as soon as the turn ends, and becomes active again only when the work
+finishes and Claude starts a new turn. The indicator follows that. The
+background tasks listed at each `Stop` are still logged in
 `bin\logs\claude_hook_events.log`.
 
 **Attention** can go stale on its own: there's no "permission granted, resuming" hook (unlike MCP
