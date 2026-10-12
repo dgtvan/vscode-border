@@ -773,6 +773,32 @@ std::vector<HWND> GetTrackedWindows() {
     return windows;
 }
 
+std::vector<TrackedWindowDiag> GetTrackedWindowDiagnostics() {
+    std::vector<TrackedWindowDiag> result;
+    result.reserve(g_tracked.size());
+    for (const auto& kv : g_tracked) {
+        const TrackedWindow& tw = kv.second;
+        TrackedWindowDiag d;
+        d.target = kv.first;
+        d.overlay = tw.overlay;
+        d.pid = tw.pid;
+        d.colorIndex = tw.colorIndex;
+        if (!g_config.palette.empty()) d.color = g_config.palette[tw.colorIndex % g_config.palette.size()];
+        d.lastPaintedWidth = tw.lastWidth;
+        d.lastPaintedHeight = tw.lastHeight;
+        d.lastKnownRect = tw.lastKnownRect;
+        d.loading = IsWindowLoading(tw, kv.first);
+        d.label = tw.label;
+        d.rawLabel = tw.rawLabel;
+        d.borderLabel = BorderLabel(tw);
+        d.branch = tw.branch;
+        d.folderName = tw.folderName;
+        d.repoName = tw.repoName;
+        result.push_back(d);
+    }
+    return result;
+}
+
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
     if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF || !hwnd) return;
 

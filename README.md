@@ -47,13 +47,27 @@ Start-Process bin\vscode_border.exe
 
 It runs in the background with a tray icon (right-click for **Close All
 Windows** / **Hide Borders and Hub** / **Reload Config** / **Open Config** /
-**Open Log Folder** / **Exit**). **Close All Windows** asks for confirmation, then
+**Open Log Folder** / **Capture Diagnostic Snapshot** / **Exit**). **Close All
+Windows** asks for confirmation, then
 closes every VS Code window (VS Code still prompts about unsaved changes).
 **Hide Borders and Hub** is a checkable toggle that quickly hides
 every border overlay and the project list HUD together; it isn't saved, so
 the next launch shows everything again (to turn one off for good, use its
 flag in `config.ini`, e.g. `show_project_list=false`). To launch it
 automatically at login, see [docs/AUTOSTART.md](docs/AUTOSTART.md).
+
+When a border is drawn wrong (often on a particular monitor setup) and you
+don't have time to dig in, pick **Capture Diagnostic Snapshot** *before*
+hiding the borders. About half a second later it saves
+`bin\logs\snapshots\snapshot_<timestamp>\` and shows a balloon (click it to
+open the folder). The folder holds a screenshot of the whole desktop in
+physical pixels (`screen.png`), a `report.txt` with every monitor's
+rect/work area/DPI scaling/display mode, the taskbars, this app's DPI
+awareness, and, for each tracked window, its window/DWM-frame/overlay rects
+both as the app sees them and physically, the border gap on each side, the
+z-order, and border-color pixel samples read from the screenshot (with
+anything covering the border called out). It also copies `config.ini` and
+the current session's log. Snapshots aren't pruned with the logs.
 
 If something unexpected happens during a run (e.g. a VS Code window's
 title doesn't match any recognized shape -- see [Getting the repo/branch
@@ -542,6 +556,7 @@ to pick up worktrees created after the app started.
 - `src/project_list_hud.*` -- interactive desktop project-list HUD: sorts/sizes/positions itself from the entries it's given, plus hover focus, click, move, and resize behavior.
 - `src/layered_rendering.*` -- shared alpha-blended text helpers for layered windows.
 - `src/tray_icon.*` -- tray icon warning-badge compositing.
+- `src/diagnostic_snapshot.*` -- tray menu's Capture Diagnostic Snapshot (screenshot + monitor/DPI/geometry report).
 - `src/vscode_cli.*` -- locates VS Code's `code`/`code-insiders` CLI shim; opens new VS Code windows and closes all of them (shared by the hub and the tray menu).
 - `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, border sync, and feeding the HUD its entries.
 - `src/resource.rc`, `assets/app.ico`, `assets/square-dashed.png` -- tray icon resource (`app.ico` is generated from the PNG; see [Credits](#credits)).

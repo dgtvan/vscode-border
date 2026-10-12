@@ -52,6 +52,30 @@ size_t TrackedWindowCount();
 // (e.g. for the tray icon's Close All Windows).
 std::vector<HWND> GetTrackedWindows();
 
+// Per-window state as this app last computed it, for the tray menu's
+// Capture Diagnostic Snapshot (see diagnostic_snapshot.h) -- the snapshot
+// compares this against what's actually on screen, so it needs the app's
+// own view (which color, which overlay, what size it last painted), not
+// just the HWND list GetTrackedWindows gives.
+struct TrackedWindowDiag {
+    HWND target = nullptr;
+    HWND overlay = nullptr;
+    DWORD pid = 0;
+    int colorIndex = 0;
+    COLORREF color = RGB(0, 0, 0);
+    int lastPaintedWidth = -1;
+    int lastPaintedHeight = -1;
+    RECT lastKnownRect = {};
+    bool loading = false;
+    std::wstring label;
+    std::wstring rawLabel;
+    std::wstring borderLabel;
+    std::wstring branch;
+    std::wstring folderName;
+    std::wstring repoName;
+};
+std::vector<TrackedWindowDiag> GetTrackedWindowDiagnostics();
+
 // Registered both globally (to discover new windows) and per-process (to
 // track location/destroy events for already-tracked windows).
 void CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG idObject, LONG idChild,

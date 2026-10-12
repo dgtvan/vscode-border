@@ -28,6 +28,7 @@
 //   project_list_hud.*  - the draggable/resizable project-list HUD window
 //   tray_icon.*         - tray icon warning-badge compositing
 //   focus_trace.*       - traces every focus-moving call + detects activation storms
+//   diagnostic_snapshot.* - tray > Capture Diagnostic Snapshot: screenshot + full geometry/DPI report
 //   ai_provider.*        - abstract interface an AI coding assistant integration implements
 //   claude_provider.*   - Claude Code's AiProvider implementation (hooks + status file reading)
 //   tracking.*          - tracked-window bookkeeping, WinEvent hooks, sync
@@ -40,6 +41,7 @@
 
 #include "ai_provider.h"
 #include "config.h"
+#include "diagnostic_snapshot.h"
 #include "focus_trace.h"
 #include "label_alias.h"
 #include "logger.h"
@@ -67,14 +69,23 @@ static const UINT ID_TRAY_OPEN_LOG_FOLDER = 3;
 static const UINT ID_TRAY_EXIT = 4;
 static const UINT ID_TRAY_TOGGLE_HIDDEN = 5;
 static const UINT ID_TRAY_CLOSE_ALL = 6;
+static const UINT ID_TRAY_CAPTURE_SNAPSHOT = 7;
 static const UINT_PTR TIMER_RESCAN = 1;
 // TIMER id 2 is kForegroundPollTimerId (tracking.cpp), started/stopped there.
+static const UINT_PTR TIMER_CAPTURE_SNAPSHOT = 3;
+// Long enough for the tray menu's fade-out to finish, so the menu itself
+// isn't baked into the snapshot's screenshot over whatever it was covering.
+static const UINT kSnapshotDelayMs = 400;
 static const int kTrayIconSize = 32; // upscaled from 16 so the warning badge/asterisk stays legible
 
 static NOTIFYICONDATAW g_nid = {};
 static HICON g_hIconNormal = nullptr;
 static HICON g_hIconWarning = nullptr; // lazily built the first time it's needed; cached after that
 static bool g_trayShowingWarning = false;
+// Folder of the last diagnostic snapshot while its "saved" balloon is up --
+// clicking that balloon opens it. Cleared when the balloon goes away, so a
+// click on any other balloon (e.g. the startup one) doesn't.
+static std::wstring g_snapshotBalloonDir;
 // Global (idProcess=0) hooks: only for the low-frequency events needed to
 // *discover* brand-new VS Code windows we don't know the PID of yet, plus
 // FOREGROUND (fires once per focus switch, desktop-wide either way, so a
@@ -148,6 +159,7 @@ static void ShowTrayMenu(HWND hwnd) {
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload Config");
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_CONFIG, L"Open Config");
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_LOG_FOLDER, L"Open Log Folder");
+    AppendMenuW(menu, MF_STRING, ID_TRAY_CAPTURE_SNAPSHOT, L"Capture Diagnostic Snapshot");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Exit");
     RequestForeground(hwnd, FocusTargetKind::OwnUi,
@@ -189,6 +201,39 @@ static void OpenLogFolderInExplorer() {
     }
 }
 
+static void OpenFolderInExplorer(const std::wstring& dir) {
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"\"" + dir + L"\"").c_str(), nullptr,
+                                     SW_SHOWNORMAL);
+    if ((INT_PTR)result <= 32) {
+        Log(L"ShellExecuteW(open folder) failed for %ls, code=%Id", dir.c_str(), (INT_PTR)result);
+    }
+}
+
+// See diagnostic_snapshot.h. Reports back with a balloon rather than by
+// opening Explorer: the point is to grab the evidence and get back to
+// work, not to be pulled into it -- the balloon is clickable for whoever
+// does want to look right away.
+static void CaptureSnapshotAndNotify() {
+    std::wstring dir = CaptureDiagnosticSnapshot();
+    UpdateTrayIconWarningState(); // a failed capture warns
+
+    NOTIFYICONDATAW balloon = g_nid;
+    balloon.uFlags = NIF_INFO;
+    balloon.dwInfoFlags = dir.empty() ? NIIF_WARNING : NIIF_INFO;
+    if (dir.empty()) {
+        wcscpy_s(balloon.szInfoTitle, L"Diagnostic snapshot failed");
+        wcscpy_s(balloon.szInfo, L"See the log (tray menu > Open Log Folder) for details.");
+    } else {
+        size_t slash = dir.find_last_of(L'\\');
+        std::wstring name = slash == std::wstring::npos ? dir : dir.substr(slash + 1);
+        wcscpy_s(balloon.szInfoTitle, L"Diagnostic snapshot saved");
+        _snwprintf_s(balloon.szInfo, ARRAYSIZE(balloon.szInfo), _TRUNCATE,
+                     L"logs\\snapshots\\%ls\nClick to open the folder.", name.c_str());
+    }
+    g_snapshotBalloonDir = dir;
+    Shell_NotifyIconW(NIM_MODIFY, &balloon);
+}
+
 static void CleanupAndQuit(HWND hwnd) {
     CleanupAllTracked();
 
@@ -207,6 +252,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_APP_TRAYICON:
             if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
                 ShowTrayMenu(hwnd);
+            } else if (lParam == NIN_BALLOONUSERCLICK) {
+                if (!g_snapshotBalloonDir.empty()) OpenFolderInExplorer(g_snapshotBalloonDir);
+                g_snapshotBalloonDir.clear();
+            } else if (lParam == NIN_BALLOONTIMEOUT || lParam == NIN_BALLOONHIDE) {
+                g_snapshotBalloonDir.clear();
             }
             return 0;
         case WM_COMMAND:
@@ -220,6 +270,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 OpenLogFolderInExplorer();
             } else if (LOWORD(wParam) == ID_TRAY_TOGGLE_HIDDEN) {
                 SetOverlaysHidden(!AreOverlaysHidden());
+            } else if (LOWORD(wParam) == ID_TRAY_CAPTURE_SNAPSHOT) {
+                SetTimer(hwnd, TIMER_CAPTURE_SNAPSHOT, kSnapshotDelayMs, nullptr);
             } else if (LOWORD(wParam) == ID_TRAY_CLOSE_ALL) {
                 ConfirmAndCloseVSCodeWindows(hwnd, GetTrackedWindows(), L"tray");
             }
@@ -230,6 +282,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 FlushLogBuffer(); // periodic, off the hot event path -- see LogFast
             } else if (wParam == kForegroundPollTimerId) {
                 PollForegroundChange();
+            } else if (wParam == TIMER_CAPTURE_SNAPSHOT) {
+                KillTimer(hwnd, TIMER_CAPTURE_SNAPSHOT); // one-shot
+                CaptureSnapshotAndNotify();
             }
             UpdateTrayIconWarningState(); // cheap no-op unless HasWarnings() just changed
             return 0;
