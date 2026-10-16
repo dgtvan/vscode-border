@@ -2,7 +2,7 @@
 
 #include <windows.h>
 
-// A strip that fills the project list HUD's reserved band in fixed mode
+// A strip that fills the project list HUD's reserved band
 // (see SetProjectListHudDocked) and is painted to look like a continuation
 // of the taskbar -- so the band reads as part of the taskbar rather than a
 // gap showing the wallpaper. Instead of reconstructing the taskbar's look

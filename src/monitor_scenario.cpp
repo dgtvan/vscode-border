@@ -57,7 +57,6 @@ std::wstring GetStateFilePath() {
 
 struct PlacementRecord {
     int x = 0;
-    int y = 0;
     int width = 0;
 };
 
@@ -86,7 +85,6 @@ std::map<std::wstring, PlacementRecord> LoadAll() {
         std::string val = line.substr(eq + 1);
         PlacementRecord& rec = result[WidenAscii(currentSection)];
         if (key == "x") rec.x = atoi(val.c_str());
-        else if (key == "y") rec.y = atoi(val.c_str());
         else if (key == "width") rec.width = atoi(val.c_str());
     }
     return result;
@@ -97,7 +95,6 @@ void SaveAll(const std::map<std::wstring, PlacementRecord>& all) {
     for (const auto& entry : all) {
         out += "[" + NarrowAscii(entry.first) + "]\n";
         out += "x=" + std::to_string(entry.second.x) + "\n";
-        out += "y=" + std::to_string(entry.second.y) + "\n";
         out += "width=" + std::to_string(entry.second.width) + "\n";
     }
     WriteFileBytes(GetStateFilePath(), out);
@@ -125,16 +122,14 @@ SavedHudPlacement LoadHudPlacement(const std::wstring& scenarioKey) {
     if (it == all.end()) return result;
     result.found = true;
     result.x = it->second.x;
-    result.y = it->second.y;
     result.width = it->second.width;
     return result;
 }
 
-void SaveHudPlacement(const std::wstring& scenarioKey, int x, int y, int width) {
+void SaveHudPlacement(const std::wstring& scenarioKey, int x, int width) {
     std::map<std::wstring, PlacementRecord> all = LoadAll();
     PlacementRecord& rec = all[scenarioKey];
     rec.x = x;
-    rec.y = y;
     rec.width = width;
     SaveAll(all);
 }

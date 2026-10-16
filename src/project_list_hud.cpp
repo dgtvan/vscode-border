@@ -27,17 +27,16 @@ static const int kProjectListEdgeGrip = 14; // wide enough to reliably land a Ct
                                              // DragMove instead (no visible feedback that resizing
                                              // didn't "take"), leaving manualWidth false so the width
                                              // keeps auto-fitting to content indefinitely
-static const int kProjectListMinWidth = 130; // manual (drag-resize) lower bound, both styles -- no upper
-                                              // bound: the user can size the HUD as wide as they want
+static const int kProjectListMinWidth = 130; // manual (drag-resize) lower bound -- no upper bound: the
+                                              // user can size the HUD as wide as the band
 static const int kProjectListAutoMaxWidth = 360; // auto-measured upper bound for the shared item/column
                                                   // width -- narrower so a single long label can't blow up
                                                   // the HUD when the user hasn't sized it by hand
 static const int kProjectListMeasurePaddingX = 32;
 static const int kReorderDragThreshold = 4; // pixels of movement before a plain left-click-on-an-item
                                              // commits to a reorder-drag instead of a click-to-activate
-static const int kProjectListBottomMargin = 24;
 static const int kProjectListMinRowHeight = 18;
-static const UINT kAppBarCallbackMsg = WM_APP + 1; // shell -> HUD AppBar notifications (ABN_*), docked mode only
+static const UINT kAppBarCallbackMsg = WM_APP + 1; // shell -> HUD AppBar notifications (ABN_*)
 static const UINT_PTR kClaudePulseTimerId = 1; // repaints while >=1 item is ClaudeStatus::Working or
                                                 // loading, to animate its indicator -- started/stopped
                                                 // on demand, see UpdateProjectListHud
@@ -59,7 +58,6 @@ static HFONT CreateHudFont(int fontSize, int weight) {
 struct ProjectListHudState {
     std::vector<ProjectListHudEntry> entries;
     std::vector<RECT> itemRects; // per-entry rect within the HUD's own client area (local coords)
-    bool horizontal = false;
     int x = 0;
     int y = 0;
     int width = 0;
@@ -89,10 +87,10 @@ struct ProjectListHudState {
     bool clickActivates = false; // WS_EX_NOACTIVATE temporarily lifted -- see SetHudClickActivates
     bool manualPosition = false;
     bool manualWidth = false;
-    int manualItemWidth = 0; // horizontal style only: the user's chosen per-item width, independent of
+    int manualItemWidth = 0; // the user's chosen per-item width, independent of
                               // how many items are currently shown -- state->width (the whole strip) is
                               // re-derived from this every time entries.size() changes, so item count
-                              // never changes how wide each item looks (see RebuildHorizontalItemRects)
+                              // never changes how wide each item looks (see RebuildItemRects)
     enum DragMode { DragNone, DragMove, DragResizeLeft, DragResizeRight, DragReorder } dragMode = DragNone;
     POINT dragStart = {0, 0};
     RECT dragStartRect = {0, 0, 0, 0};
@@ -119,16 +117,17 @@ struct ProjectListHudState {
                                    // UpdateProjectListHud's guard for why this (and editIndex >= 0)
                                    // needs to suppress resyncs while set
     bool pulseTimerActive = false; // mirrors whether kClaudePulseTimerId is currently running
-    bool docked = false; // fixed mode: registered as a bottom-edge AppBar -- see SetProjectListHudDocked
+    bool docked = false; // registered as a bottom-edge AppBar, i.e. the hub is on -- see SetProjectListHudDocked
     int dockBandHeight = 0;
     RECT dockRect = {}; // the reserved band (screen coords) the shell granted, valid while docked. Spans
                         // the whole monitor width; the HUD itself sits somewhere inside it.
-    bool fullscreenAppOpen = false; // docked only: the shell reported a fullscreen app (ABN_FULLSCREENAPP),
+    bool fullscreenAppOpen = false; // the shell reported a fullscreen app (ABN_FULLSCREENAPP),
                                      // so the HUD stays hidden instead of painting over it
-    bool matchTaskbar = false; // docked only: paint the rest of the band like the taskbar (see backdrop)
+    bool matchTaskbar = false; // paint the rest of the band like the taskbar (see backdrop)
     HWND backdrop = nullptr;   // fills the band behind the HUD -- see taskbar_backdrop.h
     bool visibleBeforeFullscreen = false; // whether to bring the HUD back once that fullscreen app closes --
                                            // it may have been hidden for its own reasons (no windows, etc.)
+    bool appBarFailureLogged = false; // see SetProjectListHudDocked -- retried every sync, warned about once
 };
 
 static int ClampInt(int value, int minValue, int maxValue) {
@@ -157,7 +156,7 @@ static int ActionButtonsRowWidth(const ProjectListHudState* state) {
     return count > 0 ? count * state->rowHeight + (count - 1) * kProjectListGap : 0;
 }
 
-// Horizontal style: space the action buttons take at the end of the strip,
+// Space the action buttons take at the end of the strip,
 // including the gap separating them from the last entry.
 static int ActionButtonsReserve(const ProjectListHudState* state) {
     return ActionButtonCount(state) > 0 ? ActionButtonsRowWidth(state) + kProjectListGap : 0;
@@ -187,23 +186,16 @@ static int ProjectListHitTest(const ProjectListHudState* state, int x, int y) {
 }
 
 // Like ProjectListHitTest, but for choosing a reorder-drop target during an
-// active drag: ignores the cross-axis coordinate entirely (e.g. how far
-// above/below a horizontal strip the ghost has been dragged) and maps
-// purely by position along the strip's own axis, clamped to the first/last
+// active drag: ignores the vertical coordinate entirely (how far above or
+// below the strip the ghost has been dragged) and maps purely by position
+// along the strip, clamped to the first/last
 // slot past either end. This lets a middle slot still be targeted while
 // dragging far outside the strip's bounds, not just the two end slots.
-static int ProjectListDragCandidate(const ProjectListHudState* state, int x, int y) {
+static int ProjectListDragCandidate(const ProjectListHudState* state, int x) {
     if (!state || state->itemRects.empty()) return -1;
-    if (state->horizontal) {
-        if (x < state->itemRects.front().left) return 0;
-        for (size_t i = 0; i < state->itemRects.size(); i++) {
-            if (x < state->itemRects[i].right) return (int)i;
-        }
-    } else {
-        if (y < state->itemRects.front().top) return 0;
-        for (size_t i = 0; i < state->itemRects.size(); i++) {
-            if (y < state->itemRects[i].bottom) return (int)i;
-        }
+    if (x < state->itemRects.front().left) return 0;
+    for (size_t i = 0; i < state->itemRects.size(); i++) {
+        if (x < state->itemRects[i].right) return (int)i;
     }
     return (int)state->itemRects.size() - 1;
 }
@@ -247,30 +239,11 @@ static ProjectListHudState::DragMode ProjectListDragModeForPoint(const ProjectLi
     return ProjectListHudState::DragMove;
 }
 
-// Recomputes vertical-style item rects from state->width/rowHeight/entries
-// -- cheap (no GDI/text-measurement calls), so it's safe to call on every
-// mouse-move frame of an interactive resize-drag.
-static void RebuildVerticalItemRects(ProjectListHudState* state) {
-    state->itemRects.assign(state->entries.size(), RECT{});
-    for (size_t i = 0; i < state->entries.size(); i++) {
-        int y = (int)i * (state->rowHeight + kProjectListGap);
-        state->itemRects[i] = {0, y, state->width, y + state->rowHeight};
-    }
-    // One row below the list, the buttons side by side from the left.
-    int size = state->rowHeight;
-    int y = (int)state->entries.size() * (state->rowHeight + kProjectListGap);
-    for (int k = 0; k < ActionButtonCount(state); k++) {
-        int x = k * (size + kProjectListGap);
-        state->actionButtonRects[k] = {x, y, x + size, y + size};
-    }
-}
-
 // Divides state->width evenly across items, same width for every one
-// regardless of label length (long labels just ellipsize) -- the horizontal
-// analog of RebuildVerticalItemRects's shared column width. Cheap (no
+// regardless of label length (long labels just ellipsize). Cheap (no
 // GDI/text-measurement calls), so it's safe to call on every mouse-move
 // frame of an interactive resize-drag.
-static void RebuildHorizontalItemRects(ProjectListHudState* state) {
+static void RebuildItemRects(ProjectListHudState* state) {
     size_t n = state->entries.size();
     state->itemRects.assign(n, RECT{});
 
@@ -381,16 +354,13 @@ static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
 // sync already uses a remembered placement, if any) and on every
 // WM_DISPLAYCHANGE. Returns true if the scenario actually changed.
 //
-// The saved "width" always means *per-item* width -- for the vertical
-// style that's the same thing as the whole strip's width (one shared
-// column), but for horizontal it's deliberately not the whole strip's
-// width, so restoring it doesn't depend on how many windows happen to be
-// tracked at that moment (see manualItemWidth's comment).
-// Fixed (docked) mode remembers its own placement, separately from free
-// mode's, so switching modes back and forth doesn't make either one forget
-// where the user put it.
+// The saved "width" means *per-item* width, not the whole strip's, so
+// restoring it doesn't depend on how many windows happen to be tracked at
+// that moment (see manualItemWidth's comment). Saved under the scenario key
+// plus "|docked": the suffix dates from when the hub also had a free-floating
+// mode with placements of its own, and is kept so existing ones still load.
 static std::wstring PlacementKey(const ProjectListHudState* state) {
-    return state->docked ? state->scenarioKey + L"|docked" : state->scenarioKey;
+    return state->scenarioKey + L"|docked";
 }
 
 static void LoadPlacementForCurrentKey(ProjectListHudState* state) {
@@ -399,16 +369,11 @@ static void LoadPlacementForCurrentKey(ProjectListHudState* state) {
     state->manualWidth = saved.found;
     if (saved.found) {
         state->x = saved.x;
-        state->y = saved.y;
-        if (state->horizontal) {
-            state->manualItemWidth = std::max(1, saved.width);
-            size_t n = state->entries.size();
-            state->width = (n > 0 ? (int)n * state->manualItemWidth + (int)(n - 1) * kProjectListGap
-                                   : state->manualItemWidth) +
-                           ActionButtonsReserve(state);
-        } else {
-            state->width = std::max(saved.width, kProjectListMinWidth);
-        }
+        state->manualItemWidth = std::max(1, saved.width);
+        size_t n = state->entries.size();
+        state->width = (n > 0 ? (int)n * state->manualItemWidth + (int)(n - 1) * kProjectListGap
+                               : state->manualItemWidth) +
+                       ActionButtonsReserve(state);
     }
 }
 
@@ -423,7 +388,7 @@ static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
 // Fits state->x/y/width into the reserved band: y is pinned to the band's
 // bottom (the HUD can only slide sideways), the width is capped at the band's, and
 // x is either the remembered one clamped into the band or, if never placed
-// by hand, right-aligned -- the same corner free mode defaults to.
+// by hand, right-aligned.
 static void FitIntoDock(ProjectListHudState* state) {
     const RECT& d = state->dockRect;
     state->width = std::min(state->width, (int)(d.right - d.left));
@@ -476,8 +441,7 @@ static void RefreshDockRect(HWND hud, ProjectListHudState* state) {
 static void RelayoutDocked(HWND hud, ProjectListHudState* state) {
     if (!state->docked || state->entries.empty()) return;
     FitIntoDock(state);
-    if (state->horizontal) RebuildHorizontalItemRects(state);
-    else RebuildVerticalItemRects(state);
+    RebuildItemRects(state);
     if (IsWindowVisible(hud)) {
         RenderProjectListHud(hud, state);
         PositionProjectListHud(hud, state);
@@ -977,10 +941,7 @@ static void EndReorderDrag(HWND hwnd, ProjectListHudState* state, int mouseX, in
 static void EndMoveResizeDrag(HWND hwnd, ProjectListHudState* state, int mouseX, int mouseY) {
     state->dragMode = ProjectListHudState::DragNone;
     if (GetCapture() == hwnd) ReleaseCapture();
-    if (state->manualPosition) {
-        int savedWidth = state->horizontal ? state->manualItemWidth : state->width;
-        SaveHudPlacement(PlacementKey(state), state->x, state->y, savedWidth);
-    }
+    if (state->manualPosition) SaveHudPlacement(PlacementKey(state), state->x, state->manualItemWidth);
     SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, mouseX, mouseY)));
 }
 
@@ -1044,7 +1005,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
 
             if (state->dragMode == ProjectListHudState::DragReorder) {
                 state->reorderCursorClient = {mouseX, mouseY};
-                int candidate = ProjectListDragCandidate(state, mouseX, mouseY);
+                int candidate = ProjectListDragCandidate(state, mouseX);
                 // Confine the drop target to the dragged item's own zone
                 // (favourite vs. regular) so a drag can reorder within
                 // either group but can never cross the boundary -- that's
@@ -1059,8 +1020,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     state->entries.erase(state->entries.begin() + state->reorderIndex);
                     state->entries.insert(state->entries.begin() + candidate, dragged);
                     state->reorderIndex = candidate;
-                    if (state->horizontal) RebuildHorizontalItemRects(state);
-                    else RebuildVerticalItemRects(state);
+                    RebuildItemRects(state);
                     RenderProjectListHud(hwnd, state); // only repaint the (expensive, full-bitmap) main
                                                         // grid when the arrangement actually changed
                 }
@@ -1074,66 +1034,42 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             }
 
             if (state->dragMode != ProjectListHudState::DragNone) {
+                // Pinned to the band: sideways only, never out of it.
                 POINT pt;
                 GetCursorPos(&pt);
                 int dx = pt.x - state->dragStart.x;
-                int dy = pt.y - state->dragStart.y;
                 int left = state->dragStartRect.left;
-                int top = state->dragStartRect.top;
                 int right = state->dragStartRect.right;
-                int bottom = state->dragStartRect.bottom;
-
+                const RECT& d = state->dockRect;
+                state->manualPosition = true;
                 if (state->dragMode == ProjectListHudState::DragMove) {
-                    left += dx;
-                    top += dy;
-                    right += dx;
-                    bottom += dy;
-                    state->manualPosition = true;
-                } else if (state->dragMode == ProjectListHudState::DragResizeLeft) {
-                    left = std::min(left + dx, right - kProjectListMinWidth);
-                    state->manualPosition = true;
-                    state->manualWidth = true;
-                } else if (state->dragMode == ProjectListHudState::DragResizeRight) {
-                    right = std::max(right + dx, left + kProjectListMinWidth);
-                    state->manualPosition = true;
-                    state->manualWidth = true;
-                }
-
-                if (state->docked) {
-                    // Pinned to the band: sideways only, never out of it.
-                    const RECT& d = state->dockRect;
-                    top = state->dragStartRect.top;
-                    bottom = state->dragStartRect.bottom;
-                    if (state->dragMode == ProjectListHudState::DragMove) {
-                        int w = right - left;
-                        left = ClampInt(left, d.left, d.right - w);
-                        right = left + w;
+                    int w = right - left;
+                    left = ClampInt(left + dx, d.left, d.right - w);
+                    right = left + w;
+                } else {
+                    if (state->dragMode == ProjectListHudState::DragResizeLeft) {
+                        left = std::max(std::min(left + dx, right - kProjectListMinWidth), (int)d.left);
                     } else {
-                        left = std::max(left, (int)d.left);
-                        right = std::min(right, (int)d.right);
+                        right = std::min(std::max(right + dx, left + kProjectListMinWidth), (int)d.right);
                     }
+                    state->manualWidth = true;
                 }
 
                 int newWidth = right - left;
                 bool sizeChanged = newWidth != state->width;
                 state->x = left;
-                state->y = top;
                 state->width = newWidth;
-                state->height = bottom - top;
-                if (state->horizontal) {
-                    // Cache what per-item width this drag corresponds to
-                    // *right now* (entries.size() is fixed for the duration
-                    // of a single drag) -- this, not state->width, is what
-                    // gets remembered on WM_LBUTTONUP.
-                    size_t n = state->entries.size();
-                    int buttonReserve = ActionButtonsReserve(state);
-                    state->manualItemWidth =
-                        n > 0 ? std::max(1, (newWidth - buttonReserve - (int)(n - 1) * kProjectListGap) / (int)n)
-                              : newWidth;
-                }
+                // Cache what per-item width this drag corresponds to *right
+                // now* (entries.size() is fixed for the duration of a single
+                // drag) -- this, not state->width, is what gets remembered on
+                // WM_LBUTTONUP.
+                size_t n = state->entries.size();
+                int buttonReserve = ActionButtonsReserve(state);
+                state->manualItemWidth =
+                    n > 0 ? std::max(1, (newWidth - buttonReserve - (int)(n - 1) * kProjectListGap) / (int)n)
+                          : newWidth;
                 if (sizeChanged) {
-                    if (state->horizontal) RebuildHorizontalItemRects(state);
-                    else RebuildVerticalItemRects(state);
+                    RebuildItemRects(state);
                     RenderProjectListHud(hwnd, state);
                 }
                 PositionProjectListHud(hwnd, state);
@@ -1185,9 +1121,8 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             // WM_MOUSEMOVE's promotion check) -- so for now just remember
             // which item (if any) was under the cursor, and where, without
             // committing to anything yet. Ctrl+left-click instead starts a
-            // move/resize drag immediately, mirroring the vertical style's
-            // old right-click-drag gesture but freeing up plain right-click
-            // for the context menu below.
+            // slide/resize drag immediately (plain right-click being the
+            // context menu, see WM_RBUTTONUP).
             if (state && (GetKeyState(VK_CONTROL) & 0x8000)) {
                 state->dragMode = ProjectListDragModeForPoint(state, GET_X_LPARAM(lParam));
                 GetCursorPos(&state->dragStart);
@@ -1261,25 +1196,13 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             }
             return 0;
         case WM_DISPLAYCHANGE:
-            if (state && state->docked) {
+            if (!state) return 0;
+            ApplyScenarioForCurrentMonitors(state);
+            if (state->docked) {
                 // The shell also sends ABN_POSCHANGED for this, but the
                 // band's monitor may have changed size under us either way.
-                ApplyScenarioForCurrentMonitors(state);
                 RefreshDockRect(hwnd, state);
                 RelayoutDocked(hwnd, state);
-                return 0;
-            }
-            if (state && ApplyScenarioForCurrentMonitors(state) && state->manualPosition) {
-                // Only need to force an immediate refresh when we just
-                // snapped to a remembered placement -- if this scenario has
-                // no saved placement, manualPosition/manualWidth are now
-                // false and the next regular UpdateProjectListHud call
-                // (already running periodically) will recompute the default
-                // auto-placement on its own.
-                if (state->horizontal) RebuildHorizontalItemRects(state);
-                else RebuildVerticalItemRects(state);
-                RenderProjectListHud(hwnd, state);
-                PositionProjectListHud(hwnd, state);
             }
             return 0;
         case WM_TIMER:
@@ -1413,7 +1336,7 @@ static void RegisterProjectListGhostClass(HINSTANCE hInstance) {
     registered = true;
 }
 
-HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal) {
+HWND CreateProjectListHud(HINSTANCE hInstance) {
     RegisterProjectListHudClass(hInstance);
     HWND hwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -1421,8 +1344,6 @@ HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal) {
         0, 0, 1, 1, nullptr, nullptr, hInstance, nullptr);
     if (!hwnd) return nullptr;
     ProjectListHudState* state = new ProjectListHudState();
-    state->horizontal = horizontal; // must be right before ApplyScenarioForCurrentMonitors below, since
-                                     // it decides whether a saved width means "per-item" or "whole strip"
     state->manualOrder = LoadItemOrder();
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
     // Establishes the initial scenarioKey and, if this monitor scenario has
@@ -2038,7 +1959,7 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTas
     // below it, the way the taskbar's own icons sit below its border.
     int bandHeight = std::max(kProjectListMinRowHeight, rowHeight) + (matchTaskbar ? 1 : 0);
     if (docked == state->docked && (!docked || bandHeight == state->dockBandHeight)) {
-        if (matchTaskbar != state->matchTaskbar) { // only reachable while undocked
+        if (matchTaskbar != state->matchTaskbar) { // only reachable while the hub is off
             state->matchTaskbar = matchTaskbar;
             SyncBackdrop(hud, state);
         }
@@ -2048,9 +1969,13 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTas
 
     bool modeChanged = docked != state->docked;
     if (docked && modeChanged && !RegisterAppBar(hud)) {
-        LogWarn(L"hud: couldn't register as an AppBar -- staying in free position mode");
+        // Without the band there's nowhere to put the hub -- it stays
+        // hidden (see UpdateProjectListHud), and the next sync tries again.
+        if (!state->appBarFailureLogged) LogWarn(L"hud: couldn't register as an AppBar -- hub hidden until it can");
+        state->appBarFailureLogged = true;
         return;
     }
+    state->appBarFailureLogged = false;
     if (!docked) {
         UnregisterAppBar(hud);
         state->fullscreenAppOpen = false;
@@ -2061,7 +1986,7 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTas
     state->dockBandHeight = bandHeight;
     if (docked) RefreshDockRect(hud, state);
     if (modeChanged) {
-        Log(L"hud: position mode -> %ls", docked ? L"fixed" : L"free");
+        Log(L"hud: band %ls", docked ? L"reserved" : L"released");
         LoadPlacementForCurrentKey(state);
     }
     RelayoutDocked(hud, state);
@@ -2133,6 +2058,12 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     if (state->contextMenuOpen || state->editIndex >= 0 || state->dragMode != ProjectListHudState::DragNone) {
         return;
     }
+    // No reserved band (the AppBar couldn't be registered -- see
+    // SetProjectListHudDocked): nowhere to put the hub.
+    if (!state->docked) {
+        ShowWindow(hud, SW_HIDE);
+        return;
+    }
 
     std::vector<ProjectListHudEntry> sorted = entries;
     std::sort(sorted.begin(), sorted.end(), [](const ProjectListHudEntry& a, const ProjectListHudEntry& b) {
@@ -2178,75 +2109,31 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     int rowHeight = std::max(kProjectListMinRowHeight, style.rowHeight);
     state->rowHeight = rowHeight;
     state->entries = sorted;
-    if (state->horizontal != style.horizontal) {
-        // A manually-set size from one style doesn't translate to the
-        // other -- horizontal's per-item width and vertical's shared
-        // column width aren't the same concept, so reusing either one
-        // as-is after a style switch (e.g. via config reload) would size
-        // things nonsensically. Position stays valid either way, just the
-        // width falls back to auto-fit until the user resizes again.
-        state->manualWidth = false;
-        state->manualItemWidth = 0;
-    }
-    state->horizontal = style.horizontal;
     state->showNewWindowButton = style.showNewWindowButton;
     state->newWindowButtonColor = style.newWindowButtonColor;
     int buttonReserve = ActionButtonsReserve(state); // after entries/rowHeight/showNewWindowButton are set
     size_t n = sorted.size();
-    int totalHeight;
 
-    if (style.horizontal) {
-        // Every item shares one width (like MeasureRequiredWidth's shared
-        // column width for the vertical style), sized to fit the widest
-        // label when not manually resized. When manually resized, reuse the
-        // remembered per-item width (manualItemWidth) rather than whatever
-        // state->width happened to be -- state->width is a function of both
-        // that and the current entry count, so re-deriving it here is what
-        // keeps every item the same width no matter how many windows are
-        // currently tracked. The action buttons, when shown, get fixed
-        // square slots on top of that (see RebuildHorizontalItemRects).
-        int itemWidth = !state->manualWidth ? MeasureRequiredWidth(sorted, style.fontSize)
-                                             : std::max(1, state->manualItemWidth);
-        // With no entries the new-window button (the only one shown then,
-        // see ActionButtonCount) is the whole hub: just its square,
-        // without the gap buttonReserve carries to separate it from the
-        // last item there is no longer any of.
-        state->width = n > 0 ? (int)n * itemWidth + (int)(n - 1) * kProjectListGap + buttonReserve
-                             : std::max(0, buttonReserve - kProjectListGap);
-        totalHeight = rowHeight;
-    } else {
-        if (n == 0) {
-            // Same as horizontal's zero-entry case: the shared column width
-            // measures nothing when there's nothing to measure, so fall
-            // back to the button's own square rather than leaving a wide
-            // strip of empty hub next to it.
-            state->width = rowHeight;
-        } else if (!state->manualWidth) {
-            state->width = MeasureRequiredWidth(sorted, style.fontSize);
-        } else {
-            state->width = std::max(state->width, kProjectListMinWidth);
-        }
-        // The action buttons share one row below the list (see
-        // RebuildVerticalItemRects), so the column must be at least that
-        // row's width, and the list only grows by one row for them.
-        state->width = std::max(state->width, ActionButtonsRowWidth(state));
-        int rowReserve = ActionButtonCount(state) > 0 ? rowHeight + kProjectListGap : 0;
-        totalHeight = n > 0 ? (int)n * rowHeight + ((int)n - 1) * kProjectListGap + rowReserve
-                            : std::max(0, rowReserve - kProjectListGap);
-    }
-    state->height = totalHeight;
-
-    if (state->docked) {
-        FitIntoDock(state);
-    } else if (!state->manualPosition) {
-        RECT workArea = {};
-        SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
-        state->x = workArea.right - state->width;
-        state->y = workArea.bottom - state->height - kProjectListBottomMargin;
-    }
-    // After the placement above, since docking can cap the width.
-    if (style.horizontal) RebuildHorizontalItemRects(state);
-    else RebuildVerticalItemRects(state);
+    // Every item shares one width, sized to fit the widest label when not
+    // manually resized. When manually resized, reuse the remembered per-item
+    // width (manualItemWidth) rather than whatever state->width happened to
+    // be -- state->width is a function of both that and the current entry
+    // count, so re-deriving it here is what keeps every item the same width
+    // no matter how many windows are currently tracked. The action buttons,
+    // when shown, get fixed square slots on top of that (see
+    // RebuildItemRects).
+    int itemWidth = !state->manualWidth ? MeasureRequiredWidth(sorted, style.fontSize)
+                                         : std::max(1, state->manualItemWidth);
+    // With no entries the new-window button (the only one shown then, see
+    // ActionButtonCount) is the whole hub: just its square, without the gap
+    // buttonReserve carries to separate it from the last item there is no
+    // longer any of.
+    state->width = n > 0 ? (int)n * itemWidth + (int)(n - 1) * kProjectListGap + buttonReserve
+                         : std::max(0, buttonReserve - kProjectListGap);
+    state->height = rowHeight;
+    FitIntoDock(state);
+    // After FitIntoDock, since the band can cap the width.
+    RebuildItemRects(state);
 
     state->fontSize = style.fontSize;
     state->labelTextColorAuto = style.labelTextColorAuto;

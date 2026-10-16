@@ -17,8 +17,7 @@ std::wstring GetMonitorScenarioKey();
 struct SavedHudPlacement {
     bool found = false;
     int x = 0;
-    int y = 0;
-    int width = 0;
+    int width = 0; // per item
 };
 
 // Looks up a previously-saved project-list-HUD placement for `scenarioKey`
@@ -26,6 +25,6 @@ struct SavedHudPlacement {
 // been saved before.
 SavedHudPlacement LoadHudPlacement(const std::wstring& scenarioKey);
 
-// Persists x/y/width for `scenarioKey`, overwriting any previous entry for
+// Persists x/width for `scenarioKey`, overwriting any previous entry for
 // that key. Stored in project_list_hud_positions.ini next to config.ini.
-void SaveHudPlacement(const std::wstring& scenarioKey, int x, int y, int width);
+void SaveHudPlacement(const std::wstring& scenarioKey, int x, int width);

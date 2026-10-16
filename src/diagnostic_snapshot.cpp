@@ -299,8 +299,8 @@ void WriteConfigSummary(Report& rep) {
              g_config.rescanIntervalMs);
     rep.Line(L"show_label=%d label_height=%d label_font_size=%d", g_config.showLabel, g_config.labelHeight,
              g_config.labelFontSize);
-    rep.Line(L"show_project_list=%d horizontal=%d fixed=%d fixed_match_taskbar=%d", g_config.showProjectList,
-             g_config.projectListHorizontal, g_config.projectListFixed, g_config.projectListFixedMatchTaskbar);
+    rep.Line(L"show_project_list=%d fixed_match_taskbar=%d", g_config.showProjectList,
+             g_config.projectListFixedMatchTaskbar);
     rep.Line(L"verbose_logging=%d palette entries=%zu", g_config.verboseLogging, g_config.palette.size());
 }
 

@@ -42,7 +42,6 @@ struct ProjectListHudEntry {
 };
 
 struct ProjectListHudStyle {
-    bool horizontal = true; // true = single horizontal strip, false = vertical list
     bool manualOrder = false; // true = user can drag items to reorder (see project_list_order.h);
                               // false = always sorted by window left edge
     int rowHeight = 18;
@@ -74,28 +73,24 @@ struct ProjectListHudStyle {
     COLORREF newWindowButtonColor = RGB(0, 0, 0);
 };
 
-// `horizontal` is the style to start with (see ProjectListHudStyle) --
-// needed up front because it's also used to interpret any placement
-// remembered for the current monitor scenario before the first real
-// UpdateProjectListHud call establishes it via `style`.
-HWND CreateProjectListHud(HINSTANCE hInstance, bool horizontal);
+// Creates the hub hidden; it shows up once SetProjectListHudDocked has
+// reserved its band and UpdateProjectListHud has given it something to show.
+HWND CreateProjectListHud(HINSTANCE hInstance);
 
 // Hides the HUD (config disabled, or nothing currently worth showing).
 void HideProjectListHud(HWND hud);
 
-// Switches between free placement (`docked` false: anywhere, Ctrl+drag to
-// move/resize) and fixed placement (`docked` true: registered as a
-// bottom-edge AppBar on the primary monitor, which reserves a band one
-// item row tall directly above the taskbar -- maximized windows then stop
-// above it -- and the HUD lives inside that band: Ctrl+drag still resizes
-// it and slides it sideways, but can't take it out of the band). Each mode
-// remembers its own placement. Fixed placement only makes sense with the
-// horizontal style, which the caller is expected to pass to
-// UpdateProjectListHud while docked. Cheap to call on every sync -- a no-op
-// unless `docked` or `rowHeight` changed. Undocking releases the reserved
-// band; so does destroying the HUD. `matchTaskbar` fills the whole band
-// behind the HUD with a backdrop painted to match the taskbar (see
-// taskbar_backdrop.h); otherwise the rest of the band shows the desktop.
+// `docked` true (the hub is on) registers the HUD as a bottom-edge AppBar on
+// the primary monitor, which reserves a band one item row tall directly
+// above the taskbar -- maximized windows then stop above it -- and the HUD
+// lives inside that band: Ctrl+drag resizes it and slides it sideways, but
+// can't take it out of the band. `docked` false (the hub is off) releases
+// the band; so does destroying the HUD. If the AppBar can't be registered,
+// the hub stays hidden and the next call tries again. Cheap to call on
+// every sync -- a no-op unless `docked` or `rowHeight` changed.
+// `matchTaskbar` fills the whole band behind the HUD with a backdrop painted
+// to match the taskbar (see taskbar_backdrop.h); otherwise the rest of the
+// band shows the desktop.
 void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTaskbar);
 
 // Sorts `entries` to match window layout (left-to-right, top-to-bottom) --
@@ -105,14 +100,13 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTas
 // favourite entry (see favourites.h) ahead of the non-favourites,
 // preserving each group's relative order, so favourites always sit at the
 // front of the list regardless of window layout or manual order --
-// measures/sizes the HUD to fit them -- as a single horizontal strip or a
-// vertical list, per `style.horizontal` -- with every item sharing one
-// width, and shows it anchored to the bottom-right of the work area, unless
-// the user has manually moved/resized it (Ctrl+left-click-drag either edge
-// to resize, the middle to move; plain right-click opens a context menu
-// instead, e.g. to set an alias for an item's label). Once manually
-// placed/sized, that placement is kept on later calls instead of being
-// recomputed. An empty `entries` is fine as long as
+// measures/sizes the HUD to fit them -- a single horizontal strip, every
+// item sharing one width -- and shows it at the right end of its band (see
+// SetProjectListHudDocked), unless the user has manually slid/resized it
+// (Ctrl+left-click-drag either edge to resize, the middle to slide it; plain
+// right-click opens a context menu instead, e.g. to set an alias for an
+// item's label). Once manually placed/sized, that placement is kept on later
+// calls instead of being recomputed. An empty `entries` is fine as long as
 // style.showNewWindowButton is set -- the hub then shows that button on its
 // own, which is what it looks like with every VS Code window closed; with
 // the button off too there's nothing to show and this does nothing, so call
