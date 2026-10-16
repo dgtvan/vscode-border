@@ -25,6 +25,8 @@ void RescanAllWindows();
 // needs this id to route it to PollForegroundChange.
 extern const UINT_PTR kForegroundPollTimerId;
 
+// Also keeps each border's label chip clickable exactly while the cursor is
+// over it (see overlay.h's UpdateOverlayLabelHover).
 void PollForegroundChange();
 
 // Forces every tracked overlay to repaint on its next sync (e.g. after a

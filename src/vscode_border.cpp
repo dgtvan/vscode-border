@@ -316,7 +316,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     RegisterClassW(&wc);
 
     WNDCLASSW wcOverlay = {};
-    wcOverlay.lpfnWndProc = DefWindowProcW;
+    wcOverlay.lpfnWndProc = OverlayWndProc;
+    wcOverlay.hCursor = LoadCursorW(nullptr, IDC_ARROW); // over the label chip, while it's clickable
     wcOverlay.hInstance = hInstance;
     wcOverlay.lpszClassName = kOverlayClassName;
     RegisterClassW(&wcOverlay);

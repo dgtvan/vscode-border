@@ -6,8 +6,23 @@
 
 extern const wchar_t* kOverlayClassName;
 
-// Creates the (hidden, 1x1) layered click-through border overlay popup window.
-HWND CreateOverlay(HINSTANCE hInstance);
+// Creates the (hidden, 1x1) layered click-through border overlay popup
+// window for `target`.
+HWND CreateOverlay(HINSTANCE hInstance, HWND target);
+
+// The overlay window class's window procedure -- registered for
+// kOverlayClassName.
+LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+// Left-click-and-hold on the label chip drags the target window around (a
+// maximized one is restored first and put back under the cursor, like a
+// title-bar drag). The overlay is click-through everywhere, though -- it must
+// never get in the way of the window it frames, including its resize edges
+// -- so it's made clickable only while the cursor is actually over the chip,
+// with the chip on screen (not covered by another window) and no mouse button
+// already held for something else. Call often (tracking.cpp's 50ms
+// foreground poll) for every overlay to keep that up to date.
+void UpdateOverlayLabelHover(HWND overlay);
 
 // Paints a hollow rectangular frame of `thickness` px into the overlay's
 // layered surface, plus an optional folder-name label chip just inside the
@@ -18,7 +33,8 @@ HWND CreateOverlay(HINSTANCE hInstance);
 // Label text color is either fixed (`labelTextColor`, used when
 // `labelTextColorAuto` is false) or auto-picked for contrast against `color`
 // (when `labelTextColorAuto` is true). A non-empty `wslDistro` (a WSLg
-// window -- see wsl.h) puts the WSL icon in front of the label text.
+// window -- see wsl.h) puts the WSL icon in front of the label text. Also
+// records where the chip is, for UpdateOverlayLabelHover.
 void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thickness, int opacity,
                    const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,
                    bool labelTextColorAuto, COLORREF labelTextColor, const std::wstring& wslDistro);

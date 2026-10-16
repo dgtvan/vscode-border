@@ -634,7 +634,7 @@ static void TrackWindow(HWND hwnd) {
     GetWindowTextW(hwnd, title, 512);
 
     TrackedWindow tw;
-    tw.overlay = CreateOverlay(g_hInstance);
+    tw.overlay = CreateOverlay(g_hInstance, hwnd);
     tw.colorIndex = AllocateColorIndex();
     tw.pid = pid;
     tw.trackSeq = g_nextTrackSeq++;
@@ -742,6 +742,8 @@ void SetOverlaysHidden(bool hidden) {
 }
 
 void PollForegroundChange() {
+    for (auto& kv : g_tracked) UpdateOverlayLabelHover(kv.second.overlay);
+
     HWND fg = GetForegroundWindow();
     if (fg == g_lastForeground) return;
     g_lastForeground = fg;

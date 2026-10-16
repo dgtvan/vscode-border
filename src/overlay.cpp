@@ -1,17 +1,137 @@
 #include "overlay.h"
 
+#include "focus_trace.h"
 #include "layered_rendering.h"
+#include "logger.h"
 #include "wsl.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <map>
 
 const wchar_t* kOverlayClassName = L"VSCodeBorderOverlayWndClass";
 
-HWND CreateOverlay(HINSTANCE hInstance) {
-    return CreateWindowExW(
+// Cursor movement before a press on the label counts as a drag rather than
+// a click (which just activates the window).
+static const int kLabelDragThreshold = 4;
+
+struct OverlayState {
+    HWND target = nullptr;
+    RECT label = {}; // label chip, overlay-local -- empty when none is drawn
+    bool clickable = false; // WS_EX_TRANSPARENT currently lifted (see UpdateOverlayLabelHover)
+    bool pressed = false; // left button went down on the chip and hasn't come up yet
+    bool dragging = false; // ...and has moved past kLabelDragThreshold
+    bool wasZoomed = false; // target was maximized when the press began
+    POINT pressPos = {};    // cursor at the press (or at the restore, see WM_MOUSEMOVE)
+    RECT pressRect = {};    // target's window rect at the same moment
+};
+static std::map<HWND, OverlayState> g_overlays;
+
+HWND CreateOverlay(HINSTANCE hInstance, HWND target) {
+    HWND overlay = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kOverlayClassName, L"", WS_POPUP,
         0, 0, 1, 1, nullptr, nullptr, hInstance, nullptr);
+    if (overlay) g_overlays[overlay].target = target;
+    return overlay;
+}
+
+static void SetOverlayClickable(HWND overlay, OverlayState& st, bool clickable) {
+    if (st.clickable == clickable) return;
+    LONG_PTR ex = GetWindowLongPtrW(overlay, GWL_EXSTYLE);
+    SetWindowLongPtrW(overlay, GWL_EXSTYLE, clickable ? (ex & ~WS_EX_TRANSPARENT) : (ex | WS_EX_TRANSPARENT));
+    st.clickable = clickable;
+}
+
+void UpdateOverlayLabelHover(HWND overlay) {
+    auto it = g_overlays.find(overlay);
+    if (it == g_overlays.end()) return;
+    OverlayState& st = it->second;
+    if (st.pressed) return; // mid-press/drag: stays clickable until the button comes up
+    bool want = false;
+    POINT pt;
+    RECT o;
+    if (IsWindowVisible(overlay) && !IsRectEmpty(&st.label) && GetCursorPos(&pt) && GetWindowRect(overlay, &o)) {
+        RECT chip = st.label;
+        OffsetRect(&chip, o.left, o.top);
+        // A button already held (e.g. a text selection being dragged across
+        // the corner) is someone else's gesture -- don't start catching it.
+        bool buttonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        if (PtInRect(&chip, pt) && (st.clickable || !buttonDown)) {
+            // Only when it's the chip that's actually under the cursor: the
+            // overlay itself once clickable, the target underneath it before
+            // -- not some other window covering this corner.
+            HWND under = GetAncestor(WindowFromPoint(pt), GA_ROOT);
+            want = under == overlay || under == st.target;
+        }
+    }
+    SetOverlayClickable(overlay, st, want);
+}
+
+LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto it = g_overlays.find(hwnd);
+    if (it == g_overlays.end()) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    OverlayState& st = it->second;
+
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+        case WM_LBUTTONDOWN:
+            if (!st.target || !IsWindow(st.target)) return 0;
+            st.pressed = true;
+            st.dragging = false;
+            st.wasZoomed = IsZoomed(st.target) != 0;
+            GetCursorPos(&st.pressPos);
+            GetWindowRect(st.target, &st.pressRect);
+            SetCapture(hwnd);
+            // Same as clicking the window itself there would have done.
+            RequestForeground(st.target, FocusTargetKind::ExternalWindow, L"label-press");
+            return 0;
+        case WM_MOUSEMOVE: {
+            if (!st.pressed || GetCapture() != hwnd) return 0;
+            POINT pt;
+            GetCursorPos(&pt);
+            int dx = pt.x - st.pressPos.x, dy = pt.y - st.pressPos.y;
+            if (!st.dragging) {
+                if (abs(dx) < kLabelDragThreshold && abs(dy) < kLabelDragThreshold) return 0;
+                st.dragging = true;
+                Log(L"label drag: moving hwnd=%p%ls", st.target, st.wasZoomed ? L" (restoring from maximized)" : L"");
+            }
+            if (st.wasZoomed) {
+                // Like dragging a maximized window's title bar: restore it,
+                // keeping the cursor at the same fraction of its width and
+                // the same height from its top, then carry on from there.
+                st.wasZoomed = false;
+                WINDOWPLACEMENT wp = {sizeof(wp)};
+                GetWindowPlacement(st.target, &wp);
+                int w = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+                int h = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+                int pressW = std::max(1, (int)(st.pressRect.right - st.pressRect.left));
+                double fx = (double)(st.pressPos.x - st.pressRect.left) / pressW;
+                int left = pt.x - (int)(fx * w);
+                int top = pt.y - (st.pressPos.y - st.pressRect.top);
+                ShowWindow(st.target, SW_RESTORE);
+                SetWindowPos(st.target, nullptr, left, top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+                st.pressPos = pt;
+                st.pressRect = {left, top, left + w, top + h};
+                return 0;
+            }
+            SetWindowPos(st.target, nullptr, st.pressRect.left + dx, st.pressRect.top + dy, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
+        case WM_LBUTTONUP:
+            if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
+        case WM_CAPTURECHANGED:
+            st.pressed = false;
+            st.dragging = false;
+            return 0;
+        case WM_NCDESTROY:
+            g_overlays.erase(it);
+            break;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 // Only the border bands (and label rect) are touched (not the whole
@@ -20,6 +140,7 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
                    const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,
                    bool labelTextColorAuto, COLORREF labelTextColor, const std::wstring& wslDistro) {
     if (width <= 0 || height <= 0) return;
+    RECT labelRect = {}; // where the chip ends up, if drawn -- see UpdateOverlayLabelHover
     int t = std::min(thickness, std::min(width, height) / 2);
     if (t < 1) t = 1;
 
@@ -92,6 +213,7 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
                 UINT32 lpx = (UINT32(255) << 24) | (UINT32(bgR) << 16) | (UINT32(bgG) << 8) | UINT32(bgB);
                 for (int y = ly; y < ly + lh; y++)
                     for (int x = lx; x < lx + lw; x++) pixels[y * width + x] = lpx;
+                labelRect = {lx, ly, lx + lw, ly + lh};
                 if (!wslDistro.empty()) {
                     RECT chip = {lx, ly, lx + lw, ly + lh};
                     BlendWslIcon(pixels, width, height, lx + paddingX, ly + (lh - kWslIconSize) / 2, chip);
@@ -123,6 +245,8 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
     blend.AlphaFormat = AC_SRC_ALPHA;
 
     UpdateLayeredWindow(overlay, screenDC, nullptr, &sz, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
+    auto it = g_overlays.find(overlay);
+    if (it != g_overlays.end()) it->second.label = labelRect;
 
     SelectObject(memDC, oldBmp);
     DeleteObject(bmp);
