@@ -54,9 +54,11 @@ bool MeasureWslgShadowInsets(HWND hwnd, RECT& insets);
 // it yet. True if it moved the window.
 bool FixWslgClampedMaximize(HWND hwnd, int knownMargin);
 
-// The distro's icon at `size` x `size` px -- the shortcut.ico WSL keeps in
-// the distro's install folder (found via its Lxss registry entry), falling
-// back to wsl.exe's own icon. Cached per distro+size for the life of the
-// process, so it's cheap to call on every paint; the caller must not
-// destroy it. Null only if neither icon can be loaded.
-HICON GetWslDistroIcon(const std::wstring& distro, int size);
+// Size (px, square) and trailing gap of the WSL icon (Tux, assets/wsl.ico)
+// drawn in front of a WSLg window's label -- on its border's label chip and
+// its hub item alike, whichever distro the window runs in.
+const int kWslIconSize = 14, kWslIconGap = 4;
+
+// Composites the WSL icon (kWslIconSize square) onto an opaque 32bpp surface
+// with its top-left at (left, top), clipped to `clip` and to the surface.
+void BlendWslIcon(UINT32* pixels, int surfaceWidth, int surfaceHeight, int left, int top, const RECT& clip);

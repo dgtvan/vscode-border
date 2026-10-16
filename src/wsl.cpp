@@ -1,11 +1,11 @@
 #include "wsl.h"
 #include "logger.h"
-
-#include <shlobj.h>
+#include "resource.h"
 
 #include <algorithm>
 #include <map>
 #include <utility>
+#include <vector>
 
 const wchar_t* const kWslgWindowClass = L"RAIL_WINDOW";
 
@@ -164,74 +164,63 @@ bool FixWslgClampedMaximize(HWND hwnd, int knownMargin) {
     return true;
 }
 
-static std::wstring StripLongPathPrefix(std::wstring path) {
-    if (path.compare(0, 4, L"\\\\?\\") == 0) path.erase(0, 4);
-    return path;
-}
-
-// The distro's install folder (Lxss registry BasePath), or empty if no
-// registered distro has that name.
-static std::wstring FindDistroBasePath(const std::wstring& distro) {
-    HKEY lxss = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Lxss", 0, KEY_READ,
-                      &lxss) != ERROR_SUCCESS) {
-        return L"";
-    }
-    std::wstring result;
-    wchar_t sub[64];
-    for (DWORD i = 0;; i++) {
-        DWORD subLen = 64;
-        if (RegEnumKeyExW(lxss, i, sub, &subLen, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
-        wchar_t name[256] = {};
-        DWORD nameSize = sizeof(name);
-        if (RegGetValueW(lxss, sub, L"DistributionName", RRF_RT_REG_SZ, nullptr, name, &nameSize) != ERROR_SUCCESS ||
-            _wcsicmp(name, distro.c_str()) != 0) {
-            continue;
-        }
-        wchar_t base[MAX_PATH * 2] = {};
-        DWORD baseSize = sizeof(base);
-        if (RegGetValueW(lxss, sub, L"BasePath", RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ, nullptr, base, &baseSize) ==
-            ERROR_SUCCESS) {
-            result = StripLongPathPrefix(base);
-        }
-        break;
-    }
-    RegCloseKey(lxss);
-    return result;
-}
-
-static HICON LoadWslExeIcon(int size) {
-    wchar_t programFiles[MAX_PATH] = {};
-    if (!GetEnvironmentVariableW(L"ProgramFiles", programFiles, MAX_PATH)) return nullptr;
-    std::wstring wslExe = std::wstring(programFiles) + L"\\WSL\\wsl.exe";
-    HICON icon = nullptr;
-    if (FAILED(SHDefExtractIconW(wslExe.c_str(), 0, 0, &icon, nullptr, (UINT)size))) return nullptr;
-    return icon;
-}
-
-HICON GetWslDistroIcon(const std::wstring& distro, int size) {
-    static std::map<std::pair<std::wstring, int>, HICON> cache;
-    auto key = std::make_pair(distro, size);
-    auto it = cache.find(key);
-    if (it != cache.end()) return it->second;
-
-    HICON icon = nullptr;
-    std::wstring base = FindDistroBasePath(distro);
-    if (!base.empty()) {
-        std::wstring ico = base + L"\\shortcut.ico";
-        icon = (HICON)LoadImageW(nullptr, ico.c_str(), IMAGE_ICON, size, size, LR_LOADFROMFILE);
-    }
-    const wchar_t* source = L"shortcut.ico";
+// The WSL icon rendered to premultiplied ARGB (kWslIconSize^2 pixels),
+// once; empty if the resource can't be loaded.
+static const std::vector<UINT32>& WslIconPixels() {
+    static std::vector<UINT32> out;
+    static bool loaded = false;
+    if (loaded) return out;
+    loaded = true;
+    HICON icon = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_WSL), IMAGE_ICON, kWslIconSize,
+                                   kWslIconSize, 0);
     if (!icon) {
-        icon = LoadWslExeIcon(size);
-        source = L"wsl.exe";
+        LogWarn(L"wsl: couldn't load the WSL icon resource, lastError=%lu", GetLastError());
+        return out;
     }
-    if (icon) {
-        Log(L"wsl: distro [%ls] icon %dpx loaded from %ls (base=[%ls])", distro.c_str(), size, source, base.c_str());
-    } else {
-        LogWarn(L"wsl: no icon for distro [%ls] (base=[%ls]) -- neither shortcut.ico nor wsl.exe's icon loaded",
-                distro.c_str(), base.c_str());
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = kWslIconSize;
+    bmi.bmiHeader.biHeight = -kWslIconSize; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HBITMAP bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp && bits) {
+        HGDIOBJ old = SelectObject(dc, bmp);
+        memset(bits, 0, kWslIconSize * kWslIconSize * 4);
+        DrawIconEx(dc, 0, 0, icon, kWslIconSize, kWslIconSize, 0, nullptr, DI_NORMAL);
+        GdiFlush();
+        const UINT32* src = (const UINT32*)bits;
+        out.assign(src, src + kWslIconSize * kWslIconSize);
+        SelectObject(dc, old);
     }
-    cache[key] = icon; // a null is cached too, so a missing icon is only looked up (and warned about) once
-    return icon;
+    if (bmp) DeleteObject(bmp);
+    DeleteDC(dc);
+    DestroyIcon(icon);
+    return out;
+}
+
+void BlendWslIcon(UINT32* pixels, int surfaceWidth, int surfaceHeight, int left, int top, const RECT& clip) {
+    const std::vector<UINT32>& icon = WslIconPixels();
+    if (icon.empty()) return;
+    for (int y = 0; y < kWslIconSize; y++) {
+        int row = top + y;
+        if (row < 0 || row >= surfaceHeight || row < clip.top || row >= clip.bottom) continue;
+        for (int x = 0; x < kWslIconSize; x++) {
+            int col = left + x;
+            if (col < 0 || col >= surfaceWidth || col < clip.left || col >= clip.right) continue;
+            UINT32 s = icon[y * kWslIconSize + x];
+            UINT32 a = s >> 24;
+            if (!a) continue;
+            UINT32 d = pixels[row * surfaceWidth + col];
+            auto blend = [&](int shift) {
+                UINT32 sc = (s >> shift) & 0xFF, dc = (d >> shift) & 0xFF;
+                return std::min<UINT32>(255, sc + dc * (255 - a) / 255) << shift; // src is premultiplied
+            };
+            pixels[row * surfaceWidth + col] = 0xFF000000u | blend(16) | blend(8) | blend(0);
+        }
+    }
 }

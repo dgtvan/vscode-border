@@ -525,7 +525,7 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
         COLORREF color = g_config.palette[tw.colorIndex % g_config.palette.size()];
         PaintOverlay(tw.overlay, ow, oh, color, t, g_config.opacity,
                      borderLabel, g_config.showLabel, g_config.labelHeight, g_config.labelFontSize,
-                     g_config.labelTextColorAuto, g_config.labelTextColor);
+                     g_config.labelTextColorAuto, g_config.labelTextColor, tw.wslDistro);
         tw.lastWidth = ow;
         tw.lastHeight = oh;
         tw.lastLabel = borderLabel;

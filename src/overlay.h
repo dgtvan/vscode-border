@@ -17,7 +17,8 @@ HWND CreateOverlay(HINSTANCE hInstance);
 //
 // Label text color is either fixed (`labelTextColor`, used when
 // `labelTextColorAuto` is false) or auto-picked for contrast against `color`
-// (when `labelTextColorAuto` is true).
+// (when `labelTextColorAuto` is true). A non-empty `wslDistro` (a WSLg
+// window -- see wsl.h) puts the WSL icon in front of the label text.
 void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thickness, int opacity,
                    const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,
-                   bool labelTextColorAuto, COLORREF labelTextColor);
+                   bool labelTextColorAuto, COLORREF labelTextColor, const std::wstring& wslDistro);

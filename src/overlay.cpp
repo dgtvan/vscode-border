@@ -1,6 +1,7 @@
 #include "overlay.h"
 
 #include "layered_rendering.h"
+#include "wsl.h"
 
 #include <algorithm>
 
@@ -17,7 +18,7 @@ HWND CreateOverlay(HINSTANCE hInstance) {
 // width*height area) so resizing a large window stays cheap.
 void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thickness, int opacity,
                    const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,
-                   bool labelTextColorAuto, COLORREF labelTextColor) {
+                   bool labelTextColorAuto, COLORREF labelTextColor, const std::wstring& wslDistro) {
     if (width <= 0 || height <= 0) return;
     int t = std::min(thickness, std::min(width, height) / 2);
     if (t < 1) t = 1;
@@ -82,7 +83,8 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
             GetTextExtentPoint32W(memDC, label.c_str(), (int)label.size(), &textSz);
             SelectObject(memDC, oldFont);
             const int paddingX = 10;
-            int lw = std::min(width - 2 * t, (int)textSz.cx + paddingX * 2);
+            int iconShift = wslDistro.empty() ? 0 : kWslIconSize + kWslIconGap;
+            int lw = std::min(width - 2 * t, (int)textSz.cx + paddingX * 2 + iconShift);
             if (lw > 4) {
                 int lx = t, ly = t;
                 COLORREF textColor = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
@@ -90,6 +92,10 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
                 UINT32 lpx = (UINT32(255) << 24) | (UINT32(bgR) << 16) | (UINT32(bgG) << 8) | UINT32(bgB);
                 for (int y = ly; y < ly + lh; y++)
                     for (int x = lx; x < lx + lw; x++) pixels[y * width + x] = lpx;
+                if (!wslDistro.empty()) {
+                    RECT chip = {lx, ly, lx + lw, ly + lh};
+                    BlendWslIcon(pixels, width, height, lx + paddingX, ly + (lh - kWslIconSize) / 2, chip);
+                }
 
                 // GDI's ClearType/antialiased text rendering writes partial
                 // coverage into the alpha byte of a 32bpp DIB, which would
@@ -100,7 +106,8 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
                 // glyphs into an isolated black-background mask instead and
                 // use its per-channel brightness as blend coverage, so the
                 // label rect written above always stays fully opaque.
-                BlendTextIntoPixels(screenDC, pixels, width, height, lx + paddingX, ly, lw - paddingX * 2, lh,
+                BlendTextIntoPixels(screenDC, pixels, width, height, lx + paddingX + iconShift, ly,
+                                    lw - paddingX * 2 - iconShift, lh,
                                     label, font, color, textColor, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
 

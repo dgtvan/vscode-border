@@ -32,7 +32,7 @@ struct ProjectListHudEntry {
     COLORREF color = RGB(0, 0, 0);
     ClaudeStatus claudeStatus = ClaudeStatus::None;
     std::wstring wslDistro; // distro a WSLg window's Linux VS Code runs in (see wsl.h), empty for Windows
-                            // VS Code -- shown as that distro's icon just left of the AI status indicator
+                            // VS Code -- a WSLg entry shows the WSL icon in front of its label
     // True while rawLabel might still change (VS Code's title/worktree
     // mapping still settling -- see tracking.cpp's IsWindowLoading). Drawn
     // greyed out with a spinner instead of its real color/AI status, and
