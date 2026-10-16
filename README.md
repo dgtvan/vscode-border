@@ -471,10 +471,43 @@ reading VS Code's own recently-opened-folder records. That mapping is
 built once and cached in memory; use **Reload Config** from the tray icon
 to pick up worktrees created after the app started.
 
+## VS Code inside WSL
+
+Linux VS Code installed in a WSL distro, shown on the desktop through WSLg,
+is tracked too -- its window belongs to WSL's `msrdc.exe`, not `Code.exe`, and
+is recognised by `Visual Studio Code (<distro>)` at the end of its title. It
+gets the same border and hub item as a Windows VS Code window, with a Tux icon
+in front of its label (on the border's label chip, the hub item and its
+favourites menu entry). Also handled:
+
+- **Repo/branch label.** Linux VS Code reads its own `settings.json` inside
+  the distro, so the `window.title` setting (see
+  [Getting the repo/branch label](#getting-the-repobranch-label-instead-of-just-the-folder-name))
+  is applied there too, through `wsl.exe` -- only once a window from that
+  distro has been seen, since reaching a stopped distro would start it.
+- **Folder path, favourites.** A WSL window's folder comes from Linux VS
+  Code's own records in the distro and is kept as its `\\wsl.localhost\<distro>\...`
+  path: **Copy Directory Path** copies the Linux path, **Open Directory in File
+  Explorer** is greyed out when the distro doesn't share its files with
+  Windows, and a WSL favourite opens in the distro's Linux VS Code.
+- **Border fit.** The window rect WSLg reports includes Linux VS Code's own
+  transparent shadow margin (32px a side), which is measured from the
+  window's pixels and left out of the border.
+- **Maximize** works with the fixed hub reserving its band.
+- **Close Window / Close All** work (WSLg only closes the active window, so
+  each is activated first).
+- **Resizing from the left/right edges** doesn't work on stock WSLg -- a WSLg
+  bug, not this app. With an optional patch to WSLg's compositor it does; see
+  [docs/WSLG-RESIZE.md](docs/WSLG-RESIZE.md).
+
+Not yet: the AI status indicator for Claude Code running inside the distro.
+
 ## Known limitations
 
 - Only tracks VS Code's own top-level windows (`Code.exe` / `Code -
-  Insiders.exe`, main editor windows -- not floating panels/dialogs).
+  Insiders.exe`, and Linux VS Code through WSLg -- see
+  [VS Code inside WSL](#vs-code-inside-wsl) -- main editor windows, not
+  floating panels/dialogs).
 - If you have more open windows than colors in the palette, colors repeat.
 - Border thickness/color is drawn by this app, not by Windows -- closing the
   app removes all borders immediately (nothing persists in the registry or
@@ -553,6 +586,10 @@ to pick up worktrees created after the app started.
   folder's real absolute path (used for the AI status indicator's window matching).
 - `src/vscode_settings.*` -- auto-manages VS Code's `window.title` setting to match `show_label` (see [Getting the repo/branch label](#getting-the-repobranch-label-instead-of-just-the-folder-name)).
 - `src/window_discovery.*` -- finding/filtering VS Code top-level windows.
+- `src/wsl.*` -- WSLg windows: recognising Linux VS Code, its shadow margin, the maximize fix, `wsl.exe`
+  helpers, the Tux icon, and the WSLg window control FIFO (see [VS Code inside WSL](#vs-code-inside-wsl)).
+- `tools/wslg-resize/` -- build script, patches and shims for the optional WSLg resize fix, see
+  [docs/WSLG-RESIZE.md](docs/WSLG-RESIZE.md).
 - `src/overlay.*` -- passive per-window border overlay creation/painting.
 - `src/project_list_hud.*` -- interactive desktop project-list HUD: sorts/sizes/positions itself from the entries it's given, plus hover focus, click, move, and resize behavior.
 - `src/layered_rendering.*` -- shared alpha-blended text helpers for layered windows.
@@ -561,6 +598,7 @@ to pick up worktrees created after the app started.
 - `src/vscode_cli.*` -- locates VS Code's `code`/`code-insiders` CLI shim; opens new VS Code windows and closes all of them (shared by the hub and the tray menu).
 - `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, border sync, and feeding the HUD its entries.
 - `src/resource.rc`, `assets/app.ico`, `assets/square-dashed.png` -- tray icon resource (`app.ico` is generated from the PNG; see [Credits](#credits)).
+- `assets/wsl.ico` -- the Tux icon shown on WSL windows (see [Credits](#credits)).
 - `config.ini` -- default config template (copied to `bin\` on first build).
 - `claude_status_hook.ps1` -- Claude Code hook script (copied to `bin\` on every build; see "Claude Code
   status dots" above).
@@ -575,3 +613,6 @@ to pick up worktrees created after the app started.
 Tray icon: ["Square dashed" icon](https://www.flaticon.com/free-icon/square-dashed_17295663) from Flaticon.
 
 WSL icon: Tux image from [relief-melone/wsl-initial-setup](https://gitlab.com/relief-melone/wsl-initial-setup) on GitLab.
+
+WSLg resize fix (`tools/wslg-resize/`): patches, shim and build script from
+[Mihir-Null/wslg-resize-fix](https://github.com/Mihir-Null/wslg-resize-fix) (MIT).
