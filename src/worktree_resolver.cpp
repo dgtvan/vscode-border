@@ -3,6 +3,7 @@
 #include "config.h"
 #include "file_util.h"
 #include "logger.h"
+#include "wsl.h"
 
 #include <windows.h>
 
@@ -10,6 +11,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -20,11 +22,30 @@ static std::unordered_map<std::wstring, std::wstring> g_cache; // lowercased wor
 // recorded folders sharing one leaf name.
 struct FolderCandidate {
     std::wstring path;
-    std::wstring storageDir;
+    std::wstring storageDir; // Windows only -- see LastUsedTime
+    std::wstring distro;     // the WSL distro Linux VS Code recorded it in (path is then its
+                             // \\wsl.localhost form, see wsl.h), empty for Windows VS Code
+    ULONGLONG wslLastUsed = 0; // WSL only: storage's mtime as of the scan, in seconds
 };
 static std::unordered_map<std::wstring, std::vector<FolderCandidate>>
     g_pathCache; // lowercased leaf name -> every recorded folder with that leaf (every entry, not just worktrees)
 static bool g_cacheBuilt = false;
+// Linux VS Code's records per WSL distro ResolveFolderPath has been asked
+// about. Fetching them costs a wsl.exe round-trip on this (the UI) thread,
+// so unlike the Windows records they're not re-read on every rebuild --
+// which happens every kRebuildCooldownMs while any lookup misses, the
+// common case -- but kept here and just re-added to the caches each time;
+// a distro is re-read only when a lookup for it misses (no more often than
+// kWslRescanCooldownMs), after InvalidateWorktreeCache, or on
+// RefreshWorktreeCache. Asking about a distro implies a window from it is
+// open, so it's running and reading it starts nothing.
+struct WslRecords {
+    std::vector<FolderCandidate> folders;
+    bool stale = true;
+    ULONGLONG lastScanTick = 0;
+};
+static std::map<std::wstring, WslRecords> g_wsl;
+static const ULONGLONG kWslRescanCooldownMs = 60000;
 
 static std::wstring ToLowerCopy(const std::wstring& s) {
     std::wstring out = s;
@@ -47,13 +68,14 @@ static std::string PercentDecode(const std::string& s) {
 }
 
 // Converts a "file:///d%3A/Src/foo" URI (as stored in workspace.json) into a
-// native Windows path ("d:\Src\foo").
-static std::wstring FileUriToPath(const std::string& uri) {
+// native Windows path ("d:\Src\foo") -- or, with `linux`, a Linux one's
+// "file:///home/me/foo" into "/home/me/foo".
+static std::wstring FileUriToPath(const std::string& uri, bool linux = false) {
     const std::string prefix = "file:///";
     if (uri.compare(0, prefix.size(), prefix) != 0) return L"";
 
-    std::string decoded = PercentDecode(uri.substr(prefix.size()));
-    std::replace(decoded.begin(), decoded.end(), '/', '\\');
+    std::string decoded = PercentDecode(uri.substr(prefix.size() - (linux ? 1 : 0)));
+    if (!linux) std::replace(decoded.begin(), decoded.end(), '/', '\\');
 
     int wlen = MultiByteToWideChar(CP_UTF8, 0, decoded.c_str(), -1, nullptr, 0);
     if (wlen <= 0) return L"";
@@ -84,17 +106,10 @@ static bool ReadFolderUri(const std::wstring& jsonPath, std::string& outUri) {
 
 static const wchar_t* kWorktreesSuffix = L".worktrees";
 
-static void ProcessWorkspaceJson(const std::wstring& storageDir) {
-    std::wstring jsonPath = storageDir + L"\\workspace.json";
-    std::string uri;
-    if (!ReadFolderUri(jsonPath, uri)) return;
-
-    std::wstring path = FileUriToPath(uri);
-    while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
-    if (path.empty()) {
-        Log(L"worktree resolver: %ls -> unparseable uri [%hs]", jsonPath.c_str(), uri.c_str());
-        return;
-    }
+// Records one folder VS Code has opened (`candidate.path`, any trailing
+// separator already trimmed) in both caches.
+static void AddRecordedFolder(const FolderCandidate& candidate) {
+    const std::wstring& path = candidate.path;
 
     size_t slash = path.find_last_of(L"\\/");
     if (slash == std::wstring::npos) return;
@@ -108,7 +123,7 @@ static void ProcessWorkspaceJson(const std::wstring& storageDir) {
     // after the same branch in two repos), and whichever entry happened to
     // be scanned last would otherwise hand a window some other project's
     // folder.
-    g_pathCache[ToLowerCopy(leaf)].push_back({path, storageDir});
+    g_pathCache[ToLowerCopy(leaf)].push_back(candidate);
 
     size_t parentSlash = parent.find_last_of(L"\\/");
     std::wstring parentName = (parentSlash == std::wstring::npos) ? parent : parent.substr(parentSlash + 1);
@@ -130,6 +145,67 @@ static void ProcessWorkspaceJson(const std::wstring& storageDir) {
     LogDiag(L"worktree resolver: leaf=[%ls] -> mainRepo=[%ls] (from path=[%ls])", leaf.c_str(), mainRepoName.c_str(),
         path.c_str());
     g_cache[ToLowerCopy(leaf)] = mainRepoName;
+}
+
+static void ProcessWorkspaceJson(const std::wstring& storageDir) {
+    std::wstring jsonPath = storageDir + L"\\workspace.json";
+    std::string uri;
+    if (!ReadFolderUri(jsonPath, uri)) return;
+
+    std::wstring path = FileUriToPath(uri);
+    while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
+    if (path.empty()) {
+        Log(L"worktree resolver: %ls -> unparseable uri [%hs]", jsonPath.c_str(), uri.c_str());
+        return;
+    }
+    FolderCandidate c;
+    c.path = path;
+    c.storageDir = storageDir;
+    AddRecordedFolder(c);
+}
+
+// Linux VS Code's records inside `distro` (its default user's
+// workspaceStorage, both variants), fetched in one wsl.exe call as
+// "<storage mtime>\t<folder uri>" lines, into g_wsl -- the caches pick them
+// up on the next BuildCache.
+static void ScanWslDistro(const std::wstring& distro) {
+    WslRecords& rec = g_wsl[distro];
+    rec.stale = false;
+    rec.lastScanTick = GetTickCount64();
+    std::string out;
+    bool ok = RunInWsl(distro,
+                       {L"sh", L"-c",
+                        L"for d in \"$HOME/.config/Code/User/workspaceStorage\"/* "
+                        L"\"$HOME/.config/Code - Insiders/User/workspaceStorage\"/*; do "
+                        L"[ -f \"$d/workspace.json\" ] || continue; "
+                        L"u=$(sed -n 's/.*\"folder\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
+                        L"\"$d/workspace.json\" | head -n 1); "
+                        L"[ -n \"$u\" ] || continue; "
+                        L"t=$(stat -c %Y \"$d/state.vscdb\" 2>/dev/null || stat -c %Y \"$d\"); "
+                        L"printf '%s\\t%s\\n' \"$t\" \"$u\"; done; true"},
+                       "", &out);
+    if (!ok) {
+        Log(L"worktree resolver: couldn't read VS Code's records in WSL distro [%ls]", distro.c_str());
+        return;
+    }
+    rec.folders.clear();
+    size_t pos = 0;
+    while (pos < out.size()) {
+        size_t eol = out.find('\n', pos);
+        std::string line = out.substr(pos, (eol == std::string::npos ? out.size() : eol) - pos);
+        pos = eol == std::string::npos ? out.size() : eol + 1;
+        size_t tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        std::wstring linuxPath = FileUriToPath(line.substr(tab + 1), true);
+        while (linuxPath.size() > 1 && linuxPath.back() == L'/') linuxPath.pop_back();
+        if (linuxPath.empty() || linuxPath[0] != L'/') continue;
+        FolderCandidate c;
+        c.path = WslUncPath(distro, linuxPath);
+        c.distro = distro;
+        c.wslLastUsed = strtoull(line.substr(0, tab).c_str(), nullptr, 10);
+        rec.folders.push_back(c);
+    }
+    LogDiag(L"worktree resolver: %zu folder(s) recorded in WSL distro [%ls]", rec.folders.size(), distro.c_str());
 }
 
 static void ScanUserDataDir(const std::wstring& userDir) {
@@ -165,6 +241,9 @@ static void BuildCache() {
     std::wstring base(appData);
     ScanUserDataDir(base + L"\\Code\\User");
     ScanUserDataDir(base + L"\\Code - Insiders\\User");
+    for (const auto& kv : g_wsl) {
+        for (const FolderCandidate& c : kv.second.folders) AddRecordedFolder(c);
+    }
 
     Log(L"worktree resolver: cache built, %zu folder name(s), %zu worktree(s) mapped", g_pathCache.size(),
         g_cache.size());
@@ -218,6 +297,7 @@ static bool IsExistingDirectory(const std::wstring& path) {
 // window). Read live rather than cached, since it keeps moving for as long
 // as a window has the folder open.
 static ULONGLONG LastUsedTime(const FolderCandidate& c) {
+    if (!c.distro.empty()) return c.wslLastUsed; // only ever compared against others from the same distro
     ULONGLONG newest = 0;
     for (const std::wstring& p : {c.storageDir, c.storageDir + L"\\state.vscdb"}) {
         WIN32_FILE_ATTRIBUTE_DATA data;
@@ -245,7 +325,24 @@ static bool PathBelongsToRepo(const std::wstring& path, const std::wstring& repo
     return false;
 }
 
-std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& repoName) {
+// Re-reads `distro`'s records if they're stale (first ask, or
+// InvalidateWorktreeCache) -- or, with `missed`, if the last read is older
+// than kWslRescanCooldownMs -- and rebuilds the caches with them. True if it
+// did.
+static bool RefreshWslIfDue(const std::wstring& distro, bool missed) {
+    WslRecords& rec = g_wsl[distro];
+    bool due = rec.stale || (missed && GetTickCount64() - rec.lastScanTick >= kWslRescanCooldownMs);
+    if (!due) return false;
+    ScanWslDistro(distro);
+    BuildCache();
+    g_cacheBuilt = true;
+    g_lastRebuildTick = GetTickCount64();
+    return true;
+}
+
+std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& repoName, const std::wstring& wslDistro) {
+    if (!wslDistro.empty()) RefreshWslIfDue(wslDistro, false);
+
     // Up front, not where the ranking below uses it: on a miss it can
     // rebuild the cache, which would free the candidate list being ranked.
     std::wstring mainRepo = repoName.empty() ? L"" : ResolveMainRepoName(repoName);
@@ -259,21 +356,35 @@ std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& rep
     std::wstring key = ToLowerCopy(name);
     auto it = g_pathCache.find(key);
 
-    // Same self-correcting rebuild-on-miss as ResolveMainRepoName, and
-    // sharing its cooldown timer -- a miss from either function within the
-    // same window shouldn't trigger two rescans back to back.
-    if (it == g_pathCache.end()) {
-        ULONGLONG now = GetTickCount64();
-        if (now - g_lastRebuildTick >= kRebuildCooldownMs) {
-            BuildCache();
-            g_lastRebuildTick = now;
-            it = g_pathCache.find(key);
+    // Only folders recorded by the same VS Code count: Windows for a Windows
+    // window, that distro's Linux VS Code for a WSL one. On a miss, the same
+    // self-correcting rebuild as ResolveMainRepoName, sharing its cooldown
+    // timer -- a miss from either function within the same window shouldn't
+    // trigger two rescans back to back -- or for a WSL window, a re-read of
+    // just that distro (see RefreshWslIfDue).
+    auto hasCandidate = [&]() {
+        return it != g_pathCache.end() && std::any_of(it->second.begin(), it->second.end(), [&](const FolderCandidate& c) {
+                   return c.distro == wslDistro;
+               });
+    };
+    if (!hasCandidate()) {
+        if (!wslDistro.empty()) {
+            if (RefreshWslIfDue(wslDistro, true)) it = g_pathCache.find(key);
+        } else {
+            ULONGLONG now = GetTickCount64();
+            if (now - g_lastRebuildTick >= kRebuildCooldownMs) {
+                BuildCache();
+                g_lastRebuildTick = now;
+                it = g_pathCache.find(key);
+            }
         }
     }
-
-    if (it == g_pathCache.end()) return L"";
-    const std::vector<FolderCandidate>& candidates = it->second;
-    if (candidates.size() == 1) return candidates[0].path;
+    if (!hasCandidate()) return L"";
+    std::vector<const FolderCandidate*> candidates;
+    for (const FolderCandidate& c : it->second) {
+        if (c.distro == wslDistro) candidates.push_back(&c);
+    }
+    if (candidates.size() == 1) return candidates[0]->path;
 
     // Several recorded folders share this leaf name. Rank them: one that
     // still exists, then one inside the window's own repo (the title's
@@ -283,8 +394,11 @@ std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& rep
     const FolderCandidate* best = nullptr;
     bool bestExists = false, bestInRepo = false;
     ULONGLONG bestTime = 0;
-    for (const FolderCandidate& c : candidates) {
-        bool exists = IsExistingDirectory(c.path);
+    for (const FolderCandidate* cp : candidates) {
+        const FolderCandidate& c = *cp;
+        // Not checked for a WSL folder: its \\wsl.localhost path can be
+        // unreachable (the share switched off) or slow to time out.
+        bool exists = !c.distro.empty() || IsExistingDirectory(c.path);
         bool inRepo = PathBelongsToRepo(c.path, repoName) || PathBelongsToRepo(c.path, mainRepo);
         ULONGLONG time = LastUsedTime(c);
         bool better;
@@ -304,6 +418,7 @@ std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& rep
 }
 
 void RefreshWorktreeCache() {
+    for (auto& kv : g_wsl) ScanWslDistro(kv.first);
     BuildCache();
     g_cacheBuilt = true;
     g_lastRebuildTick = GetTickCount64();
@@ -311,4 +426,5 @@ void RefreshWorktreeCache() {
 
 void InvalidateWorktreeCache() {
     g_cacheBuilt = false;
+    for (auto& kv : g_wsl) kv.second.stale = true;
 }

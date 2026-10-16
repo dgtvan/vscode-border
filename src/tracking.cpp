@@ -74,6 +74,7 @@ struct TrackedWindow {
                               // recorded folders that share folderName
     std::wstring wslDistro;  // distro a WSLg window's Linux VS Code runs in (from its title, see wsl.h),
                               // empty for a Windows VS Code window
+    std::wstring lastTitle; // window title as of the last NAMECHANGE acted on (or tracking) -- see WinEventProc
     std::wstring lastLabel; // label last painted, to detect changes
     RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized -- lets a minimized
                               // window's project-list HUD entry keep sorting where it normally sits
@@ -245,7 +246,7 @@ static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<A
         folderPath = buf;
     } else {
         if (tw.folderName.empty()) return ClaudeStatus::None;
-        folderPath = ResolveFolderPath(tw.folderName, tw.repoName);
+        folderPath = ResolveFolderPath(tw.folderName, tw.repoName, tw.wslDistro);
     }
     while (!folderPath.empty() && (folderPath.back() == L'\\' || folderPath.back() == L'/')) folderPath.pop_back();
     LogDiag(L"ai_status: matching window folderName=[%ls] resolvedFolderPath=[%ls]%ls against %zu session(s)",
@@ -343,7 +344,9 @@ static void SyncProjectListHud() {
         entry.label = kv.second.label;
         entry.rawLabel = kv.second.rawLabel;
         entry.aliasKey = kv.second.aliasKey;
-        entry.path = kv.second.folderName.empty() ? L"" : ResolveFolderPath(kv.second.folderName, kv.second.repoName);
+        entry.path = kv.second.folderName.empty()
+                         ? L""
+                         : ResolveFolderPath(kv.second.folderName, kv.second.repoName, kv.second.wslDistro);
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
         entry.wslDistro = kv.second.wslDistro;
@@ -634,6 +637,7 @@ static void TrackWindow(HWND hwnd) {
     GetWindowTextW(hwnd, title, 512);
 
     TrackedWindow tw;
+    tw.lastTitle = title;
     tw.overlay = CreateOverlay(g_hInstance, hwnd);
     tw.colorIndex = AllocateColorIndex();
     tw.pid = pid;
@@ -850,6 +854,11 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
                 // before its one final update (see kLoadingGraceMs).
                 wchar_t rawTitle[512] = {};
                 GetWindowTextW(hwnd, rawTitle, 512);
+                // WSLg re-sends a window's unchanged title whenever it's
+                // activated or deactivated -- nothing to reload, and taking
+                // it for one would grey the hub item out as "Loading...".
+                if (it->second.lastTitle == rawTitle) return;
+                it->second.lastTitle = rawTitle;
                 bool wasLoading = IsWindowLoading(it->second, hwnd);
                 LogFastDiag(L"namechange(raw) hwnd=%p title=[%ls] wasLoading=%d", hwnd, rawTitle, wasLoading);
                 if (!wasLoading) {

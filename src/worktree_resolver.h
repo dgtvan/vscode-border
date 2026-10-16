@@ -26,8 +26,11 @@ std::wstring ResolveMainRepoName(const std::wstring& repoName);
 // them -- see the ranking in the definition. Returns an empty string if no
 // matching entry is found (e.g. a plain non-git folder VS Code has never
 // recorded, or a multi-root workspace, which workspace.json doesn't expose
-// as a single folder path).
-std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& repoName);
+// as a single folder path). `wslDistro` (a WSLg window -- see wsl.h) looks
+// in that distro's Linux VS Code records instead, via wsl.exe, and returns
+// the folder's \\wsl.localhost\<distro>\... form (see wsl.h's WslUncPath).
+std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& repoName,
+                               const std::wstring& wslDistro = L"");
 
 // Rescans from disk right away. Wired up to the tray's "Reload Config"
 // action so newly created worktrees can be picked up without restarting

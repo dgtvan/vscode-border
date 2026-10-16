@@ -5,6 +5,7 @@
 #include "logger.h"
 #include "text_util.h"
 #include "vscode_cli.h"
+#include "wsl.h"
 
 #include <windows.h>
 
@@ -158,8 +159,13 @@ void OpenAllFavourites(HWND runningWindow, const std::vector<std::wstring>& alre
         return;
     }
 
+    // The Windows shim is only needed for Windows folders -- a WSL one (see
+    // wsl.h) opens in its distro's Linux VS Code.
+    bool anyWindows = std::any_of(toOpen.begin(), toOpen.end(), [](const FavouriteProject* f) {
+        return !ParseWslUncPath(f->path, nullptr, nullptr);
+    });
     std::wstring cmdPath;
-    if (!ResolveVSCodeCliShim(runningWindow, cmdPath)) {
+    if (anyWindows && !ResolveVSCodeCliShim(runningWindow, cmdPath)) {
         LogWarn(L"favourites: no VS Code CLI shim -- skipping open-all (%ls) of %zu favourite(s)", reason,
                 toOpen.size());
         return;
@@ -175,5 +181,9 @@ void OpenAllFavourites(HWND runningWindow, const std::vector<std::wstring>& alre
     NoteWindowLaunchRequest(reason, toOpen.size());
     Log(L"favourites: open-all (%ls) launching %zu favourite(s)", reason, toOpen.size());
 
-    for (const FavouriteProject* f : toOpen) RunVSCodeCli(cmdPath, L"-n \"" + f->path + L"\"");
+    for (const FavouriteProject* f : toOpen) {
+        std::wstring distro, linuxPath;
+        if (ParseWslUncPath(f->path, &distro, &linuxPath)) LaunchInWsl(distro, LinuxVSCodeOpenCommand(linuxPath));
+        else RunVSCodeCli(cmdPath, L"-n \"" + f->path + L"\"");
+    }
 }

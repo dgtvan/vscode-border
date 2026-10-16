@@ -2,7 +2,9 @@
 
 #include <windows.h>
 
+#include <set>
 #include <string>
+#include <vector>
 
 // Linux VS Code installed inside a WSL distro and shown on the Windows
 // desktop through WSLg is a different kind of window than Windows VS Code:
@@ -58,6 +60,44 @@ bool FixWslgClampedMaximize(HWND hwnd, int knownMargin);
 // drawn in front of a WSLg window's label -- on its border's label chip and
 // its hub item alike, whichever distro the window runs in.
 const int kWslIconSize = 14, kWslIconGap = 4;
+
+// Runs wsl.exe with `args` (a command-line tail, e.g. L"--list --running"),
+// feeding it `input` and collecting its stdout (stderr is dropped). True if it ran and
+// exited 0 within 10s.
+bool RunWslExe(const std::wstring& args, const std::string& input, std::string* output);
+
+// Runs `argv` inside the distro as its default user (wsl.exe -d <distro> -e
+// ...) and waits for it, as RunWslExe. Used instead of the \\wsl.localhost
+// share, which a distro can have switched off (e.g. with interop disabled),
+// while wsl.exe from Windows always works. Only call for a distro that's
+// running -- this would start a stopped one.
+bool RunInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv, const std::string& input,
+              std::string* output);
+
+// Starts `argv` inside the distro and returns without waiting -- for things
+// that keep running, like `code -n <folder>`.
+bool LaunchInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv);
+
+// The command (for LaunchInWsl) that opens `linuxPath` in a new Linux VS
+// Code window. Linux `code` run under WSL otherwise stops at a "use Windows
+// VS Code instead -- continue anyway? [y/N]" prompt nobody can answer.
+std::vector<std::wstring> LinuxVSCodeOpenCommand(const std::wstring& linuxPath);
+
+// Distros running right now. Doesn't start anything.
+std::set<std::wstring> RunningWslDistros();
+
+// A Linux path inside `distro` as the Windows path to it,
+// \\wsl.localhost\<distro>\..., and back. The Windows form is what a WSL
+// window's folder is known by on the Windows side (hub item paths,
+// favourites); it may not actually be reachable (the share can be off).
+std::wstring WslUncPath(const std::wstring& distro, const std::wstring& linuxPath);
+bool ParseWslUncPath(const std::wstring& path, std::wstring* distro, std::wstring* linuxPath);
+
+// The WSL icon as a 32bpp premultiplied-alpha bitmap at the system's small
+// icon size -- for a menu item's MENUITEMINFO::hbmpItem. Created once and
+// kept for the life of the process (a menu only borrows it); null if the
+// icon resource can't be loaded.
+HBITMAP GetWslIconMenuBitmap();
 
 // Composites the WSL icon (kWslIconSize square) onto an opaque 32bpp surface
 // with its top-left at (left, top), clipped to `clip` and to the surface.

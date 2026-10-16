@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -203,6 +204,36 @@ static const std::vector<UINT32>& WslIconPixels() {
     return out;
 }
 
+HBITMAP GetWslIconMenuBitmap() {
+    static HBITMAP bmp = nullptr;
+    static bool tried = false;
+    if (tried) return bmp;
+    tried = true;
+    int size = GetSystemMetrics(SM_CXSMICON);
+    HICON icon = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_WSL), IMAGE_ICON, size, size, 0);
+    if (!icon) return nullptr;
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = size;
+    bmi.bmiHeader.biHeight = -size; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HDC dc = CreateCompatibleDC(nullptr);
+    bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp && bits) {
+        HGDIOBJ old = SelectObject(dc, bmp);
+        memset(bits, 0, size * size * 4);
+        DrawIconEx(dc, 0, 0, icon, size, size, 0, nullptr, DI_NORMAL); // keeps the icon's own alpha
+        GdiFlush();
+        SelectObject(dc, old);
+    }
+    DeleteDC(dc);
+    DestroyIcon(icon);
+    return bmp;
+}
+
 void BlendWslIcon(UINT32* pixels, int surfaceWidth, int surfaceHeight, int left, int top, const RECT& clip) {
     const std::vector<UINT32>& icon = WslIconPixels();
     if (icon.empty()) return;
@@ -223,4 +254,149 @@ void BlendWslIcon(UINT32* pixels, int surfaceWidth, int surfaceHeight, int left,
             pixels[row * surfaceWidth + col] = 0xFF000000u | blend(16) | blend(8) | blend(0);
         }
     }
+}
+
+// One argument quoted for a Windows command line (CommandLineToArgvW rules).
+static std::wstring QuoteArg(const std::wstring& arg) {
+    std::wstring out = L"\"";
+    size_t backslashes = 0;
+    for (wchar_t c : arg) {
+        if (c == L'\\') {
+            backslashes++;
+            continue;
+        }
+        if (c == L'"') out.append(backslashes * 2 + 1, L'\\');
+        else out.append(backslashes, L'\\');
+        backslashes = 0;
+        out += c;
+    }
+    out.append(backslashes * 2, L'\\');
+    return out + L"\"";
+}
+
+static std::wstring WslExePath() {
+    wchar_t sysDir[MAX_PATH] = {};
+    GetSystemDirectoryW(sysDir, MAX_PATH);
+    return std::wstring(sysDir) + L"\\wsl.exe";
+}
+
+bool RunWslExe(const std::wstring& args, const std::string& input, std::string* output) {
+    std::wstring cmd = QuoteArg(WslExePath()) + L" " + args;
+
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
+    HANDLE inRead = nullptr, inWrite = nullptr, outRead = nullptr, outWrite = nullptr;
+    if (!CreatePipe(&inRead, &inWrite, &sa, 0)) return false;
+    if (!CreatePipe(&outRead, &outWrite, &sa, 0)) {
+        CloseHandle(inRead);
+        CloseHandle(inWrite);
+        return false;
+    }
+    SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
+
+    // stderr goes nowhere: callers parse stdout (a file's contents, a
+    // listing), and wsl.exe's own warnings mustn't end up mixed into it.
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = inRead;
+    si.hStdOutput = outWrite;
+    si.hStdError = nul;
+    PROCESS_INFORMATION pi = {};
+    bool started = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si,
+                                  &pi) != 0;
+    CloseHandle(inRead);
+    CloseHandle(outWrite);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!started) {
+        Log(L"wsl: couldn't run wsl.exe, lastError=%lu", GetLastError());
+        CloseHandle(inWrite);
+        CloseHandle(outRead);
+        return false;
+    }
+
+    DWORD written = 0;
+    if (!input.empty()) WriteFile(inWrite, input.data(), (DWORD)input.size(), &written, nullptr);
+    CloseHandle(inWrite);
+    std::string out;
+    char buf[4096];
+    DWORD got = 0;
+    while (ReadFile(outRead, buf, sizeof(buf), &got, nullptr) && got > 0) out.append(buf, got);
+    CloseHandle(outRead);
+
+    DWORD exitCode = 1;
+    bool finished = WaitForSingleObject(pi.hProcess, 10000) == WAIT_OBJECT_0;
+    if (!finished) TerminateProcess(pi.hProcess, 1);
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    if (output) *output = out;
+    return finished && exitCode == 0;
+}
+
+bool RunInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv, const std::string& input,
+              std::string* output) {
+    // --cd ~: otherwise wsl.exe starts in this app's own Windows working
+    // folder, which a distro without drive mounts can't translate -- it warns
+    // and carries on, but there's no reason to make it try.
+    std::wstring args = L"--cd ~ -d " + distro + L" -e";
+    for (const std::wstring& a : argv) args += L" " + QuoteArg(a);
+    return RunWslExe(args, input, output);
+}
+
+std::set<std::wstring> RunningWslDistros() {
+    std::set<std::wstring> running;
+    std::string raw;
+    if (!RunWslExe(L"--list --running --quiet", "", &raw)) return running;
+    std::wstring text((const wchar_t*)raw.data(), raw.size() / sizeof(wchar_t));
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find(L'\n', pos);
+        std::wstring name = text.substr(pos, (eol == std::wstring::npos ? text.size() : eol) - pos);
+        pos = eol == std::wstring::npos ? text.size() : eol + 1;
+        while (!name.empty() && (name.back() == L'\r' || name.back() == L' ' || name.back() == 0)) name.pop_back();
+        if (!name.empty()) running.insert(name);
+    }
+    return running;
+}
+
+bool LaunchInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv) {
+    std::wstring cmd = QuoteArg(WslExePath()) + L" --cd ~ -d " + distro + L" -e"; // --cd ~: see RunInWsl
+    for (const std::wstring& a : argv) cmd += L" " + QuoteArg(a);
+    STARTUPINFOW si = {sizeof(si)};
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        LogWarn(L"wsl: couldn't launch [%ls] in distro [%ls], lastError=%lu", argv.empty() ? L"" : argv[0].c_str(),
+                distro.c_str(), GetLastError());
+        return false;
+    }
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return true;
+}
+
+std::vector<std::wstring> LinuxVSCodeOpenCommand(const std::wstring& linuxPath) {
+    return {L"env", L"DONT_PROMPT_WSL_INSTALL=1", L"code", L"-n", linuxPath};
+}
+
+std::wstring WslUncPath(const std::wstring& distro, const std::wstring& linuxPath) {
+    std::wstring tail = linuxPath;
+    std::replace(tail.begin(), tail.end(), L'/', L'\\');
+    return L"\\\\wsl.localhost\\" + distro + tail;
+}
+
+bool ParseWslUncPath(const std::wstring& path, std::wstring* distro, std::wstring* linuxPath) {
+    for (const wchar_t* prefix : {L"\\\\wsl.localhost\\", L"\\\\wsl$\\"}) {
+        size_t n = wcslen(prefix);
+        if (path.size() <= n || _wcsnicmp(path.c_str(), prefix, n) != 0) continue;
+        size_t slash = path.find(L'\\', n);
+        std::wstring name = path.substr(n, slash == std::wstring::npos ? std::wstring::npos : slash - n);
+        if (name.empty()) return false;
+        std::wstring tail = slash == std::wstring::npos ? L"/" : path.substr(slash);
+        std::replace(tail.begin(), tail.end(), L'\\', L'/');
+        if (distro) *distro = name;
+        if (linuxPath) *linuxPath = tail;
+        return true;
+    }
+    return false;
 }

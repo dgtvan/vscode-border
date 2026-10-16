@@ -773,12 +773,21 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     bool alreadyFav = hasPath && IsFavourite(state->entries[index].path);
     bool hasAlias = !loading && index >= 0 && index < (int)state->entries.size() &&
                     state->entries[index].label != state->entries[index].rawLabel;
+    // A WSL window's folder (its \\wsl.localhost path, see wsl.h) can only be
+    // shown in Explorer while the distro shares its files with Windows,
+    // which it can switch off -- greyed out then, rather than an item that
+    // silently does nothing. (The distro is running: its window is open.)
+    bool explorerReachable = true;
+    if (hasPath && ParseWslUncPath(state->entries[index].path, nullptr, nullptr)) {
+        DWORD attrs = GetFileAttributesW(state->entries[index].path.c_str());
+        explorerReachable = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+    }
 
     HMENU menu = CreatePopupMenu();
     UINT itemFlags = MF_STRING | (loading ? MF_GRAYED : 0);
     if (hasPath || loading) {
         AppendMenuW(menu, itemFlags, 5, L"Copy Directory Path");
-        AppendMenuW(menu, itemFlags, 6, L"Open Directory in File Explorer");
+        AppendMenuW(menu, itemFlags | (explorerReachable ? 0 : MF_GRAYED), 6, L"Open Directory in File Explorer");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
     AppendMenuW(menu, itemFlags, 1, L"Set Alias...");
@@ -811,14 +820,17 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     } else if (cmd == 4) {
         RemoveFavourite(state->entries[index].path);
     } else if (cmd == 5) {
-        CopyPathToClipboard(hud, state->entries[index].path);
+        // A WSL folder as the Linux path it is inside the distro.
+        std::wstring linuxPath;
+        bool wsl = ParseWslUncPath(state->entries[index].path, nullptr, &linuxPath);
+        CopyPathToClipboard(hud, wsl ? linuxPath : state->entries[index].path);
     } else if (cmd == 6) {
         OpenPathInExplorer(state->entries[index].path);
     } else if (cmd == 7 && index >= 0 && index < (int)state->entries.size()) {
         // Same request as the window's own X button -- VS Code still gets
-        // to prompt about unsaved changes.
+        // to prompt about unsaved changes (see CloseVSCodeWindow).
         HWND target = state->entries[index].target;
-        if (target && IsWindow(target)) PostMessageW(target, WM_CLOSE, 0, 0);
+        CloseVSCodeWindow(target, L"hud-item-close");
         Log(L"hud item close: sent WM_CLOSE to [%ls]", state->entries[index].label.c_str());
     }
 }
@@ -826,8 +838,8 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // Right-click on the fixed "+" new-window button: a "Favourites" submenu
 // holding "Open All" (every favourite not already open -- see
 // OpenAllFavourites for why open ones are skipped), then the saved favourite
-// projects (see favourites.h), each as its own submenu, checked if it's
-// already open -- hovering a favourite's name expands it to "Open in New
+// projects (see favourites.h), each as its own submenu (a WSL folder's
+// marked with the WSL icon) -- hovering a favourite's name expands it to "Open in New
 // Window" (the default/bolded action, see vscode_cli.h's OpenNewVSCodeWindow;
 // on an open one it just re-activates its window) and "Remove from
 // Favourites". A plain
@@ -886,8 +898,14 @@ static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state,
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(sub, MF_STRING, removeId, L"Remove from Favourites");
             SetMenuDefaultItem(sub, openId, FALSE);
-            UINT flags = MF_POPUP | (findOpenHudIndex(favourites[i].path) >= 0 ? MF_CHECKED : MF_UNCHECKED);
-            AppendMenuW(favMenu, flags, (UINT_PTR)sub, favourites[i].label.c_str());
+            AppendMenuW(favMenu, MF_POPUP, (UINT_PTR)sub, favourites[i].label.c_str());
+            // A WSL folder gets the WSL icon, as its hub item does.
+            if (ParseWslUncPath(favourites[i].path, nullptr, nullptr)) {
+                MENUITEMINFOW mii = {sizeof(mii)};
+                mii.fMask = MIIM_BITMAP;
+                mii.hbmpItem = GetWslIconMenuBitmap();
+                if (mii.hbmpItem) SetMenuItemInfoW(favMenu, GetMenuItemCount(favMenu) - 1, TRUE, &mii);
+            }
         }
     }
     HMENU menu = CreatePopupMenu();

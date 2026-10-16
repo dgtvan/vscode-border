@@ -1,4 +1,5 @@
 #include "vscode_cli.h"
+#include "wsl.h"
 
 #include "focus_trace.h"
 #include "logger.h"
@@ -110,11 +111,31 @@ bool RunVSCodeCli(const std::wstring& cmdPath, const std::wstring& args) {
 }
 
 void OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const wchar_t* reason) {
+    // A WSL folder (\\wsl.localhost\<distro>\... -- see wsl.h) opens in that
+    // distro's own Linux VS Code.
+    std::wstring distro, linuxPath;
+    if (ParseWslUncPath(folder, &distro, &linuxPath)) {
+        NoteWindowLaunchRequest(reason, 1);
+        LaunchInWsl(distro, LinuxVSCodeOpenCommand(linuxPath));
+        return;
+    }
     std::wstring cmdPath;
     if (!ResolveVSCodeCliShim(runningWindow, cmdPath)) return;
     std::wstring args = folder.empty() ? L"-n" : L"-n \"" + folder + L"\"";
     NoteWindowLaunchRequest(reason, 1);
     RunVSCodeCli(cmdPath, args);
+}
+
+void CloseVSCodeWindow(HWND target, const wchar_t* reason) {
+    if (!target || !IsWindow(target)) return;
+    wchar_t cls[64] = {};
+    GetClassNameW(target, cls, 64);
+    if (wcscmp(cls, kWslgWindowClass) != 0) {
+        PostMessageW(target, WM_CLOSE, 0, 0);
+        return;
+    }
+    RequestForeground(target, FocusTargetKind::ExternalWindow, reason);
+    SendMessageTimeoutW(target, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 2000, nullptr);
 }
 
 void ConfirmAndCloseVSCodeWindows(HWND owner, const std::vector<HWND>& targets, const wchar_t* source) {
@@ -133,7 +154,7 @@ void ConfirmAndCloseVSCodeWindows(HWND owner, const std::vector<HWND>& targets, 
         return;
     }
     for (HWND target : live) {
-        if (IsWindow(target)) PostMessageW(target, WM_CLOSE, 0, 0);
+        CloseVSCodeWindow(target, L"close-all");
     }
     Log(L"%ls close-all: sent WM_CLOSE to %d window(s)", source, (int)live.size());
 }

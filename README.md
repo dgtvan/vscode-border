@@ -245,7 +245,7 @@ The fixed "+" square at the end of the project list HUD opens a brand-new,
 empty VS Code window on a plain click. Right-clicking it instead opens a
 menu with a **Favourites** submenu: **Open All** first (opens every
 favourite not already open), then your saved favourite projects/folders,
-one submenu per favourite (already-open ones are checked) -- hover a
+one submenu per favourite (a WSL folder's marked with the Tux icon) -- hover a
 favourite's name to expand it to **Open in New Window** (bolded as the
 default action; on an open one it just brings its window forward) and
 **Remove from Favourites**.

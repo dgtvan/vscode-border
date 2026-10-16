@@ -1,6 +1,7 @@
 #include "vscode_settings.h"
 #include "file_util.h"
 #include "logger.h"
+#include "wsl.h"
 
 #include <windows.h>
 
@@ -402,109 +403,6 @@ std::string NarrowAscii(const std::wstring& s) {
     std::string out;
     for (wchar_t c : s) out.push_back(c > 0 && c <= 0x7F ? (char)c : '_');
     return out;
-}
-
-// One argument quoted for a Windows command line (CommandLineToArgvW rules).
-std::wstring QuoteArg(const std::wstring& arg) {
-    std::wstring out = L"\"";
-    size_t backslashes = 0;
-    for (wchar_t c : arg) {
-        if (c == L'\\') {
-            backslashes++;
-            continue;
-        }
-        if (c == L'"') out.append(backslashes * 2 + 1, L'\\');
-        else out.append(backslashes, L'\\');
-        backslashes = 0;
-        out += c;
-    }
-    out.append(backslashes * 2, L'\\');
-    return out + L"\"";
-}
-
-// Runs wsl.exe with `args` (already a command-line tail), feeding it
-// `input` and collecting its stdout+stderr. True if it ran and exited 0
-// within the timeout.
-bool RunWslExe(const std::wstring& args, const std::string& input, std::string* output) {
-    wchar_t sysDir[MAX_PATH] = {};
-    GetSystemDirectoryW(sysDir, MAX_PATH);
-    std::wstring cmd = QuoteArg(std::wstring(sysDir) + L"\\wsl.exe") + L" " + args;
-
-    SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
-    HANDLE inRead = nullptr, inWrite = nullptr, outRead = nullptr, outWrite = nullptr;
-    if (!CreatePipe(&inRead, &inWrite, &sa, 0)) return false;
-    if (!CreatePipe(&outRead, &outWrite, &sa, 0)) {
-        CloseHandle(inRead);
-        CloseHandle(inWrite);
-        return false;
-    }
-    SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si = {sizeof(si)};
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = inRead;
-    si.hStdOutput = outWrite;
-    si.hStdError = outWrite;
-    PROCESS_INFORMATION pi = {};
-    bool started = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si,
-                                  &pi) != 0;
-    CloseHandle(inRead);
-    CloseHandle(outWrite);
-    if (!started) {
-        Log(L"vscode_settings: couldn't run wsl.exe, lastError=%lu", GetLastError());
-        CloseHandle(inWrite);
-        CloseHandle(outRead);
-        return false;
-    }
-
-    DWORD written = 0;
-    if (!input.empty()) WriteFile(inWrite, input.data(), (DWORD)input.size(), &written, nullptr);
-    CloseHandle(inWrite);
-    std::string out;
-    char buf[4096];
-    DWORD got = 0;
-    while (ReadFile(outRead, buf, sizeof(buf), &got, nullptr) && got > 0) out.append(buf, got);
-    CloseHandle(outRead);
-
-    DWORD exitCode = 1;
-    bool finished = WaitForSingleObject(pi.hProcess, 10000) == WAIT_OBJECT_0;
-    if (!finished) TerminateProcess(pi.hProcess, 1);
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    if (output) *output = out;
-    return finished && exitCode == 0;
-}
-
-// Runs `argv` inside the distro as its default user (wsl.exe -d <distro> -e
-// ...). Used instead of the \\wsl.localhost share, which a distro can have
-// switched off (e.g. with interop disabled), while wsl.exe from Windows
-// always works. The distro name goes in unquoted: wsl.exe takes -d's value
-// verbatim, quotes and all (names can't contain spaces anyway).
-bool RunInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv, const std::string& input,
-              std::string* output) {
-    std::wstring args = L"-d " + distro + L" -e";
-    for (const std::wstring& a : argv) args += L" " + QuoteArg(a);
-    return RunWslExe(args, input, output);
-}
-
-// Distros running right now. wsl.exe's own output is UTF-16, one name per
-// line. Doesn't start anything.
-std::set<std::wstring> RunningWslDistros() {
-    std::set<std::wstring> running;
-    std::string raw;
-    if (!RunWslExe(L"--list --running --quiet", "", &raw)) return running;
-    std::wstring text((const wchar_t*)raw.data(), raw.size() / sizeof(wchar_t));
-    size_t pos = 0;
-    while (pos < text.size()) {
-        size_t eol = text.find(L'\n', pos);
-        std::wstring name = text.substr(pos, (eol == std::wstring::npos ? text.size() : eol) - pos);
-        pos = eol == std::wstring::npos ? text.size() : eol + 1;
-        while (!name.empty() && (name.back() == L'\r' || name.back() == L' ' || name.back() == 0)) name.pop_back();
-        if (!name.empty()) running.insert(name);
-    }
-    return running;
 }
 
 void ApplyToWslDistro(std::map<std::string, TargetState>& states, const std::wstring& distro, bool enable) {
