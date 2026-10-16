@@ -10,6 +10,7 @@
 #include "window_discovery.h"
 #include "window_title.h"
 #include "worktree_resolver.h"
+#include "vscode_settings.h"
 #include "wsl.h"
 
 #include <algorithm>
@@ -639,6 +640,7 @@ static void TrackWindow(HWND hwnd) {
     tw.trackSeq = g_nextTrackSeq++;
     tw.loadingEpisodeStartTick = GetTickCount64();
     ApplyLabelForTitle(tw, title);
+    NoteWslVSCodeDistro(tw.wslDistro, g_config.showLabel);
     LogDiag(L"tracked(initial) hwnd=%p title=[%ls] rawLabel=[%ls] hasRepoInTitle=%d loadingEpisodeStartTick=%llu",
             hwnd, title, tw.rawLabel.c_str(), tw.hasRepoInTitle, (unsigned long long)tw.loadingEpisodeStartTick);
     g_tracked[hwnd] = tw;

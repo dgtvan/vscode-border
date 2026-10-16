@@ -571,3 +571,5 @@ to pick up worktrees created after the app started.
 ## Credits
 
 Tray icon: ["Square dashed" icon](https://www.flaticon.com/free-icon/square-dashed_17295663) from Flaticon.
+
+WSL icon: Tux image from [relief-melone/wsl-initial-setup](https://gitlab.com/relief-melone/wsl-initial-setup) on GitLab.

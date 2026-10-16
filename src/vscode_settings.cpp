@@ -5,7 +5,9 @@
 #include <windows.h>
 
 #include <map>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -14,6 +16,11 @@ namespace {
 // format) need matching updates.
 const char* kDesiredValueJson =
     "\"${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName}\"";
+// Linux VS Code in a WSL distro (see wsl.h): the same, plus the app name --
+// a WSLg window can only be told apart from other Linux apps by
+// "Visual Studio Code" in its title, which ParseVSCodeTitle then strips.
+const char* kDesiredValueJsonWsl =
+    "\"${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName} - ${appName}\"";
 const char* kWindowTitleKey = "window.title";
 
 struct TargetState {
@@ -319,57 +326,46 @@ std::string InsertTopLevelKey(std::string content, const std::string& key, const
 // Per-target apply
 // ---------------------------------------------------------------------------
 
-void ApplyToTarget(std::map<std::string, TargetState>& states, const wchar_t* variantDirName,
-                    const std::string& section, bool enable) {
-    wchar_t appDataBuf[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"APPDATA", appDataBuf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) {
-        Log(L"vscode_settings: %%APPDATA%% not available");
-        return;
-    }
-
-    std::wstring userDir = std::wstring(appDataBuf) + L"\\" + variantDirName + L"\\User";
-    if (!DirectoryExists(userDir)) return; // this VS Code variant isn't installed
-
-    std::wstring settingsPath = userDir + L"\\settings.json";
-    std::string content = ReadFileBytes(settingsPath);
-
+// Applies `enable` to one settings.json's text (`content`, BOM and all) and
+// to its entry in `states`. True if `content` changed and needs writing back.
+bool ApplyToContent(std::map<std::string, TargetState>& states, const std::string& section,
+                    const char* desiredValueJson, bool enable, std::string& content) {
     bool hadBom = content.size() >= 3 && (unsigned char)content[0] == 0xEF &&
                   (unsigned char)content[1] == 0xBB && (unsigned char)content[2] == 0xBF;
     std::string bom = hadBom ? content.substr(0, 3) : "";
-    if (hadBom) content.erase(0, 3);
+    std::string body = hadBom ? content.substr(3) : content;
 
-    JsonEntry entry = FindTopLevelKey(content, kWindowTitleKey);
-    std::string currentRaw = entry.found ? content.substr(entry.valueStart, entry.valueEnd - entry.valueStart) : "";
+    JsonEntry entry = FindTopLevelKey(body, kWindowTitleKey);
+    std::string currentRaw = entry.found ? body.substr(entry.valueStart, entry.valueEnd - entry.valueStart) : "";
 
     TargetState& st = states[section];
     bool changed = false;
 
     if (enable) {
-        if (entry.found && currentRaw == kDesiredValueJson) {
-            return; // already exactly what we want -- ours or coincidentally the user's, either way nothing to do
+        if (entry.found && currentRaw == desiredValueJson) {
+            return false; // already exactly what we want -- ours or coincidentally the user's, either way nothing to do
         }
         st.managed = true;
         st.hadKey = entry.found;
         st.originalValueRaw = currentRaw;
-        content = entry.found
-            ? content.substr(0, entry.valueStart) + kDesiredValueJson + content.substr(entry.valueEnd)
-            : InsertTopLevelKey(content, kWindowTitleKey, kDesiredValueJson);
+        body = entry.found
+            ? body.substr(0, entry.valueStart) + desiredValueJson + body.substr(entry.valueEnd)
+            : InsertTopLevelKey(body, kWindowTitleKey, desiredValueJson);
         changed = true;
         Log(L"vscode_settings: [%hs] enabling label -- set window.title (previously %ls)", section.c_str(),
             entry.found ? L"had a value" : L"was unset");
     } else {
-        if (!st.managed) return; // this app never took ownership here -- nothing to restore
-        if (!entry.found || currentRaw != kDesiredValueJson) {
+        if (!st.managed) return false; // this app never took ownership here -- nothing to restore
+        if (!entry.found || currentRaw != desiredValueJson) {
             Log(L"vscode_settings: [%hs] window.title changed externally since we set it -- leaving as-is, "
                 L"dropping ownership",
                 section.c_str());
         } else if (st.hadKey) {
-            content = content.substr(0, entry.valueStart) + st.originalValueRaw + content.substr(entry.valueEnd);
+            body = body.substr(0, entry.valueStart) + st.originalValueRaw + body.substr(entry.valueEnd);
             changed = true;
             Log(L"vscode_settings: [%hs] disabling label -- restored original window.title", section.c_str());
         } else {
-            content = RemoveTopLevelKey(content, entry);
+            body = RemoveTopLevelKey(body, entry);
             changed = true;
             Log(L"vscode_settings: [%hs] disabling label -- removed window.title (didn't exist before)",
                 section.c_str());
@@ -379,14 +375,166 @@ void ApplyToTarget(std::map<std::string, TargetState>& states, const wchar_t* va
         st.originalValueRaw.clear();
     }
 
-    if (changed) WriteFileBytes(settingsPath, bom + content);
+    if (changed) content = bom + body;
+    return changed;
 }
+
+// `userDir` is a VS Code "User" settings folder on Windows; does nothing if
+// it doesn't exist (that VS Code variant isn't installed).
+void ApplyToWindowsDir(std::map<std::string, TargetState>& states, const std::wstring& userDir,
+                       const std::string& section, bool enable) {
+    if (!DirectoryExists(userDir)) return;
+    std::wstring settingsPath = userDir + L"\\settings.json";
+    std::string content = ReadFileBytes(settingsPath);
+    if (ApplyToContent(states, section, kDesiredValueJson, enable, content)) WriteFileBytes(settingsPath, content);
+}
+
+std::string NarrowAscii(const std::wstring& s) {
+    std::string out;
+    for (wchar_t c : s) out.push_back(c > 0 && c <= 0x7F ? (char)c : '_');
+    return out;
+}
+
+// One argument quoted for a Windows command line (CommandLineToArgvW rules).
+std::wstring QuoteArg(const std::wstring& arg) {
+    std::wstring out = L"\"";
+    size_t backslashes = 0;
+    for (wchar_t c : arg) {
+        if (c == L'\\') {
+            backslashes++;
+            continue;
+        }
+        if (c == L'"') out.append(backslashes * 2 + 1, L'\\');
+        else out.append(backslashes, L'\\');
+        backslashes = 0;
+        out += c;
+    }
+    out.append(backslashes * 2, L'\\');
+    return out + L"\"";
+}
+
+// Runs `argv` inside the distro as its default user (wsl.exe -d <distro> -e
+// ...), feeding it `input` and collecting its stdout. Used instead of the
+// \\wsl.localhost share, which a distro can have switched off (e.g. with
+// interop disabled), while wsl.exe from Windows always works. True if it
+// ran and exited 0 within the timeout. The distro name goes in unquoted:
+// wsl.exe takes -d's value verbatim, quotes and all (names can't contain
+// spaces anyway).
+bool RunInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv, const std::string& input,
+              std::string* output) {
+    wchar_t sysDir[MAX_PATH] = {};
+    GetSystemDirectoryW(sysDir, MAX_PATH);
+    std::wstring cmd = QuoteArg(std::wstring(sysDir) + L"\\wsl.exe") + L" -d " + distro + L" -e";
+    for (const std::wstring& a : argv) cmd += L" " + QuoteArg(a);
+
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
+    HANDLE inRead = nullptr, inWrite = nullptr, outRead = nullptr, outWrite = nullptr;
+    if (!CreatePipe(&inRead, &inWrite, &sa, 0)) return false;
+    if (!CreatePipe(&outRead, &outWrite, &sa, 0)) {
+        CloseHandle(inRead);
+        CloseHandle(inWrite);
+        return false;
+    }
+    SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = inRead;
+    si.hStdOutput = outWrite;
+    si.hStdError = outWrite;
+    PROCESS_INFORMATION pi = {};
+    bool started = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si,
+                                  &pi) != 0;
+    CloseHandle(inRead);
+    CloseHandle(outWrite);
+    if (!started) {
+        Log(L"vscode_settings: couldn't run wsl.exe for [%ls], lastError=%lu", distro.c_str(), GetLastError());
+        CloseHandle(inWrite);
+        CloseHandle(outRead);
+        return false;
+    }
+
+    DWORD written = 0;
+    if (!input.empty()) WriteFile(inWrite, input.data(), (DWORD)input.size(), &written, nullptr);
+    CloseHandle(inWrite);
+    std::string out;
+    char buf[4096];
+    DWORD got = 0;
+    while (ReadFile(outRead, buf, sizeof(buf), &got, nullptr) && got > 0) out.append(buf, got);
+    CloseHandle(outRead);
+
+    DWORD exitCode = 1;
+    bool finished = WaitForSingleObject(pi.hProcess, 10000) == WAIT_OBJECT_0;
+    if (!finished) TerminateProcess(pi.hProcess, 1);
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    if (output) *output = out;
+    return finished && exitCode == 0;
+}
+
+void ApplyToWslDistro(std::map<std::string, TargetState>& states, const std::wstring& distro, bool enable) {
+    // Whichever of VS Code's two variants has a settings folder in the
+    // default user's home -- one path per line.
+    std::string listing;
+    if (!RunInWsl(distro,
+                  {L"sh", L"-c",
+                   L"for d in \"$HOME/.config/Code/User\" \"$HOME/.config/Code - Insiders/User\"; do "
+                   L"[ -d \"$d\" ] && echo \"$d\"; done; true"},
+                  "", &listing)) {
+        Log(L"vscode_settings: couldn't look for VS Code settings in WSL distro [%ls] -- window.title left as-is "
+            L"(wsl.exe said: %hs)",
+            distro.c_str(), listing.c_str());
+        return;
+    }
+    size_t pos = 0;
+    while (pos < listing.size()) {
+        size_t eol = listing.find('\n', pos);
+        std::string dir = listing.substr(pos, (eol == std::string::npos ? listing.size() : eol) - pos);
+        pos = eol == std::string::npos ? listing.size() : eol + 1;
+        if (dir.empty()) continue;
+        bool insiders = dir.find("Code - Insiders") != std::string::npos;
+        std::string section = "WSL:" + NarrowAscii(distro) + ":" + (insiders ? "CodeInsiders" : "Code");
+        std::wstring path = std::wstring(dir.begin(), dir.end()) + L"/settings.json"; // $HOME paths are ASCII in practice
+
+        std::string content;
+        if (!RunInWsl(distro, {L"sh", L"-c", L"cat -- \"$1\" 2>/dev/null; true", L"sh", path}, "", &content)) {
+            Log(L"vscode_settings: [%hs] couldn't read settings.json", section.c_str());
+            continue;
+        }
+        if (!ApplyToContent(states, section, kDesiredValueJsonWsl, enable, content)) continue;
+        if (!RunInWsl(distro, {L"sh", L"-c", L"cat > \"$1\"", L"sh", path}, content, nullptr)) {
+            Log(L"vscode_settings: [%hs] couldn't write settings.json", section.c_str());
+        }
+    }
+}
+
+// Distros a Linux VS Code window has been seen in this session (see
+// NoteWslVSCodeDistro) -- the only ones SyncWindowTitleSetting touches, so
+// it never wakes a stopped distro just by reading its files.
+std::set<std::wstring> g_seenWslDistros;
 
 } // namespace
 
 void SyncWindowTitleSetting(bool enableLabel) {
+    wchar_t appDataBuf[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", appDataBuf, MAX_PATH);
     std::map<std::string, TargetState> states = LoadState();
-    ApplyToTarget(states, L"Code", "Code", enableLabel);
-    ApplyToTarget(states, L"Code - Insiders", "CodeInsiders", enableLabel);
+    if (n == 0 || n >= MAX_PATH) {
+        Log(L"vscode_settings: %%APPDATA%% not available");
+    } else {
+        std::wstring appData(appDataBuf);
+        ApplyToWindowsDir(states, appData + L"\\Code\\User", "Code", enableLabel);
+        ApplyToWindowsDir(states, appData + L"\\Code - Insiders\\User", "CodeInsiders", enableLabel);
+    }
+    for (const std::wstring& distro : g_seenWslDistros) ApplyToWslDistro(states, distro, enableLabel);
+    SaveState(states);
+}
+
+void NoteWslVSCodeDistro(const std::wstring& distro, bool enableLabel) {
+    if (distro.empty() || !g_seenWslDistros.insert(distro).second) return;
+    std::map<std::string, TargetState> states = LoadState();
+    ApplyToWslDistro(states, distro, enableLabel);
     SaveState(states);
 }
