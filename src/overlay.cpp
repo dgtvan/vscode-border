@@ -26,7 +26,7 @@ static const int kMinResizeWidth = 400, kMinResizeHeight = 270;
 static const UINT_PTR kResizeTimerId = 1;
 static const UINT kResizeTimerMs = 30;
 // Gives up waiting for a size to land and sends the next one anyway.
-static const ULONGLONG kResizeSettleTimeoutMs = 250;
+static const ULONGLONG kResizeSettleTimeoutMs = 120;
 
 struct OverlayState {
     HWND target = nullptr;
@@ -42,6 +42,8 @@ struct OverlayState {
     bool dragging = false; // ...and has moved past kLabelDragThreshold
     RECT wantRect = {};    // resizing: where the cursor says the window should be now
     RECT sentRect = {};    // resizing: the last rect actually sent (empty = none outstanding)
+    RECT sentFrom = {};    // resizing: the window's rect when it was sent -- once that changes, WSLg has
+                           // replied (see SendResize)
     ULONGLONG sentTick = 0;
     ULONGLONG releaseTick = 0; // resizing: when the button came up -- see WM_TIMER
     bool wasZoomed = false; // target was maximized when the press began
@@ -95,16 +97,31 @@ static LPCWSTR ResizeCursor(int edges) {
     return h ? IDC_SIZEWE : IDC_SIZENS;
 }
 
-// Sends st.wantRect to the window -- but only once it has reached the last
-// size sent (or that's taken longer than kResizeSettleTimeoutMs). A WSLg
-// window's size is decided by Linux VS Code: each one set here goes to it
-// and comes back as its own reply some moments later, so firing one per
-// mouse move has older replies landing after newer requests -- the window
-// ends up at some earlier size, or jumps about. Pacing them keeps just one
-// in flight. Called on every mouse move and kResizeTimerId tick of a resize.
+// Asks for st.wantRect. With the patched WSLg (see wsl.h), only through its
+// control FIFO: Linux VS Code decides the size it actually takes (it may
+// round, or hit a limit), and WSLg's reply then sets the Windows frame to
+// match -- setting the frame here as well would leave the two disagreeing
+// whenever the app picks a slightly different size, and the border (drawn
+// from the frame) off the app. One request at a time: the next goes once the
+// window has changed since the last one (WSLg replied) or
+// kResizeSettleTimeoutMs has passed, and never the same rect twice -- so
+// older replies can't land after newer requests. Without the patch, the
+// frame is all there is to set. Called on every mouse move and
+// kResizeTimerId tick of a resize.
 static void SendResize(OverlayState& st) {
     RECT now;
     if (!GetWindowRect(st.target, &now)) return;
+    std::wstring distro = TargetWslDistro(st.target);
+    if (!distro.empty() && WslgWindowControlAvailable(distro)) {
+        if (EqualRect(&st.wantRect, &st.sentRect)) return; // already asked for (the timer stops on release)
+        bool outstanding = !IsRectEmpty(&st.sentRect) && EqualRect(&now, &st.sentFrom);
+        if (outstanding && GetTickCount64() - st.sentTick < kResizeSettleTimeoutMs) return;
+        SendWslgWindowRect(st.target, distro, st.wantRect);
+        st.sentRect = st.wantRect;
+        st.sentFrom = now;
+        st.sentTick = GetTickCount64();
+        return;
+    }
     if (!IsRectEmpty(&st.sentRect) && !EqualRect(&now, &st.sentRect) &&
         GetTickCount64() - st.sentTick < kResizeSettleTimeoutMs) {
         return; // still on its way
@@ -115,8 +132,6 @@ static void SendResize(OverlayState& st) {
     }
     SetWindowPos(st.target, nullptr, st.wantRect.left, st.wantRect.top, st.wantRect.right - st.wantRect.left,
                  st.wantRect.bottom - st.wantRect.top, SWP_NOZORDER | SWP_NOACTIVATE);
-    // ...and tell Linux, which wouldn't hear of it otherwise (see wsl.h).
-    SendWslgWindowRect(st.target, TargetWslDistro(st.target), st.wantRect);
     st.sentRect = st.wantRect;
     st.sentTick = GetTickCount64();
 }
@@ -264,9 +279,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // Keeps sending until the window has reached where the cursor
             // left it -- also after the button is up (see WM_CAPTURECHANGED).
             if (st.target && IsWindow(st.target)) SendResize(st);
-            // Stops once it has (or a second after release regardless, in
-            // case the window settles on a size of its own).
-            if (!st.pressed && (IsRectEmpty(&st.sentRect) || GetTickCount64() - st.releaseTick > 1000)) {
+            // After release: stops once the last size has been sent (FIFO)
+            // or reached (frame), or a second after release regardless, in
+            // case the window settles on a size of its own.
+            if (!st.pressed && (IsRectEmpty(&st.sentRect) || EqualRect(&st.sentRect, &st.wantRect) ||
+                                GetTickCount64() - st.releaseTick > 1000)) {
                 st.sentRect = {};
                 KillTimer(hwnd, kResizeTimerId);
             }

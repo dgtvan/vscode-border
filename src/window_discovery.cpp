@@ -67,13 +67,24 @@ bool IsCandidateTopLevelWindow(HWND hwnd) {
 }
 
 // A WSLg window's shadow margin while not maximized (see wsl.h's
-// MeasureWslgShadowInsets), remembered per window: measuring means
-// rendering the whole window, so it's only redone when moving to another
-// monitor (which can change its DPI scale) -- never on a plain move or
-// resize, which keep it the same.
+// MeasureWslgShadowInsets), remembered per window. Measuring means rendering
+// the whole window, so it isn't redone on a plain move; it is after a size
+// change (once the size has held for kWslgRemeasureSettleMs -- not on every
+// step of a resize -- and at most every kWslgRemeasureIntervalMs) and on a
+// monitor change (DPI). Only a measurement with the same margin on all four
+// sides is kept: Linux VS Code's shadow is uniform, so anything else is the
+// window caught mid-change (or out of step with the app inside it), and the
+// last good margin stands until a uniform one comes back.
+static const ULONGLONG kWslgRemeasureSettleMs = 300;
+static const ULONGLONG kWslgRemeasureIntervalMs = 1000;
 struct WslgInsetCache {
+    bool valid = false;      // insets holds a good (uniform) measurement
     HMONITOR monitor = nullptr;
+    SIZE size = {};          // window size `insets` was measured at
     RECT insets = {};
+    SIZE seenSize = {};      // window size last seen, and when it last changed
+    ULONGLONG seenTick = 0;
+    ULONGLONG lastMeasureTick = 0;
 };
 static std::map<HWND, WslgInsetCache> g_wslgInsets;
 
@@ -93,22 +104,34 @@ static void ApplyWslgShadowInsets(HWND hwnd, RECT& rect) {
         }
         return;
     }
-    auto it = g_wslgInsets.find(hwnd);
-    if (it == g_wslgInsets.end() || it->second.monitor != monitor) {
+    WslgInsetCache& c = g_wslgInsets[hwnd];
+    ULONGLONG now = GetTickCount64();
+    SIZE size = {rect.right - rect.left, rect.bottom - rect.top};
+    if (size.cx != c.seenSize.cx || size.cy != c.seenSize.cy) {
+        c.seenSize = size;
+        c.seenTick = now;
+    }
+    bool current = c.valid && c.monitor == monitor && c.size.cx == size.cx && c.size.cy == size.cy;
+    bool due = !c.valid || c.monitor != monitor ||
+               (!current && now - c.seenTick >= kWslgRemeasureSettleMs);
+    if (due && now - c.lastMeasureTick >= (c.valid ? kWslgRemeasureIntervalMs : 0)) {
+        c.lastMeasureTick = now;
         RECT insets;
-        // Not cached on failure (e.g. content not painted yet), so the next
-        // sync tries again; until then the last good value, if any, stands.
-        if (!MeasureWslgShadowInsets(hwnd, insets)) {
-            if (it == g_wslgInsets.end()) return;
-        } else {
-            Log(L"wsl: hwnd=%p shadow insets l=%ld t=%ld r=%ld b=%ld (monitor=%p)", hwnd, insets.left, insets.top,
-                insets.right, insets.bottom, monitor);
-            WslgInsetCache& c = g_wslgInsets[hwnd];
+        if (MeasureWslgShadowInsets(hwnd, insets) && insets.left == insets.top && insets.left == insets.right &&
+            insets.left == insets.bottom) {
+            if (!c.valid || !EqualRect(&insets, &c.insets) || c.monitor != monitor) {
+                Log(L"wsl: hwnd=%p shadow insets l=%ld t=%ld r=%ld b=%ld (monitor=%p)", hwnd, insets.left,
+                    insets.top, insets.right, insets.bottom, monitor);
+            }
+            c.valid = true;
             c.monitor = monitor;
+            c.size = size;
             c.insets = insets;
-            it = g_wslgInsets.find(hwnd);
         }
     }
+    // Not measured well yet (e.g. content not painted): the window rect as is.
+    if (!c.valid) return;
+    auto it = g_wslgInsets.find(hwnd);
     rect.left += it->second.insets.left;
     rect.top += it->second.insets.top;
     rect.right -= it->second.insets.right;
@@ -117,7 +140,7 @@ static void ApplyWslgShadowInsets(HWND hwnd, RECT& rect) {
 
 int GetWslgShadowMargin(HWND hwnd) {
     auto it = g_wslgInsets.find(hwnd);
-    if (it == g_wslgInsets.end()) return 0;
+    if (it == g_wslgInsets.end() || !it->second.valid) return 0;
     const RECT& in = it->second.insets;
     // Only a uniform margin is trusted as "the" margin.
     return (in.left == in.top && in.left == in.right && in.left == in.bottom) ? in.left : 0;

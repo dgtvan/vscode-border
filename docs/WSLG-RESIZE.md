@@ -60,10 +60,19 @@ either: **this app is the writer**. For WSL windows, the border overlay gets
 an invisible 5px strip outside its border -- an 8px grab zone with the 3px
 border, about the size of a Windows window's own resize band -- that shows the
 matching resize cursor and resizes the window from that edge or corner. Each
-step goes to the window as a `SetWindowPos` (so the frame follows at once)
-*and* down the FIFO (so Weston resizes the Linux app to match), paced so only
-one size is in flight at a time. A label drag sends the final position the same
-way, so Linux keeps its menus and popups where the window actually is.
+step goes *only* down the FIFO: Linux VS Code decides the size it actually
+takes (it may round, or hit a limit), and WSLg's reply then sets the Windows
+frame to match. Setting the frame from here as well leaves the two out of
+step whenever the app picks a slightly different size -- the app then hangs
+outside its frame, and the border is drawn off it. Requests are paced so only
+one is in flight at a time (the next goes once WSLg has replied, or after
+120 ms). A label drag sends the final position the same way, so Linux keeps
+its menus and popups where the window actually is.
+
+The border's shadow-margin measurement is redone after a size change once the
+size has held for 300 ms, and only kept if the margin is the same on all four
+sides (Linux VS Code's always is) -- a measurement taken mid-change, or of a
+window whose frame and app disagree, is thrown away.
 
 The strip only appears when that distro's WSLg has the control FIFO, i.e. the
 patched modules are loaded; on stock WSLg it stays off (re-checked once a
