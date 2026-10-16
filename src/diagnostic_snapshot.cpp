@@ -700,7 +700,7 @@ void WriteUntrackedVSCodeWindows(Report& rep, const std::vector<HWND>& zOrder,
     for (HWND hwnd : zOrder) {
         if (trackedSet.count(hwnd) || !IsWindowVisible(hwnd)) continue;
         std::wstring exe;
-        if (!GetProcessImageName(hwnd, exe) || !IsVSCodeExe(exe)) continue;
+        if (!GetProcessImageName(hwnd, exe) || !IsVSCodeWindowProcess(hwnd, exe)) continue;
         RECT physRc = {};
         {
             PhysicalPixelsScope phys;

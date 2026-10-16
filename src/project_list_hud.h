@@ -31,6 +31,8 @@ struct ProjectListHudEntry {
                             // "Copy Directory Path" and "Open Directory in File Explorer".
     COLORREF color = RGB(0, 0, 0);
     ClaudeStatus claudeStatus = ClaudeStatus::None;
+    std::wstring wslDistro; // distro a WSLg window's Linux VS Code runs in (see wsl.h), empty for Windows
+                            // VS Code -- shown as that distro's icon just left of the AI status indicator
     // True while rawLabel might still change (VS Code's title/worktree
     // mapping still settling -- see tracking.cpp's IsWindowLoading). Drawn
     // greyed out with a spinner instead of its real color/AI status, and

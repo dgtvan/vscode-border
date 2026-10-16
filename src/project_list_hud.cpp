@@ -9,6 +9,7 @@
 #include "project_list_order.h"
 #include "taskbar_backdrop.h"
 #include "vscode_cli.h"
+#include "wsl.h"
 
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -17,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
+#include <map>
 
 static const wchar_t* kProjectListHudClassName = L"VSCodeBorderProjectListHudWndClass";
 static const int kProjectListGap = 6;
@@ -577,9 +579,14 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index, const
 
 // The running VS Code window the CLI shim is derived from (see
 // vscode_cli.h's ResolveVSCodeCliShim) -- null once every window is closed,
-// which that resolver falls back from.
+// which that resolver falls back from. Never a WSLg window: its process is
+// WSL's msrdc.exe, not a VS Code install with a shim next to it.
 static HWND AnyTrackedWindow(const ProjectListHudState* state) {
-    return (state && !state->entries.empty()) ? state->entries[0].target : nullptr;
+    if (!state) return nullptr;
+    for (const ProjectListHudEntry& e : state->entries) {
+        if (e.wslDistro.empty()) return e.target;
+    }
+    return nullptr;
 }
 
 // Minimizes every tracked VS Code window -- the hub's minimize-all button.
@@ -1503,6 +1510,82 @@ static void DrawFavouriteMarker(UINT32* pixels, int width, int height, const REC
     FillStar(pixels, width, height, cx, cy, kFillRadius, kFillColorPx);
 }
 
+// A WSLg entry's distro icon (see ProjectListHudEntry::wslDistro): sits
+// just left of the AI status indicator's slot -- whose 14px footprint and
+// 4px margin from the item's right edge are shared by all three of its
+// states, see DrawHudItem -- whether or not that slot is showing anything,
+// so the icon never shifts as the AI status comes and goes.
+static const int kWslIconSize = 14, kWslIconGap = 4;
+static const int kWslIconRightOffset = 4 + 14 + kWslIconGap + kWslIconSize; // item right edge -> icon left edge
+// How much further from the right edge a WSLg entry's label stops than a
+// plain one's (12px) does, to keep clear of the icon.
+static const int kWslIconExtraTextPad = kWslIconRightOffset + 2 - 12;
+
+// The distro icon rendered to premultiplied ARGB (kWslIconSize^2 pixels),
+// cached per distro; empty if GetWslDistroIcon has none.
+static const std::vector<UINT32>& WslDistroIconPixels(const std::wstring& distro) {
+    static std::map<std::wstring, std::vector<UINT32>> cache;
+    auto it = cache.find(distro);
+    if (it != cache.end()) return it->second;
+    std::vector<UINT32>& out = cache[distro];
+    HICON icon = GetWslDistroIcon(distro, kWslIconSize);
+    if (!icon) return out;
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = kWslIconSize;
+    bmi.bmiHeader.biHeight = -kWslIconSize; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HBITMAP bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp && bits) {
+        HGDIOBJ old = SelectObject(dc, bmp);
+        memset(bits, 0, kWslIconSize * kWslIconSize * 4);
+        DrawIconEx(dc, 0, 0, icon, kWslIconSize, kWslIconSize, 0, nullptr, DI_NORMAL);
+        GdiFlush();
+        const UINT32* src = (const UINT32*)bits;
+        out.assign(src, src + kWslIconSize * kWslIconSize);
+        // An old-style icon with no alpha channel comes out all-zero alpha
+        // -- treat it as fully opaque rather than invisible.
+        bool anyAlpha = std::any_of(out.begin(), out.end(), [](UINT32 px) { return (px >> 24) != 0; });
+        if (!anyAlpha) for (UINT32& px : out) px |= 0xFF000000u;
+        SelectObject(dc, old);
+    }
+    if (bmp) DeleteObject(bmp);
+    DeleteDC(dc);
+    return out;
+}
+
+// Composites `entry`'s distro icon (if it's a WSLg entry) onto the chip --
+// before DrawHudItem's opacity pass, so it fades with the rest of the chip.
+static void DrawWslDistroIcon(UINT32* pixels, int width, int height, const RECT& item, int rowHeight,
+                              const std::wstring& distro) {
+    const std::vector<UINT32>& icon = WslDistroIconPixels(distro);
+    if (icon.empty()) return;
+    int left = (int)item.right - kWslIconRightOffset;
+    int top = (int)item.top + (rowHeight - kWslIconSize) / 2;
+    for (int y = 0; y < kWslIconSize; y++) {
+        int row = top + y;
+        if (row < 0 || row >= height || row < item.top || row >= item.bottom) continue;
+        for (int x = 0; x < kWslIconSize; x++) {
+            int col = left + x;
+            if (col < 0 || col >= width || col < item.left || col >= item.right) continue;
+            UINT32 s = icon[y * kWslIconSize + x];
+            UINT32 a = s >> 24;
+            if (!a) continue;
+            UINT32 d = pixels[row * width + col];
+            auto blend = [&](int shift) {
+                UINT32 sc = (s >> shift) & 0xFF, dc = (d >> shift) & 0xFF;
+                return std::min<UINT32>(255, sc + dc * (255 - a) / 255) << shift; // src is premultiplied
+            };
+            pixels[row * width + col] = 0xFF000000u | blend(16) | blend(8) | blend(0);
+        }
+    }
+}
+
 // Draws one entry's chip (background + label text, alpha-blended by
 // `opacity`) into `pixels` at `item`. `item` may fall partly or entirely
 // outside [0,width)x[0,height) -- used for the floating dragged item
@@ -1589,10 +1672,12 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
     // below so it fades with the rest of the chip on hover/normal opacity,
     // same reasoning as the Claude status indicator's placement.
     if (showFavouriteMarker) DrawFavouriteMarker(pixels, width, height, item, color);
+    if (!entry.wslDistro.empty()) DrawWslDistroIcon(pixels, width, height, item, rowHeight, entry.wslDistro);
 
+    int rightTextPad = paddingX + (entry.wslDistro.empty() ? 0 : kWslIconExtraTextPad);
     COLORREF tx = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
     BlendTextIntoPixels(screenDC, pixels, width, height, item.left + leftTextPad, item.top,
-                        itemWidth - leftTextPad - paddingX, rowHeight, entry.label, font,
+                        itemWidth - leftTextPad - rightTextPad, rowHeight, entry.label, font,
                         chipColor, tx, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Claude Code status indicator, top-right corner -- drawn before the
@@ -1997,7 +2082,8 @@ static int MeasureRequiredWidth(const std::vector<ProjectListHudEntry>& entries,
         // item uses) -- added on top of the usual measure padding so a
         // favourite's label isn't truncated any more than a non-favourite's
         // would be at the same text width.
-        int reserve = kProjectListMeasurePaddingX + (EntryIsFavourite(entry) ? (kFavouriteMarkerLeftPad - 12) : 0);
+        int reserve = kProjectListMeasurePaddingX + (EntryIsFavourite(entry) ? (kFavouriteMarkerLeftPad - 12) : 0) +
+                      (entry.wslDistro.empty() ? 0 : kWslIconExtraTextPad);
         GetTextExtentPoint32W(screenDC, entry.label.c_str(), (int)entry.label.size(), &textSz);
         width = std::max(width, (int)textSz.cx + reserve);
     }

@@ -1,5 +1,6 @@
 #include "window_title.h"
 #include "logger.h"
+#include "wsl.h"
 
 #include <vector>
 
@@ -20,6 +21,8 @@ static std::vector<std::wstring> SplitDashSeparated(const std::wstring& s) {
 
 VSCodeTitleParts ParseVSCodeTitle(const std::wstring& title) {
     std::wstring t = title;
+    // A WSLg window's title has " (<distro>)" after VS Code's own title.
+    SplitWslgVSCodeTitle(title, &t, nullptr);
     static const wchar_t* kSuffixes[] = {
         L" - Visual Studio Code - Insiders",
         L" - Visual Studio Code",
@@ -31,6 +34,8 @@ VSCodeTitleParts ParseVSCodeTitle(const std::wstring& title) {
             break;
         }
     }
+    // The bare app name -- a window with nothing open yet.
+    if (t == L"Visual Studio Code" || t == L"Visual Studio Code - Insiders") t.clear();
 
     VSCodeTitleParts parts;
     std::vector<std::wstring> segments = SplitDashSeparated(t);

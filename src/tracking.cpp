@@ -10,6 +10,7 @@
 #include "window_discovery.h"
 #include "window_title.h"
 #include "worktree_resolver.h"
+#include "wsl.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -70,6 +71,8 @@ struct TrackedWindow {
     std::wstring repoName;   // the title's raw ${activeRepositoryName} (pre-worktree-substitution), empty
                               // outside a git repo -- ResolveFolderPath's hint for picking between several
                               // recorded folders that share folderName
+    std::wstring wslDistro;  // distro a WSLg window's Linux VS Code runs in (from its title, see wsl.h),
+                              // empty for a Windows VS Code window
     std::wstring lastLabel; // label last painted, to detect changes
     RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized -- lets a minimized
                               // window's project-list HUD entry keep sorting where it normally sits
@@ -113,6 +116,8 @@ static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
     if (folderName != tw.folderName || parts.repo != tw.repoName) InvalidateWorktreeCache();
     tw.folderName = folderName;
     tw.repoName = parts.repo;
+    tw.wslDistro.clear();
+    SplitWslgVSCodeTitle(title, nullptr, &tw.wslDistro);
 
     // Inside a git worktree checkout, VS Code's ${activeRepositoryName} is
     // the *worktree's* folder name rather than the main repo's -- substitute
@@ -341,6 +346,7 @@ static void SyncProjectListHud() {
         entry.path = kv.second.folderName.empty() ? L"" : ResolveFolderPath(kv.second.folderName, kv.second.repoName);
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
+        entry.wslDistro = kv.second.wslDistro;
         entry.loading = IsWindowLoading(kv.second, kv.first);
         // Fixed placeholder text while loading -- entry.label/rawLabel
         // otherwise still churns underneath (see IsWindowLoading), and
@@ -497,6 +503,8 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
         return;
     }
 
+    if (!tw.wslDistro.empty()) FixWslgClampedMaximize(target, GetWslgShadowMargin(target));
+
     RECT r;
     if (!GetVisibleWindowRect(target, r)) {
         SyncProjectListHud();
@@ -618,7 +626,7 @@ static void TrackWindow(HWND hwnd) {
     if (!IsCandidateTopLevelWindow(hwnd)) return;
 
     std::wstring exeName;
-    if (!GetProcessImageName(hwnd, exeName) || !IsVSCodeExe(exeName)) return;
+    if (!GetProcessImageName(hwnd, exeName) || !IsVSCodeWindowProcess(hwnd, exeName)) return;
 
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
@@ -650,6 +658,7 @@ static void UntrackWindow(HWND hwnd) {
     FreeColorIndex(it->second.colorIndex);
     ForgetSessionAlias(SessionAliasKey(it->second.trackSeq));
     ReleasePidHooks(it->second.pid);
+    ForgetVisibleWindowRect(hwnd);
     DestroyWindow(it->second.overlay);
     g_tracked.erase(it);
     UpdateForegroundPollTimer();
