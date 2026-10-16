@@ -86,6 +86,27 @@ std::vector<std::wstring> LinuxVSCodeOpenCommand(const std::wstring& linuxPath);
 // Distros running right now. Doesn't start anything.
 std::set<std::wstring> RunningWslDistros();
 
+// WSLg doesn't pass a Windows-side resize of its window on to the Linux app
+// (msrdc only reports the end of its own move/size loop, and Weston ignores
+// the size even then -- microsoft/wslg#22), so moving/resizing one from here
+// leaves the app drawing at its old size inside a bigger or smaller frame.
+// With patched WSLg modules installed (weston-mirror PR #176 plus a control
+// FIFO, from Mihir-Null/wslg-resize-fix), Weston listens on
+// /mnt/wslg/runtime-dir/wslg-window-ctl for "move <id> <l> <t> <r> <b>" lines
+// and handles each exactly like a real move from Windows.
+//
+// True if `distro`'s WSLg has that control FIFO -- checked through wsl.exe,
+// cached, and re-checked at most once a minute while it isn't there (e.g.
+// until WSL is restarted with the patched modules).
+bool WslgWindowControlAvailable(const std::wstring& distro);
+
+// Tells `distro`'s Weston that WSLg window `hwnd` now covers `windowRect`
+// (its window rect, shadow margin included), so the Linux app is moved and
+// resized to match. Through one long-lived relay process per distro (a
+// wsl.exe copying stdin into the FIFO), so it's cheap enough to call on
+// every step of a drag. No-op if the control FIFO isn't available.
+void SendWslgWindowRect(HWND hwnd, const std::wstring& distro, const RECT& windowRect);
+
 // A Linux path inside `distro` as the Windows path to it,
 // \\wsl.localhost\<distro>\..., and back. The Windows form is what a WSL
 // window's folder is known by on the Windows side (hub item paths,

@@ -3,6 +3,7 @@
 #include "resource.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <map>
 #include <set>
 #include <utility>
@@ -358,6 +359,94 @@ std::set<std::wstring> RunningWslDistros() {
         if (!name.empty()) running.insert(name);
     }
     return running;
+}
+
+static const wchar_t* kWslgWindowCtl = L"/mnt/wslg/runtime-dir/wslg-window-ctl";
+
+bool WslgWindowControlAvailable(const std::wstring& distro) {
+    struct Check {
+        bool available = false;
+        ULONGLONG tick = 0;
+        bool done = false;
+    };
+    static std::map<std::wstring, Check> checks;
+    Check& c = checks[distro];
+    if (c.done && (c.available || GetTickCount64() - c.tick < 60000)) return c.available;
+    c.done = true;
+    c.tick = GetTickCount64();
+    bool was = c.available;
+    c.available = RunInWsl(distro, {L"test", L"-p", kWslgWindowCtl}, "", nullptr);
+    if (c.available != was || !was) {
+        Log(L"wsl: distro [%ls] %ls the WSLg window control FIFO", distro.c_str(),
+            c.available ? L"has" : L"doesn't have (stock WSLg modules) --");
+    }
+    return c.available;
+}
+
+// One relay per distro: wsl.exe running `cat` into the control FIFO, fed
+// through its stdin. Restarted (once per send) if it has gone away, e.g.
+// after WSLg restarted.
+struct WslgRelay {
+    HANDLE process = nullptr;
+    HANDLE stdinWrite = nullptr;
+};
+static std::map<std::wstring, WslgRelay> g_relays;
+
+static void CloseRelay(WslgRelay& r) {
+    if (r.stdinWrite) CloseHandle(r.stdinWrite);
+    if (r.process) {
+        TerminateProcess(r.process, 0);
+        CloseHandle(r.process);
+    }
+    r = {};
+}
+
+static bool StartRelay(const std::wstring& distro, WslgRelay& r) {
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
+    HANDLE inRead = nullptr, inWrite = nullptr;
+    if (!CreatePipe(&inRead, &inWrite, &sa, 0)) return false;
+    SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0);
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+    std::wstring cmd = QuoteArg(WslExePath()) + L" --cd ~ -d " + distro + L" -e sh -c " +
+                       QuoteArg(std::wstring(L"f=") + kWslgWindowCtl + L"; [ -p \"$f\" ] || exit 3; exec cat > \"$f\"");
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = inRead;
+    si.hStdOutput = nul;
+    si.hStdError = nul;
+    PROCESS_INFORMATION pi = {};
+    bool ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi) != 0;
+    CloseHandle(inRead);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) {
+        CloseHandle(inWrite);
+        LogWarn(L"wsl: couldn't start the window control relay for [%ls], lastError=%lu", distro.c_str(), GetLastError());
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    r.process = pi.hProcess;
+    r.stdinWrite = inWrite;
+    Log(L"wsl: window control relay started for [%ls]", distro.c_str());
+    return true;
+}
+
+void SendWslgWindowRect(HWND hwnd, const std::wstring& distro, const RECT& windowRect) {
+    if (distro.empty() || !WslgWindowControlAvailable(distro)) return;
+    // msrdc stores 0x1_0000_0000 | <RAIL window id> on each of its windows.
+    ULONGLONG prop = (ULONGLONG)(ULONG_PTR)GetPropW(hwnd, L"WslgServerWindowId");
+    if (!prop) return;
+    unsigned id = (unsigned)(prop & 0xFFFFFFFFu);
+    char line[96];
+    snprintf(line, sizeof(line), "move %x %ld %ld %ld %ld\n", id, windowRect.left, windowRect.top, windowRect.right,
+             windowRect.bottom);
+    WslgRelay& r = g_relays[distro];
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (r.process && WaitForSingleObject(r.process, 0) == WAIT_OBJECT_0) CloseRelay(r); // it exited
+        if (!r.process && !StartRelay(distro, r)) return;
+        DWORD written = 0;
+        if (WriteFile(r.stdinWrite, line, (DWORD)strlen(line), &written, nullptr)) return;
+        CloseRelay(r);
+    }
 }
 
 bool LaunchInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv) {

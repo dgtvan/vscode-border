@@ -596,7 +596,7 @@ void WriteTrackedWindows(Report& rep, const std::vector<TrackedWindowDiag>& trac
         MapWindowPoints(w, nullptr, (POINT*)&appClient, 2);
         if (d.overlay) GetWindowRect(d.overlay, &appOverlay);
         RECT expected = appVisible;
-        InflateRect(&expected, t, t);
+        InflateRect(&expected, t + d.resizeMargin, t + d.resizeMargin);
 
         // [phys] view: where things really are on screen / in screen.png.
         RECT physWin = {}, physOverlay = {}, physFrame = {};
@@ -629,11 +629,12 @@ void WriteTrackedWindows(Report& rep, const std::vector<TrackedWindowDiag>& trac
             Dpi().getDpiForMonitor(overlayMonitor, 0 /* MDT_EFFECTIVE_DPI */, &monitorDpi, &unused);
         // GetVisibleWindowRect pulls the DWM frame in by 2px before the
         // border is inflated around it, so only thickness-2 sits outside.
-        int expectedGap = MulDiv(t - 2, monitorDpi, 96);
-        rep.Line(L"  [app]  overlay vs expected (visibleRect inflated by thickness=%d) %ls -> %ls", t,
+        int expectedGap = MulDiv(t - 2 + d.resizeMargin, monitorDpi, 96);
+        rep.Line(L"  [app]  overlay vs expected (visibleRect inflated by thickness=%d + resize margin=%d) %ls -> %ls",
+                 t, d.resizeMargin,
                  RectStr(expected).c_str(), EqualRect(&expected, &appOverlay) ? L"matches" : L"DIFFERS");
         rep.Line(L"  [phys] overlay edge outside dwmFrame per side: left=%ld top=%ld right=%ld bottom=%ld "
-                 L"(expect %d = (thickness-2) x %u%% scale)",
+                 L"(expect %d = (thickness-2+resize margin) x %u%% scale)",
                  physFrame.left - physOverlay.left, physFrame.top - physOverlay.top,
                  physOverlay.right - physFrame.right, physOverlay.bottom - physFrame.bottom, expectedGap,
                  monitorDpi * 100 / 96);

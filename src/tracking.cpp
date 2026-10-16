@@ -487,6 +487,16 @@ static int PeekNextColorIndex() {
 
 // Repositions/resizes/repaints/hides the overlay to match its target's
 // current state. Cheap when only position changed (no repaint needed).
+// The overlay's resize strip width for `tw` -- see SyncOverlay.
+static int ResizeMarginFor(HWND target, const TrackedWindow& tw) {
+    const int kWslResizeMargin = 5;
+    // Only with the patched WSLg modules: without them a resize from here
+    // never reaches the Linux app (see wsl.h's WslgWindowControlAvailable).
+    return (!tw.wslDistro.empty() && !IsZoomed(target) && WslgWindowControlAvailable(tw.wslDistro))
+               ? kWslResizeMargin
+               : 0;
+}
+
 static void SyncOverlay(HWND target, TrackedWindow& tw) {
     if (!IsWindow(target) || !tw.overlay) return;
 
@@ -514,10 +524,17 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     }
 
     int t = g_config.thickness;
-    int ox = r.left - t;
-    int oy = r.top - t;
-    int ow = (r.right - r.left) + 2 * t;
-    int oh = (r.bottom - r.top) + 2 * t;
+    // A WSLg window's own left/right resize edges don't work (they fall on
+    // the fully transparent part of Linux VS Code's shadow margin, which
+    // Windows treats as click-through), so the overlay supplies them: an
+    // invisible strip this wide outside the border -- together about the
+    // size of a Windows window's own resize band. Not while maximized,
+    // same as a real window.
+    int m = ResizeMarginFor(target, tw);
+    int ox = r.left - t - m;
+    int oy = r.top - t - m;
+    int ow = (r.right - r.left) + 2 * (t + m);
+    int oh = (r.bottom - r.top) + 2 * (t + m);
     if (ow <= 0 || oh <= 0) {
         SyncProjectListHud();
         return;
@@ -529,7 +546,7 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
         COLORREF color = g_config.palette[tw.colorIndex % g_config.palette.size()];
         PaintOverlay(tw.overlay, ow, oh, color, t, g_config.opacity,
                      borderLabel, g_config.showLabel, g_config.labelHeight, g_config.labelFontSize,
-                     g_config.labelTextColorAuto, g_config.labelTextColor, tw.wslDistro);
+                     g_config.labelTextColorAuto, g_config.labelTextColor, tw.wslDistro, m);
         tw.lastWidth = ow;
         tw.lastHeight = oh;
         tw.lastLabel = borderLabel;
@@ -803,6 +820,7 @@ std::vector<TrackedWindowDiag> GetTrackedWindowDiagnostics() {
         d.lastPaintedHeight = tw.lastHeight;
         d.lastKnownRect = tw.lastKnownRect;
         d.loading = IsWindowLoading(tw, kv.first);
+        d.resizeMargin = ResizeMarginFor(kv.first, tw);
         d.label = tw.label;
         d.rawLabel = tw.rawLabel;
         d.borderLabel = BorderLabel(tw);
