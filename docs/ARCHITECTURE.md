@@ -130,8 +130,11 @@ only zero-cost option, so `ParseVSCodeTitle`'s parsing is tuned to this
 repo's actual `window.title` setting:
 
 ```
-${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName}
+${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName} - ${appName}
 ```
+
+(the trailing ` - Visual Studio Code` is stripped before parsing; it's
+there so a WSLg window can be recognised as VS Code -- see `src/wsl.h`)
 
 Outside a git repo the first two placeholders collapse to a literal `"-"`
 each (see the comment on `ParseVSCodeTitle` for the exact title shapes this

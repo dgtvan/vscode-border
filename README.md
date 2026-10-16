@@ -438,14 +438,16 @@ default VS Code's title only contains the folder name, so to show the git
 repo + branch instead, VS Code's `window.title` setting needs to be:
 
 ```json
-"window.title": "${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName}"
+"window.title": "${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName} - ${appName}"
 ```
 
 **This is applied automatically -- no manual settings.json editing
 needed.** Whenever `show_label=true` (the default), this app writes that
 `window.title` value into VS Code's global `settings.json` for you (both
 stable and Insiders, whichever are installed), the moment it starts or
-Reload Config runs. If `window.title` already had some other value, the
+Reload Config runs -- and into Linux VS Code's own `settings.json` inside a
+WSL distro once one of its windows shows up. The trailing `${appName}` is
+what tells a WSL VS Code window apart from other Linux apps. If `window.title` already had some other value, the
 original is remembered (in `window_title_state.ini` next to `config.ini`)
 and restored automatically the next time you set `show_label=false` and
 reload. If `window.title` wasn't set at all, it's removed again on

@@ -11,16 +11,20 @@
 
 namespace {
 
-// The exact value this app sets/looks for. If this ever changes, README.md
-// and window_title.cpp's ParseVSCodeTitle (which is tuned to this exact
-// format) need matching updates.
+// The exact value this app sets/looks for, on Windows and in WSL distros
+// alike. If this ever changes, README.md and window_title.cpp's
+// ParseVSCodeTitle (which is tuned to this exact format) need matching
+// updates. The trailing ${appName} is what marks a WSLg window as VS Code
+// rather than some other Linux app (see wsl.h; ParseVSCodeTitle strips it)
+// -- and it's the same value everywhere because VS Code's Settings Sync
+// copies window.title between Windows and WSL VS Code, so any difference
+// would just be overwritten by whichever synced last.
 const char* kDesiredValueJson =
-    "\"${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName}\"";
-// Linux VS Code in a WSL distro (see wsl.h): the same, plus the app name --
-// a WSLg window can only be told apart from other Linux apps by
-// "Visual Studio Code" in its title, which ParseVSCodeTitle then strips.
-const char* kDesiredValueJsonWsl =
     "\"${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName} - ${appName}\"";
+// What this app used to set, before ${appName} was added: still treated as
+// its own value, so an install that set it keeps its ownership (and the
+// original it would restore) and just moves on to kDesiredValueJson.
+const char* kLegacyValueJson = "\"${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName}\"";
 const char* kWindowTitleKey = "window.title";
 
 struct TargetState {
@@ -328,8 +332,8 @@ std::string InsertTopLevelKey(std::string content, const std::string& key, const
 
 // Applies `enable` to one settings.json's text (`content`, BOM and all) and
 // to its entry in `states`. True if `content` changed and needs writing back.
-bool ApplyToContent(std::map<std::string, TargetState>& states, const std::string& section,
-                    const char* desiredValueJson, bool enable, std::string& content) {
+bool ApplyToContent(std::map<std::string, TargetState>& states, const std::string& section, bool enable,
+                    std::string& content) {
     bool hadBom = content.size() >= 3 && (unsigned char)content[0] == 0xEF &&
                   (unsigned char)content[1] == 0xBB && (unsigned char)content[2] == 0xBF;
     std::string bom = hadBom ? content.substr(0, 3) : "";
@@ -342,21 +346,26 @@ bool ApplyToContent(std::map<std::string, TargetState>& states, const std::strin
     bool changed = false;
 
     if (enable) {
-        if (entry.found && currentRaw == desiredValueJson) {
+        if (entry.found && currentRaw == kDesiredValueJson) {
             return false; // already exactly what we want -- ours or coincidentally the user's, either way nothing to do
         }
-        st.managed = true;
-        st.hadKey = entry.found;
-        st.originalValueRaw = currentRaw;
+        if (st.managed && entry.found && currentRaw == kLegacyValueJson) {
+            // Ours from before -- keep the original it would restore.
+            Log(L"vscode_settings: [%hs] updating window.title from this app's older value", section.c_str());
+        } else {
+            st.managed = true;
+            st.hadKey = entry.found;
+            st.originalValueRaw = currentRaw;
+            Log(L"vscode_settings: [%hs] enabling label -- set window.title (previously %ls)", section.c_str(),
+                entry.found ? L"had a value" : L"was unset");
+        }
         body = entry.found
-            ? body.substr(0, entry.valueStart) + desiredValueJson + body.substr(entry.valueEnd)
-            : InsertTopLevelKey(body, kWindowTitleKey, desiredValueJson);
+            ? body.substr(0, entry.valueStart) + kDesiredValueJson + body.substr(entry.valueEnd)
+            : InsertTopLevelKey(body, kWindowTitleKey, kDesiredValueJson);
         changed = true;
-        Log(L"vscode_settings: [%hs] enabling label -- set window.title (previously %ls)", section.c_str(),
-            entry.found ? L"had a value" : L"was unset");
     } else {
         if (!st.managed) return false; // this app never took ownership here -- nothing to restore
-        if (!entry.found || currentRaw != desiredValueJson) {
+        if (!entry.found || (currentRaw != kDesiredValueJson && currentRaw != kLegacyValueJson)) {
             Log(L"vscode_settings: [%hs] window.title changed externally since we set it -- leaving as-is, "
                 L"dropping ownership",
                 section.c_str());
@@ -386,7 +395,7 @@ void ApplyToWindowsDir(std::map<std::string, TargetState>& states, const std::ws
     if (!DirectoryExists(userDir)) return;
     std::wstring settingsPath = userDir + L"\\settings.json";
     std::string content = ReadFileBytes(settingsPath);
-    if (ApplyToContent(states, section, kDesiredValueJson, enable, content)) WriteFileBytes(settingsPath, content);
+    if (ApplyToContent(states, section, enable, content)) WriteFileBytes(settingsPath, content);
 }
 
 std::string NarrowAscii(const std::wstring& s) {
@@ -413,19 +422,13 @@ std::wstring QuoteArg(const std::wstring& arg) {
     return out + L"\"";
 }
 
-// Runs `argv` inside the distro as its default user (wsl.exe -d <distro> -e
-// ...), feeding it `input` and collecting its stdout. Used instead of the
-// \\wsl.localhost share, which a distro can have switched off (e.g. with
-// interop disabled), while wsl.exe from Windows always works. True if it
-// ran and exited 0 within the timeout. The distro name goes in unquoted:
-// wsl.exe takes -d's value verbatim, quotes and all (names can't contain
-// spaces anyway).
-bool RunInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv, const std::string& input,
-              std::string* output) {
+// Runs wsl.exe with `args` (already a command-line tail), feeding it
+// `input` and collecting its stdout+stderr. True if it ran and exited 0
+// within the timeout.
+bool RunWslExe(const std::wstring& args, const std::string& input, std::string* output) {
     wchar_t sysDir[MAX_PATH] = {};
     GetSystemDirectoryW(sysDir, MAX_PATH);
-    std::wstring cmd = QuoteArg(std::wstring(sysDir) + L"\\wsl.exe") + L" -d " + distro + L" -e";
-    for (const std::wstring& a : argv) cmd += L" " + QuoteArg(a);
+    std::wstring cmd = QuoteArg(std::wstring(sysDir) + L"\\wsl.exe") + L" " + args;
 
     SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
     HANDLE inRead = nullptr, inWrite = nullptr, outRead = nullptr, outWrite = nullptr;
@@ -449,7 +452,7 @@ bool RunInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv,
     CloseHandle(inRead);
     CloseHandle(outWrite);
     if (!started) {
-        Log(L"vscode_settings: couldn't run wsl.exe for [%ls], lastError=%lu", distro.c_str(), GetLastError());
+        Log(L"vscode_settings: couldn't run wsl.exe, lastError=%lu", GetLastError());
         CloseHandle(inWrite);
         CloseHandle(outRead);
         return false;
@@ -472,6 +475,36 @@ bool RunInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv,
     CloseHandle(pi.hThread);
     if (output) *output = out;
     return finished && exitCode == 0;
+}
+
+// Runs `argv` inside the distro as its default user (wsl.exe -d <distro> -e
+// ...). Used instead of the \\wsl.localhost share, which a distro can have
+// switched off (e.g. with interop disabled), while wsl.exe from Windows
+// always works. The distro name goes in unquoted: wsl.exe takes -d's value
+// verbatim, quotes and all (names can't contain spaces anyway).
+bool RunInWsl(const std::wstring& distro, const std::vector<std::wstring>& argv, const std::string& input,
+              std::string* output) {
+    std::wstring args = L"-d " + distro + L" -e";
+    for (const std::wstring& a : argv) args += L" " + QuoteArg(a);
+    return RunWslExe(args, input, output);
+}
+
+// Distros running right now. wsl.exe's own output is UTF-16, one name per
+// line. Doesn't start anything.
+std::set<std::wstring> RunningWslDistros() {
+    std::set<std::wstring> running;
+    std::string raw;
+    if (!RunWslExe(L"--list --running --quiet", "", &raw)) return running;
+    std::wstring text((const wchar_t*)raw.data(), raw.size() / sizeof(wchar_t));
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find(L'\n', pos);
+        std::wstring name = text.substr(pos, (eol == std::wstring::npos ? text.size() : eol) - pos);
+        pos = eol == std::wstring::npos ? text.size() : eol + 1;
+        while (!name.empty() && (name.back() == L'\r' || name.back() == L' ' || name.back() == 0)) name.pop_back();
+        if (!name.empty()) running.insert(name);
+    }
+    return running;
 }
 
 void ApplyToWslDistro(std::map<std::string, TargetState>& states, const std::wstring& distro, bool enable) {
@@ -503,7 +536,7 @@ void ApplyToWslDistro(std::map<std::string, TargetState>& states, const std::wst
             Log(L"vscode_settings: [%hs] couldn't read settings.json", section.c_str());
             continue;
         }
-        if (!ApplyToContent(states, section, kDesiredValueJsonWsl, enable, content)) continue;
+        if (!ApplyToContent(states, section, enable, content)) continue;
         if (!RunInWsl(distro, {L"sh", L"-c", L"cat > \"$1\"", L"sh", path}, content, nullptr)) {
             Log(L"vscode_settings: [%hs] couldn't write settings.json", section.c_str());
         }
@@ -527,6 +560,21 @@ void SyncWindowTitleSetting(bool enableLabel) {
         std::wstring appData(appDataBuf);
         ApplyToWindowsDir(states, appData + L"\\Code\\User", "Code", enableLabel);
         ApplyToWindowsDir(states, appData + L"\\Code - Insiders\\User", "CodeInsiders", enableLabel);
+    }
+    // Also distros this app manages from an earlier session that are running
+    // right now -- e.g. with a VS Code window open whose title has lost the
+    // "Visual Studio Code" marker (see kDesiredValueJson), so it can't be
+    // recognised, and so seen, until this puts it back.
+    bool anyWslManaged = false;
+    for (const auto& kv : states) anyWslManaged |= kv.first.compare(0, 4, "WSL:") == 0 && kv.second.managed;
+    if (anyWslManaged) {
+        std::set<std::wstring> running = RunningWslDistros();
+        for (const auto& kv : states) {
+            if (kv.first.compare(0, 4, "WSL:") != 0 || !kv.second.managed) continue;
+            size_t end = kv.first.find(':', 4);
+            std::wstring distro(kv.first.begin() + 4, end == std::string::npos ? kv.first.end() : kv.first.begin() + end);
+            if (running.count(distro)) g_seenWslDistros.insert(distro);
+        }
     }
     for (const std::wstring& distro : g_seenWslDistros) ApplyToWslDistro(states, distro, enableLabel);
     SaveState(states);

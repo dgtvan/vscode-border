@@ -24,17 +24,18 @@
 //
 // Applies to both VS Code stable and Insiders' settings.json, whichever are
 // installed (checked via %APPDATA%\<variant>\User), and to Linux VS Code in
-// every WSL distro passed to NoteWslVSCodeDistro this session. Remembered
+// every WSL distro passed to NoteWslVSCodeDistro this session or managed
+// from an earlier one and running right now. Remembered
 // original-value state is stored in window_title_state.ini next to
 // config.ini.
 void SyncWindowTitleSetting(bool enableLabel);
 
 // Linux VS Code in a WSL distro (see wsl.h) reads its own settings.json
 // inside the distro -- the default user's ~/.config/<variant>/User, reached
-// through wsl.exe -- which gets the same treatment, with " - ${appName}"
-// added to the value (see vscode_settings.cpp). Only done for a distro once
-// a VS Code window from it has actually been seen, since reaching a stopped
-// distro would start it: call when one is tracked. Applies `enableLabel` the
+// through wsl.exe -- which gets the same treatment. Only done for a distro
+// once a VS Code window from it has actually been seen (or, at startup,
+// it's one already managed and running), since reaching a stopped distro
+// would start it: call when one is tracked. Applies `enableLabel` the
 // first time a distro is passed in a session, and from then on
 // SyncWindowTitleSetting covers it too.
 void NoteWslVSCodeDistro(const std::wstring& distro, bool enableLabel);
