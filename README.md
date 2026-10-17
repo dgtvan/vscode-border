@@ -497,10 +497,15 @@ favourites menu entry). Also handled:
 - **Close Window / Close All** work (WSLg only closes the active window, so
   each is activated first).
 - **Resizing from the left/right edges** doesn't work on stock WSLg -- a WSLg
-  bug, not this app. With an optional patch to WSLg's compositor it does; see
-  [docs/WSLG-RESIZE.md](docs/WSLG-RESIZE.md). The same patched module also
-  passes Windows clipboard images to Linux as PNG, which pasting a screenshot
-  into Claude Code in WSL VS Code needs.
+  bug, not this app. With optional patched WSLg modules it does; see
+  [docs/WSLG-RESIZE.md](docs/WSLG-RESIZE.md), and
+  [docs/WSLG-PATCHES.md](docs/WSLG-PATCHES.md) for building and installing
+  them.
+
+Unrelated to this app, but a useful extra setup: pasting a screenshot copied
+on Windows into Linux VS Code (e.g. into the Claude Code extension) doesn't
+work on stock WSLg either. The same patched modules fix it; see
+[docs/WSLG-CLIPBOARD-IMAGES.md](docs/WSLG-CLIPBOARD-IMAGES.md).
 
 Not yet: the AI status indicator for Claude Code running inside the distro.
 
@@ -590,8 +595,8 @@ Not yet: the AI status indicator for Claude Code running inside the distro.
 - `src/window_discovery.*` -- finding/filtering VS Code top-level windows.
 - `src/wsl.*` -- WSLg windows: recognising Linux VS Code, its shadow margin, the maximize fix, `wsl.exe`
   helpers, the Tux icon, and the WSLg window control FIFO (see [VS Code inside WSL](#vs-code-inside-wsl)).
-- `tools/wslg-resize/` -- build script, patches and shims for the optional WSLg resize fix, see
-  [docs/WSLG-RESIZE.md](docs/WSLG-RESIZE.md).
+- `tools/wslg-patches/` -- build script, patches and shims for the optional patched WSLg modules
+  (resize and clipboard images), see [docs/WSLG-PATCHES.md](docs/WSLG-PATCHES.md).
 - `src/overlay.*` -- passive per-window border overlay creation/painting.
 - `src/project_list_hud.*` -- interactive desktop project-list HUD: sorts/sizes/positions itself from the entries it's given, plus hover focus, click, move, and resize behavior.
 - `src/layered_rendering.*` -- shared alpha-blended text helpers for layered windows.
@@ -616,5 +621,5 @@ Tray icon: ["Square dashed" icon](https://www.flaticon.com/free-icon/square-dash
 
 WSL icon: Tux image from [relief-melone/wsl-initial-setup](https://gitlab.com/relief-melone/wsl-initial-setup) on GitLab.
 
-WSLg resize fix (`tools/wslg-resize/`): patches, shim and build script from
+WSLg resize fix (`tools/wslg-patches/`): patches 0001/0002, shim and build script from
 [Mihir-Null/wslg-resize-fix](https://github.com/Mihir-Null/wslg-resize-fix) (MIT).

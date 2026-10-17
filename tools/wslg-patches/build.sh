@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds patched rdprail-shell.so, rdp-backend.so and xwayland.so for the WSLg running right
 # now, plus the version-checking shims WSLg loads them through. See
-# docs/WSLG-RESIZE.md for what this is for and how to install the result.
+# docs/WSLG-PATCHES.md for what this is for and how to install the result.
 #
 # Adapted from Mihir-Null/wslg-resize-fix (MIT, see LICENSE here),
 # linux/build-shell.sh at 4bb7072: same throwaway build root, same WSLg meson
@@ -34,7 +34,7 @@ if [ "$WESTON_COMMIT" != "$REVIEWED_COMMIT" ] && [ "${FORCE:-0}" != 1 ]; then
   exit 1
 fi
 TARBALL="$HERE/weston-$WESTON_COMMIT.tar.gz"
-[ -s "$TARBALL" ] || { echo "!! missing $TARBALL (see docs/WSLG-RESIZE.md)" >&2; exit 1; }
+[ -s "$TARBALL" ] || { echo "!! missing $TARBALL (see docs/WSLG-PATCHES.md)" >&2; exit 1; }
 
 if [ ! -x "$BR/usr/bin/gcc" ]; then
   echo "== creating build root at $BR"
