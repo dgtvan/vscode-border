@@ -77,6 +77,11 @@ bool IsCandidateTopLevelWindow(HWND hwnd) {
 // last good margin stands until a uniform one comes back.
 static const ULONGLONG kWslgRemeasureSettleMs = 300;
 static const ULONGLONG kWslgRemeasureIntervalMs = 1000;
+// A window that has just appeared can measure as no margin at all -- Linux
+// VS Code's first frames come before its shadow does -- so a 0 margin is
+// taken as provisional and re-measured (every kWslgRemeasureIntervalMs) for
+// this long after the window was first measured.
+static const ULONGLONG kWslgProvisionalZeroMs = 30000;
 struct WslgInsetCache {
     bool valid = false;      // insets holds a good (uniform) measurement
     HMONITOR monitor = nullptr;
@@ -85,6 +90,7 @@ struct WslgInsetCache {
     SIZE seenSize = {};      // window size last seen, and when it last changed
     ULONGLONG seenTick = 0;
     ULONGLONG lastMeasureTick = 0;
+    ULONGLONG firstMeasureTick = 0; // see kWslgProvisionalZeroMs
 };
 static std::map<HWND, WslgInsetCache> g_wslgInsets;
 
@@ -112,8 +118,10 @@ static void ApplyWslgShadowInsets(HWND hwnd, RECT& rect) {
         c.seenTick = now;
     }
     bool current = c.valid && c.monitor == monitor && c.size.cx == size.cx && c.size.cy == size.cy;
-    bool due = !c.valid || c.monitor != monitor ||
+    bool provisionalZero = c.valid && c.insets.left == 0 && now - c.firstMeasureTick < kWslgProvisionalZeroMs;
+    bool due = !c.valid || c.monitor != monitor || provisionalZero ||
                (!current && now - c.seenTick >= kWslgRemeasureSettleMs);
+    if (!c.firstMeasureTick) c.firstMeasureTick = now;
     if (due && now - c.lastMeasureTick >= (c.valid ? kWslgRemeasureIntervalMs : 0)) {
         c.lastMeasureTick = now;
         RECT insets;
