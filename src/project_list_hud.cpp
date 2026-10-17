@@ -812,6 +812,13 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
     state->contextMenuOpen = false;
     DestroyMenu(menu);
+    if (cmd > 0 && index >= 0 && index < (int)state->entries.size()) {
+        static const wchar_t* const kActions[] = {L"", L"Set Alias", L"Clear Alias", L"Add to Favourites",
+                                                  L"Remove from Favourites", L"Copy Directory Path",
+                                                  L"Open Directory in File Explorer", L"Close Window"};
+        Log(L"hud item menu: [%ls] -> %ls", state->entries[index].label.c_str(),
+            cmd < (int)(sizeof(kActions) / sizeof(kActions[0])) ? kActions[cmd] : L"?");
+    }
     if (cmd == 1) BeginAliasEdit(hud, state, index);
     else if (cmd == 2) ClearAlias(hud, state, index);
     else if (cmd == 3) {

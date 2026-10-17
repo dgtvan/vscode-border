@@ -107,6 +107,7 @@ void AddFavourite(const std::wstring& label, const std::wstring& path) {
     if (path.empty() || IsFavourite(path)) return;
     g_favourites.push_back({label, path});
     SaveAll(g_favourites);
+    Log(L"favourites: added [%ls] (%ls)", label.c_str(), path.c_str());
 }
 
 void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label) {
@@ -130,6 +131,7 @@ void RemoveFavourite(const std::wstring& path) {
     if (it == g_favourites.end()) return;
     g_favourites.erase(it, g_favourites.end());
     SaveAll(g_favourites);
+    Log(L"favourites: removed %ls", path.c_str());
 }
 
 bool IsFavouriteOpen(const std::wstring& path, const std::vector<std::wstring>& openFolderPaths) {
