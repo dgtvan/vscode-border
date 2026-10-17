@@ -379,6 +379,43 @@ bool IsPendingToolAnswered(const std::wstring& sessionId, const std::string& too
     return true;
 }
 
+// Whether every background task a "working" status was left waiting on (the
+// status file's background_tasks=, see claude_status_hook.ps1) has ended.
+//
+// A task that finishes normally wakes Claude for a new turn, whose hooks
+// rewrite the status file, so this is not needed there. It exists for a task
+// stopped while the session is idle (from the panel or /tasks): Claude Code
+// then starts no turn and fires no hook, but it does queue the task's
+// <task-notification> into the transcript -- checked against claude.exe
+// 2.1.301 with a headless session and a stop_task control request. Each
+// notification names its task in a <task-id> element, which only exists once
+// that task has ended.
+//
+// Only the bytes after background_offset are read, and a finished set is
+// remembered per session so the file is not read again on every sync.
+bool AreBackgroundTasksFinished(const std::wstring& sessionId, const std::string& taskIds,
+                                const std::wstring& transcriptPath, ULONGLONG offset) {
+    static std::map<std::wstring, std::string> finished; // sessionId -> last finished background_tasks value
+    auto it = finished.find(sessionId);
+    if (it != finished.end() && it->second == taskIds) return true;
+    if (transcriptPath.empty()) return false;
+
+    std::string region = ReadFileRange(transcriptPath, offset, kPendingToolScanBytes);
+    size_t pos = 0;
+    while (pos <= taskIds.size()) {
+        size_t comma = taskIds.find(',', pos);
+        std::string id = taskIds.substr(pos, (comma == std::string::npos ? taskIds.size() : comma) - pos);
+        pos = (comma == std::string::npos) ? taskIds.size() + 1 : comma + 1;
+        if (id.empty()) continue;
+        if (region.find("<task-id>" + id + "</task-id>") == std::string::npos) return false;
+    }
+    finished[sessionId] = taskIds;
+    Log(L"claude_provider: %ls's background tasks (%ls) have all ended per the transcript -- correcting working to "
+        L"waiting",
+        sessionId.c_str(), Utf8ToWide(taskIds).c_str());
+    return true;
+}
+
 struct HooksLocation {
     bool ok = false;
     JsonScan::Span root;
@@ -541,8 +578,8 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
         AiSessionStatus status;
         DWORD pid = 0;
         std::wstring recordedTranscript, pendingTranscript;
-        std::string pendingTool;
-        ULONGLONG pendingOffset = 0;
+        std::string pendingTool, backgroundTasks;
+        ULONGLONG pendingOffset = 0, backgroundOffset = 0;
         size_t pos = 0;
         while (pos < content.size()) {
             size_t eol = content.find('\n', pos);
@@ -561,6 +598,8 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
             else if (key == "pending_tool") pendingTool = rawValue;
             else if (key == "pending_transcript") pendingTranscript = Utf8ToWide(rawValue);
             else if (key == "pending_offset") pendingOffset = _strtoui64(rawValue.c_str(), nullptr, 10);
+            else if (key == "background_tasks") backgroundTasks = rawValue;
+            else if (key == "background_offset") backgroundOffset = _strtoui64(rawValue.c_str(), nullptr, 10);
         }
         if (status.status.empty() || status.cwd.empty()) continue;
 
@@ -631,6 +670,12 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
                 L"working",
                 fileName.c_str(), status.status.c_str());
             status.status = L"working";
+        } else if (status.status == L"working" && !backgroundTasks.empty() &&
+                   AreBackgroundTasksFinished(sessionId, backgroundTasks, transcriptPath, backgroundOffset)) {
+            // "Working" only because a turn ended with background work
+            // running, and that work has since been stopped with no new
+            // turn to say so -- see AreBackgroundTasksFinished.
+            status.status = L"waiting";
         }
         // Deliberately not chained to the corrections above: a session one
         // of them just moved to "working" can equally have been interrupted

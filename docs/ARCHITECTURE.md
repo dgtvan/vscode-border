@@ -191,35 +191,103 @@ every relevant WinEvent for a tracked window, plus the periodic rescan --
 so this doesn't introduce a new I/O cadence, just adds a bit of work to one
 that already exists.
 
-## AI status: always follow what Claude Code reports
+## AI status: follow Claude Code, background work included
 
-The AI status indicator mirrors Claude Code's own view of a session and
-never makes up its own idea of "busy". If Claude Code reports a session as
-active, the indicator shows Working. If it reports the session as idle, the
-indicator shows Waiting, even when something we might count as work (a
-background command, a subagent, a pending wakeup) is still around.
+The AI status indicator mirrors Claude Code's view of a session and never
+makes up its own idea of "busy". "Claude Code" here means Claude Code as a
+whole (the CLI), not just what the VS Code extension's panel happens to
+show. A session is Working when either:
 
-Claude Code's own report is its `session_state_changed` events
-(`running` / `requires_action` / `idle`). Run `claude.exe` with
-`--output-format stream-json` and `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`
-to see them. The hooks only see a few points in that timeline, so
-`claude_status_hook.ps1` and `claude_provider.cpp` exist to bring the
-indicator back to the state Claude Code reports, never to add our own
-judgement on top.
+- a turn is in progress (Claude Code's `session_state_changed` says
+  `running`), or
+- the turn has ended but Claude Code is still tracking background work for
+  the session: a command Claude started in the background, one the user sent
+  there with Ctrl+B, or a background subagent. The CLI shows these in its
+  footer and in `/tasks`.
+
+It doesn't matter how the task started or how it ends (finishes, fails, or
+gets stopped). While Claude Code lists it as running, the session is
+Working. Left out, because Claude Code itself keeps them out of activity
+indicators or because nothing is actually running:
+
+- **Ambient tasks.** Claude Code marks live-update watchers (type `monitor`)
+  and its own housekeeping (`dream`, `auto-mode scan`, `memory import`) as
+  ambient and tells hosts to exclude them from activity indicators. The hook
+  payload carries no ambient flag, so these are matched by type.
+- **Teammates.** A teammate stays registered while idle, waiting to be
+  messaged.
+- **Scheduled wakeups** (`ScheduleWakeup`, `/loop`, crons). Nothing runs
+  until one fires, and firing starts a new turn.
+- **Programs a command started detached** (`Start-Process`, a server
+  spawned and left running). Claude Code only tracked the command that
+  launched them, which has ended, so the indicator doesn't count them either.
+
+How it's wired:
+
+- `Stop` / `StopFailure` / `SubagentStop` carry `background_tasks`, the
+  running/pending backgrounded tasks. Claude Code's own schema describes it
+  as letting hooks "distinguish 'session is done' from 'session is paused
+  waiting for background work to wake it'". `claude_status_hook.ps1` writes
+  Working when any counted task is in it, and records their ids with the
+  transcript's current length.
+- A task that finishes normally wakes Claude for a new turn
+  (`UserPromptSubmit`, then `Stop`), which rewrites the status file.
+- A task stopped while the session is idle (from the panel or `/tasks`)
+  wakes nothing: no turn, no hook. Claude Code does queue the task's
+  `<task-notification>` into the transcript, so `claude_provider.cpp` reads
+  the transcript past the recorded length and shows Waiting once every
+  recorded task has one.
 
 When the indicator looks wrong, first find out what Claude Code reports for
-that moment: reproduce the case headless and record its session-state
-events. Then make the indicator match. If Claude Code itself shows the
-session as active, the indicator is right.
+that moment: reproduce the case headless and record its stream-json events
+(`claude.exe -p --input-format stream-json --output-format stream-json
+--verbose` with `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`).
+`session_state_changed` shows the turn state, and `background_tasks_changed`
+/ `task_started` / `task_updated` / `task_notification` show the background
+work. Then make the indicator match.
 
-This rule came from a real mistake. A Stop with a running background task
-used to stay on Working, on the theory that Claude Code holds such sessions
-open. It doesn't: that came from the logic for cloud-hosted sessions, not
-the local ones the indicator watches. Checked against claude.exe 2.1.292, a
-local session goes idle the moment the turn ends, and goes active again
-(firing `UserPromptSubmit`) only when the task finishes and wakes Claude. A
-hung command that had been sent to the background left the indicator on
-Working forever, while Claude Code showed the session idle.
+### Decision history
+
+Recorded so a future change can see what was tried and why it moved.
+
+**Before 2026-10-08: background work counts.** A `Stop` with a running
+background task, or a pending one-shot wakeup, stayed on Working. This
+followed the "is this session still busy" logic in claude.exe 2.1.281.
+
+**2026-10-08: follow the session state only.** A hung command that had been
+sent to the background with Ctrl+B left the indicator on Working forever,
+while Claude Code reported the session idle. Checked against claude.exe
+2.1.292: a local session goes idle the moment the turn ends, and goes active
+again only when the task finishes and wakes Claude. The busy logic used
+before turned out to be the one for cloud-hosted sessions. The rule became
+"show exactly what `session_state_changed` says", so a `Stop` always meant
+Waiting.
+
+**2026-10-17: follow Claude Code as a whole, background work included.**
+With a background command running, the indicator showed Waiting. That
+matched the session state, but the session clearly wasn't done: Claude was
+going to wake up with the result. The VS Code extension's panel shows no
+background-task indicator at all, which made the session look idle there.
+The CLI does show background tasks (footer, `/tasks`). The rule was
+clarified: "follow Claude Code" means Claude Code in general, not the
+extension's panel. A background task belongs to the session that started
+it and is stopped when that session closes, so it is fair to count it as
+that session's work. Background work counts again, whoever started it and
+however it ends.
+
+What changed from the pre-2026-10-08 version:
+
+- **The hung-command case is accepted, not prevented.** A hung background
+  command keeps the indicator on Working, just as the CLI keeps listing
+  it. The fix is to stop the task, not to change the indicator.
+- **Wakeups no longer count.** Nothing runs until one fires.
+- **A task stopped while idle is caught.** The old version would have
+  stayed on Working forever. Checked against claude.exe 2.1.301 with a
+  headless session and a `stop_task` control request (what the panel sends):
+  the task went to `killed`, `background_tasks_changed` went empty, the
+  session stayed `idle`, and no hook fired. The only lasting trace is the
+  `<task-notification>` queued into the transcript, which is what the
+  provider now watches.
 
 ## Focus tracing: why every activation goes through one wrapper
 

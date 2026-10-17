@@ -11,9 +11,10 @@
 # -- read by src/claude_provider.cpp. One file per session (not one shared
 # file) means concurrent sessions never race on the same file.
 #
-# Design rule: the status written here always follows what Claude Code itself
-# reports for the session (idle vs. running), never our own idea of "busy".
-# See docs/ARCHITECTURE.md, "AI status: always follow what Claude Code reports".
+# Design rule: the status written here follows Claude Code as a whole -- a
+# turn in progress, or background work it is still tracking for the session --
+# never our own idea of "busy". See docs/ARCHITECTURE.md, "AI status: follow
+# Claude Code, background work included".
 
 $ErrorActionPreference = "SilentlyContinue"
 
@@ -84,18 +85,36 @@ $status = switch ($data.hook_event_name) {
     "ElicitationResult" { "working" } # MCP prompt answered -- resuming
     "PermissionRequest" { "attention" } # blocked: waiting on an Allow/Deny decision
     "Elicitation" { "attention" }       # blocked: an MCP server is asking the user something
-    default { "waiting" } # SessionStart, Stop, StopFailure, SubagentStop
+    default { "waiting" } # SessionStart, Stop, StopFailure, SubagentStop -- see background_tasks below
 }
 
-# Background work still running at Stop (background_tasks, session_crons in
-# the payload) does not keep the session "working". This mirrors what Claude
-# Code itself reports: its session state goes to idle the moment a turn ends,
-# whatever is still running in the background, and only goes back to running
-# when a task finishes or a wakeup fires and it starts a new turn -- checked
-# against claude.exe 2.1.292's session_state_changed events, for a command
-# Claude backgrounded and one the user backgrounded with Ctrl+B alike. That
-# new turn ends in another Stop, which rewrites this file. The lists are
-# still logged below.
+# A turn that ends with background work still running keeps the session
+# "working". Claude Code's session state goes idle at that point, but the CLI
+# still tracks the work (its footer, /tasks), and the payload's
+# background_tasks exists, in Claude Code's own words, so hooks can tell
+# "session is done" from "session is paused waiting for background work".
+# Claude Code only lists running/pending tasks that are backgrounded, however
+# they got there: started by Claude, sent there with Ctrl+B, or a subagent.
+#
+# Left out are the tasks Claude Code marks "ambient" and tells hosts to keep
+# out of activity indicators: live-update watchers ("monitor") and its own
+# housekeeping ("dream", "auto-mode scan", "memory import"). The payload has
+# no ambient flag, so they are matched by type. "teammate" is left out too: a
+# teammate stays registered while idle, waiting to be messaged. Wakeups
+# (session_crons) never count -- nothing is running until one fires.
+#
+# The task ids go into the status file. A task that finishes normally wakes
+# Claude for a new turn, whose Stop rewrites this file; a task stopped while
+# the session is idle wakes nothing and fires no hook, so claude_provider.cpp
+# watches the transcript for each task's <task-notification> instead.
+$uncountedTaskTypes = @("monitor", "dream", "auto-mode scan", "memory import", "teammate")
+function Test-CountedBackgroundTask {
+    param($Task)
+    return $Task.status -in "running", "pending" -and $Task.type -notin $uncountedTaskTypes
+}
+$countedBgTasks = @($data.background_tasks | Where-Object { $_ -and (Test-CountedBackgroundTask $_) })
+if ($status -eq "waiting" -and $countedBgTasks.Count -gt 0) { $status = "working" }
+
 $pendingWakeups = @($data.session_crons | Where-Object { $_ -and -not $_.recurring })
 
 if (-not (Test-Path $statusDir)) {
@@ -334,6 +353,17 @@ if ($claudePid) { $content += "pid=$claudePid`n" }
 # transcript is under the directory for ...\proplyst.
 if ($data.transcript_path) { $content += "transcript=$($data.transcript_path)`n" }
 
+# Which background tasks this "working" is waiting on, with the transcript's
+# length now: a task's <task-notification> cannot be written before it ends,
+# so the reader only looks past this point (same idea as pending_offset).
+if ($status -eq "working" -and $countedBgTasks.Count -gt 0) {
+    $bgOffset = 0
+    if ($data.transcript_path -and (Test-Path -LiteralPath $data.transcript_path)) {
+        $bgOffset = (Get-Item -LiteralPath $data.transcript_path).Length
+    }
+    $content += "background_tasks=$(($countedBgTasks | ForEach-Object { $_.id }) -join ',')`nbackground_offset=$bgOffset`n"
+}
+
 # Which tool call this "attention" is blocked on. There is no hook for "the
 # permission was answered" (PostToolUse does not fire until the tool has
 # also *finished*, which for an approved long command can be minutes later),
@@ -379,7 +409,10 @@ if ($data.hook_event_name -eq "PermissionRequest") {
 $bgCount = if ($data.background_tasks) { $data.background_tasks.Count } else { 0 }
 $bgDetail = ""
 if ($bgCount -gt 0) {
-    $parts = $data.background_tasks | ForEach-Object { "$($_.id):$($_.status):$($_.type):$($_.description)" }
+    $parts = $data.background_tasks | ForEach-Object {
+        $counted = if (Test-CountedBackgroundTask $_) { "counted" } else { "ignored" }
+        "$($_.id):$($_.status):$($_.type):$($counted):$($_.description)"
+    }
     $bgDetail = " bgDetail=[" + ($parts -join "; ") + "]"
 }
 if ($pendingWakeups.Count -gt 0) {

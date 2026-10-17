@@ -275,20 +275,25 @@ for an AI coding assistant running in that VS Code window's terminal(s):
 - **Attention** -- red, a single pulsing square -- blocked mid-turn on a
   permission prompt or an MCP server asking the user something. This is
   the state that most needs you to look at it.
-- **Waiting** -- green, a single static square -- the turn has finished,
-  ready for your next prompt.
+- **Waiting** -- green, a single static square -- the turn has finished
+  and no background work is left, ready for your next prompt.
 - No indicator at all if nothing's running there.
 
-The indicator always follows what Claude Code itself reports about the
-session -- see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#ai-status-always-follow-what-claude-code-reports).
+The indicator always follows what Claude Code itself tracks for the session
+-- see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#ai-status-follow-claude-code-background-work-included),
+which also keeps the history of how that rule has changed and why.
 
-Background work still running when a turn ends (a backgrounded command, a
-subagent, a pending `ScheduleWakeup`) doesn't keep the indicator on
-**Working**. That's what Claude Code itself reports: the session goes idle
-as soon as the turn ends, and becomes active again only when the work
-finishes and Claude starts a new turn. The indicator follows that. The
-background tasks listed at each `Stop` are still logged in
-`bin\logs\claude_hook_events.log`.
+Background work still running when a turn ends (a command running in the
+background, whether Claude started it or you sent it there with Ctrl+B, or
+a background subagent) keeps the indicator on **Working** until that work
+ends, however it ends. That's the same work the Claude Code CLI lists in
+its footer and `/tasks`; the VS Code extension's panel just doesn't show it.
+Not counted: Claude Code's own live-update watchers and housekeeping tasks,
+teammates, and pending `ScheduleWakeup`s / `/loop`s, since nothing is
+running until one fires. A command left hung in the background keeps the
+indicator on Working until you stop it. The background tasks listed at each
+`Stop` are logged in `bin\logs\claude_hook_events.log`, each marked
+`counted` or `ignored`.
 
 **Attention** can go stale on its own: there's no "permission granted, resuming" hook (unlike MCP
 elicitation, which has `ElicitationResult`), so once a permission prompt
