@@ -53,6 +53,20 @@ Two Weston patches from
 | `0001` | `rdprail-shell.so` | implements that TODO: resizes the surface (same conversion and min/max clamp as the snap path, maximized/fullscreen untouched) and applies the new position together with the resized buffer, so the window doesn't flash back to its old size. Same change as PR #176. |
 | `0002` | `rdp-backend.so` | a control FIFO, `/mnt/wslg/runtime-dir/wslg-window-ctl` (mode `0600`, owner uid 1000), where each `move <window id> <left> <top> <right> <bottom>` line is handed to Weston's own, unmodified Client Window Move handler -- the same code a real move from msrdc runs. Malformed or out-of-range lines are rejected. |
 
+Plus two patches of this repo's own, so a screenshot copied on Windows can be
+pasted into Linux VS Code (e.g. into the Claude Code extension) -- Linux VS
+Code is an X11 app under WSLg (`--ozone-platform=x11`), so the image has to
+cross two bridges, and both only passed text or BMP:
+
+| patch | module | what it does |
+|---|---|---|
+| `0003` | `rdp-backend.so` | **clipboard images as PNG (Windows → Wayland).** WSLg's clipboard table maps a Windows image only from `CF_DIB`, to `image/bmp`, and has no entry for Windows' registered `PNG` format at all -- so Linux apps that read only `image/png` (Chromium/Electron, hence VS Code's webviews, hence pasting a screenshot into the Claude Code extension in WSL VS Code) see no image. Adds `"PNG"` → `image/png`, matched by format name like the existing `"HTML Format"` and `"Rich Text Format"` entries, with a pass-through handler (the existing raw-text one trims trailing NUL/newline bytes on the way in and appends a NUL on the way out, which a binary format mustn't get). Linux then sees both `image/png` and `image/bmp`. |
+| `0004` | `xwayland.so` | **clipboard images for X11 apps (Wayland → X11).** Weston's X11 clipboard bridge (`xwayland/selection.c`) only ever offered X11 apps `UTF8_STRING`/`TEXT` and refused any other target, so an X11 app saw no image even with `image/png` on the Wayland side. Also advertises an `image/png` target when the Wayland selection offers it, and serves it through the bridge's existing transfer code (including its INCR path for large data), bytes untouched. Text handling is unchanged. |
+
+(Pasting images into the Claude Code *CLI* in WSL also needs `wl-clipboard`
+installed in the distro -- `sudo apt install wl-clipboard` -- since the CLI
+reads the clipboard through `wl-paste`.)
+
 The upstream project's other two patches (0003/0004) only change X11 windows
 and aren't needed for VS Code, which is a Wayland app. Its Windows helper (a
 Rust program watching for resizes by tiling window managers) isn't needed
@@ -123,8 +137,9 @@ distro running Linux VS Code.
    provide. The result is in `tools/wslg-resize/out`.
 
 4. **Copy the result** somewhere permanent, e.g.
-   `%LOCALAPPDATA%\wslg-resize-modules` -- the two shims plus the
-   `weston-<commit>` folder.
+   `%LOCALAPPDATA%\wslg-resize-modules` -- the three shims plus the
+   `weston-<commit>` folder. (Do it with WSL shut down: overwriting a module
+   a running Weston has loaded can crash it.)
 
 5. **Point WSLg at the shims** in `%USERPROFILE%\.wslgconfig` (WSLg reads it
    at start and passes `[system-distro-env]` entries to Weston;
@@ -132,7 +147,7 @@ distro running Linux VS Code.
 
    ```ini
    [system-distro-env]
-   WESTON_MODULE_MAP=rdp-backend.so=/mnt/c/Users/<you>/AppData/Local/wslg-resize-modules/rdp-backend.so;rdprail-shell.so=/mnt/c/Users/<you>/AppData/Local/wslg-resize-modules/rdprail-shell.so
+   WESTON_MODULE_MAP=rdp-backend.so=/mnt/c/Users/<you>/AppData/Local/wslg-resize-modules/rdp-backend.so;rdprail-shell.so=/mnt/c/Users/<you>/AppData/Local/wslg-resize-modules/rdprail-shell.so;xwayland.so=/mnt/c/Users/<you>/AppData/Local/wslg-resize-modules/xwayland.so
    ```
 
 6. **Restart WSL**: `wsl --shutdown` (closes every running distro), then start
@@ -141,14 +156,19 @@ distro running Linux VS Code.
 ## Check it's working
 
 - `/mnt/wslg/weston.log` (readable from inside the distro) has
-  `wslg-resize-fix: rdp-backend.so: loaded patched …` and
-  `… rdprail-shell.so: loaded patched …`, and
+  `wslg-resize-fix: rdp-backend.so: loaded patched …`,
+  `… rdprail-shell.so: loaded patched …` and `… xwayland.so: loaded patched …`, and
   `RDP backend: wslg window control FIFO at /mnt/wslg/runtime-dir/wslg-window-ctl`.
 - `ls -la /mnt/wslg/runtime-dir/` shows `wslg-window-ctl` as a FIFO (`p`).
 - This app's log has `wsl: distro [<distro>] has the WSLg window control FIFO`
   within a minute.
 - Hovering just outside a WSL window's left or right edge shows ↔; dragging
   resizes the window *and* the app inside it.
+- With a screenshot on the Windows clipboard, `wl-paste --list-types` in the
+  distro lists `image/png` (as well as `image/bmp`), and so does
+  `xclip -selection clipboard -t TARGETS -o` (the X11 side, which is what
+  Linux VS Code reads); pasting it into the Claude Code extension in WSL VS
+  Code works.
 
 ## After a WSL update
 

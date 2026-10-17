@@ -1,12 +1,14 @@
 #!/bin/bash
-# Builds patched rdprail-shell.so + rdp-backend.so for the WSLg running right
+# Builds patched rdprail-shell.so, rdp-backend.so and xwayland.so for the WSLg running right
 # now, plus the version-checking shims WSLg loads them through. See
 # docs/WSLG-RESIZE.md for what this is for and how to install the result.
 #
 # Adapted from Mihir-Null/wslg-resize-fix (MIT, see LICENSE here),
 # linux/build-shell.sh at 4bb7072: same throwaway build root, same WSLg meson
-# flags, same symbol checks -- limited to its patches 0001 + 0002 (the X11-only
-# 0003/0004 and the xwayland.so module aren't needed for VS Code).
+# flags, same symbol checks -- with its patches 0001 + 0002 (its X11-frame
+# patches 0003/0004 aren't used), plus this repo's own 0003 + 0004: clipboard
+# images passed to Linux as image/png (rdp-backend.so) and on to X11 apps such
+# as VS Code (xwayland.so).
 #
 # Runs INSIDE the WSLg system distro as root, from Windows:
 #   wsl.exe --cd / -d <distro> --system -u root -e bash /mnt/c/<path to this folder>/build.sh
@@ -68,7 +70,8 @@ if [ ! -f "$SRC/.patched" ] || [ "$(cat "$SRC/.patched")" != "$STAMP" ]; then
   echo "== unpacking weston $WESTON_COMMIT"
   tar -xzf "$TARBALL" -C "$SRC"
   # upstream rdprail sources use CRLF; normalise so the patches apply
-  sed -i 's/\r$//' "$SRC/rdprail-shell/shell.c" "$SRC/libweston/backend-rdp/rdprail.c"
+  sed -i 's/\r$//' "$SRC/rdprail-shell/shell.c" "$SRC/libweston/backend-rdp/rdprail.c" \
+    "$SRC/libweston/backend-rdp/rdpclip.c" "$SRC/xwayland/selection.c"
   for p in "$HERE"/patches/*.patch; do
     echo "   applying $(basename "$p")"
     sed 's/\r$//' "$p" | chroot "$BR" patch -d /work/weston -p1 --forward
@@ -90,7 +93,7 @@ chroot "$BR" /bin/bash -euo pipefail -c "
     -Dremoting=false -Dpipewire=false -Dshell-fullscreen=false -Dcolor-management-lcms=false \
     -Dshell-ivi=false -Dshell-kiosk=false -Ddemo-clients=false -Dsimple-clients=[] -Dtools=[] \
     -Dresize-pool=false -Dwcap-decode=false -Dtest-junit-xml=false
-  ninja -C build -j$JOBS rdprail-shell/rdprail-shell.so libweston/backend-rdp/rdp-backend.so
+  ninja -C build -j$JOBS rdprail-shell/rdprail-shell.so libweston/backend-rdp/rdp-backend.so xwayland/xwayland.so
 "
 
 MODDIR="$OUT/weston-$WESTON_COMMIT"
@@ -129,6 +132,7 @@ EOF
 }
 publish rdprail-shell/rdprail-shell.so /usr/lib/weston/rdprail-shell.so
 publish libweston/backend-rdp/rdp-backend.so /usr/lib/libweston-9/rdp-backend.so
+publish xwayland/xwayland.so /usr/lib/libweston-9/xwayland.so
 echo "$WESTON_COMMIT" > "$MODDIR/weston-commit"
 
 # Shims: tiny, libweston-free; export only the module entry point and import
@@ -137,7 +141,7 @@ mkdir -p "$BR/work/shim"; sed 's/\r$//' "$HERE/shim.c" > "$BR/work/shim/shim.c"
 chroot "$BR" bash -euo pipefail <<'EOF'
 cd /work/shim
 nm -D --defined-only /live/needed/libc.so.6 | awk 'NF==3 {print $3}' | sed 's/@@/@/' | sort -u > libc.provided
-for m in BACKEND:rdp-backend.so:weston_backend_init SHELL:rdprail-shell.so:wet_shell_init; do
+for m in BACKEND:rdp-backend.so:weston_backend_init SHELL:rdprail-shell.so:wet_shell_init XWAYLAND:xwayland.so:weston_module_init; do
   IFS=: read -r def out entry <<<"$m"
   gcc -shared -fPIC -O2 -Wall -Wextra -Werror -fvisibility=hidden -D_FORTIFY_SOURCE=2 \
       -DSHIM_$def -DSHIM_MODULE="\"$out\"" -o "$out" shim.c
@@ -150,6 +154,6 @@ for m in BACKEND:rdp-backend.so:weston_backend_init SHELL:rdprail-shell.so:wet_s
   echo "== shim $out: exports $entry, imports only live libc"
 done
 EOF
-cp "$BR/work/shim/rdp-backend.so" "$BR/work/shim/rdprail-shell.so" "$OUT/"
+cp "$BR/work/shim/rdp-backend.so" "$BR/work/shim/rdprail-shell.so" "$BR/work/shim/xwayland.so" "$OUT/"
 (cd "$OUT" && sha256sum *.so weston-*/*.so)
 echo "== done: $OUT"

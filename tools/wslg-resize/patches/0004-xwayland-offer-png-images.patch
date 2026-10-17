@@ -1,0 +1,82 @@
+--- a/xwayland/selection.c
++++ b/xwayland/selection.c
+@@ -340,6 +340,45 @@
+ 	xcb_flush(wm->conn);
+ }
+ 
++/* The "image/png" atom, interned once per X server (a restarted Xwayland
++ * gets a new weston_wm). Images are bridged from the Wayland selection to X11
++ * clients as this target only: it's what X11 apps (Chromium/Electron among
++ * them) ask for, and the data is passed through untouched. */
++static xcb_atom_t
++weston_wm_image_png_atom(struct weston_wm *wm)
++{
++	static struct weston_wm *cached_wm;
++	static xcb_atom_t cached_atom = XCB_ATOM_NONE;
++	xcb_intern_atom_reply_t *reply;
++
++	if (cached_wm == wm && cached_atom != XCB_ATOM_NONE)
++		return cached_atom;
++	reply = xcb_intern_atom_reply(wm->conn,
++				      xcb_intern_atom(wm->conn, 0, strlen("image/png"), "image/png"),
++				      NULL);
++	cached_atom = reply ? reply->atom : XCB_ATOM_NONE;
++	cached_wm = wm;
++	free(reply);
++	return cached_atom;
++}
++
++/* True if the current Wayland selection offers `mime_type`. */
++static bool
++weston_wm_selection_offers(struct weston_wm *wm, const char *mime_type)
++{
++	struct weston_seat *seat = weston_wm_pick_seat(wm);
++	struct weston_data_source *source;
++	char **p;
++
++	if (!seat || !(source = seat->selection_data_source))
++		return false;
++	wl_array_for_each(p, &source->mime_types) {
++		if (strcmp(*p, mime_type) == 0)
++			return true;
++	}
++	return false;
++}
++
+ static void
+ weston_wm_send_targets(struct weston_wm *wm)
+ {
+@@ -350,7 +389,13 @@
+ 		/* wm->atom.compound_text, */
+ 		wm->atom.text,
+ 		/* wm->atom.string */
++		XCB_ATOM_NONE, /* image/png, if offered -- see below */
+ 	};
++	uint32_t count = ARRAY_LENGTH(targets) - 1;
++	xcb_atom_t png = weston_wm_image_png_atom(wm);
++
++	if (png != XCB_ATOM_NONE && weston_wm_selection_offers(wm, "image/png"))
++		targets[count++] = png;
+ 
+ 	xcb_change_property(wm->conn,
+ 			    XCB_PROP_MODE_REPLACE,
+@@ -358,7 +403,7 @@
+ 			    wm->selection_request.property,
+ 			    XCB_ATOM_ATOM,
+ 			    32, /* format */
+-			    ARRAY_LENGTH(targets), targets);
++			    count, targets);
+ 
+ 	weston_wm_send_selection_notify(wm, wm->selection_request.property);
+ }
+@@ -629,6 +674,10 @@
+ 		   selection_request->target == wm->atom.text) {
+ 		weston_wm_send_data(wm, wm->atom.utf8_string,
+ 				  "text/plain;charset=utf-8");
++	} else if (selection_request->target != XCB_ATOM_NONE &&
++		   selection_request->target == weston_wm_image_png_atom(wm) &&
++		   weston_wm_selection_offers(wm, "image/png")) {
++		weston_wm_send_data(wm, selection_request->target, "image/png");
+ 	} else {
+ 		weston_log("can only handle UTF8_STRING targets...\n");
+ 		weston_wm_send_selection_notify(wm, XCB_ATOM_NONE);

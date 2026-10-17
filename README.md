@@ -498,7 +498,9 @@ favourites menu entry). Also handled:
   each is activated first).
 - **Resizing from the left/right edges** doesn't work on stock WSLg -- a WSLg
   bug, not this app. With an optional patch to WSLg's compositor it does; see
-  [docs/WSLG-RESIZE.md](docs/WSLG-RESIZE.md).
+  [docs/WSLG-RESIZE.md](docs/WSLG-RESIZE.md). The same patched module also
+  passes Windows clipboard images to Linux as PNG, which pasting a screenshot
+  into Claude Code in WSL VS Code needs.
 
 Not yet: the AI status indicator for Claude Code running inside the distro.
 
