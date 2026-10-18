@@ -495,6 +495,10 @@ favourites menu entry). Also handled:
   path: **Copy Directory Path** copies the Linux path, **Open Directory in File
   Explorer** is greyed out when the distro doesn't share its files with
   Windows, and a WSL favourite opens in the distro's Linux VS Code.
+- **Extra launch arguments.** `wsl_vscode_extra_args.<distro>=<args>` in
+  `config.ini` adds arguments to every Linux VS Code this app opens in that
+  distro, e.g. `--use-angle=swiftshader --enable-unsafe-swiftshader` for
+  WebGL on the CPU. None by default.
 - **Border fit.** The window rect WSLg reports includes Linux VS Code's own
   transparent shadow margin (32px a side), which is measured from the
   window's pixels and left out of the border.

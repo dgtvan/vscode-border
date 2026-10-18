@@ -81,7 +81,9 @@ bool LaunchInWsl(const std::wstring& distro, const std::vector<std::wstring>& ar
 // The command (for LaunchInWsl) that opens `linuxPath` in a new Linux VS
 // Code window. Linux `code` run under WSL otherwise stops at a "use Windows
 // VS Code instead -- continue anyway? [y/N]" prompt nobody can answer.
-std::vector<std::wstring> LinuxVSCodeOpenCommand(const std::wstring& linuxPath);
+// Adds the distro's `wsl_vscode_extra_args.<distro>` arguments from
+// config.ini, if any, right after `code`.
+std::vector<std::wstring> LinuxVSCodeOpenCommand(const std::wstring& distro, const std::wstring& linuxPath);
 
 // Distros running right now. Doesn't start anything.
 std::set<std::wstring> RunningWslDistros();

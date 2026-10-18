@@ -185,7 +185,7 @@ void OpenAllFavourites(HWND runningWindow, const std::vector<std::wstring>& alre
 
     for (const FavouriteProject* f : toOpen) {
         std::wstring distro, linuxPath;
-        if (ParseWslUncPath(f->path, &distro, &linuxPath)) LaunchInWsl(distro, LinuxVSCodeOpenCommand(linuxPath));
+        if (ParseWslUncPath(f->path, &distro, &linuxPath)) LaunchInWsl(distro, LinuxVSCodeOpenCommand(distro, linuxPath));
         else RunVSCodeCli(cmdPath, L"-n \"" + f->path + L"\"");
     }
 }

@@ -116,7 +116,7 @@ void OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const w
     std::wstring distro, linuxPath;
     if (ParseWslUncPath(folder, &distro, &linuxPath)) {
         NoteWindowLaunchRequest(reason, 1);
-        LaunchInWsl(distro, LinuxVSCodeOpenCommand(linuxPath));
+        LaunchInWsl(distro, LinuxVSCodeOpenCommand(distro, linuxPath));
         return;
     }
     std::wstring cmdPath;

@@ -103,6 +103,19 @@ Config LoadConfig(const std::wstring& path) {
             // Empty would paint an empty chip (i.e. no label at all) -- that's
             // what show_label=false is for, so keep the default instead.
             if (!val.empty()) cfg.labelAliasFormat = Utf8ToWide(val);
+        } else if (key.rfind("wsl_vscode_extra_args.", 0) == 0) {
+            std::wstring distro = Utf8ToWide(key.substr(strlen("wsl_vscode_extra_args.")));
+            std::vector<std::wstring> args;
+            for (const std::string& item : SplitChar(val, ' ')) {
+                std::string a = Trim(item);
+                if (!a.empty()) args.push_back(Utf8ToWide(a));
+            }
+            if (distro.empty()) {
+                LogWarn(L"config: wsl_vscode_extra_args. has no distro name after the dot -- ignoring it");
+            } else if (!args.empty()) {
+                Log(L"config: wsl_vscode_extra_args for distro [%ls]: [%hs]", distro.c_str(), val.c_str());
+                cfg.wslVSCodeExtraArgs.emplace_back(distro, args);
+            }
         } else if (key == "colors") {
             std::vector<COLORREF> palette;
             for (const std::string& item : SplitChar(val, ',')) {

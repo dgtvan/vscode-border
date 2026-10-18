@@ -1,4 +1,5 @@
 #include "wsl.h"
+#include "config.h"
 #include "logger.h"
 #include "resource.h"
 
@@ -464,8 +465,14 @@ bool LaunchInWsl(const std::wstring& distro, const std::vector<std::wstring>& ar
     return true;
 }
 
-std::vector<std::wstring> LinuxVSCodeOpenCommand(const std::wstring& linuxPath) {
-    return {L"env", L"DONT_PROMPT_WSL_INSTALL=1", L"code", L"-n", linuxPath};
+std::vector<std::wstring> LinuxVSCodeOpenCommand(const std::wstring& distro, const std::wstring& linuxPath) {
+    std::vector<std::wstring> cmd = {L"env", L"DONT_PROMPT_WSL_INSTALL=1", L"code"};
+    for (const auto& entry : g_config.wslVSCodeExtraArgs) {
+        if (_wcsicmp(entry.first.c_str(), distro.c_str()) == 0)
+            cmd.insert(cmd.end(), entry.second.begin(), entry.second.end());
+    }
+    cmd.insert(cmd.end(), {L"-n", linuxPath});
+    return cmd;
 }
 
 std::wstring WslUncPath(const std::wstring& distro, const std::wstring& linuxPath) {

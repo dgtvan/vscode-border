@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 struct Config {
@@ -25,6 +26,11 @@ struct Config {
     bool projectListActivateOnHover = false;
     bool verboseLogging = false; // logs every WinEvent + overlay sync decision for tracked windows
     std::vector<COLORREF> palette;
+
+    // Extra Linux VS Code arguments per WSL distro, from
+    // `wsl_vscode_extra_args.<distro>` keys (see wsl.h's LinuxVSCodeOpenCommand).
+    // The distro name is lowercased, as config.ini keys are.
+    std::vector<std::pair<std::wstring, std::vector<std::wstring>>> wslVSCodeExtraArgs;
 
     // AI status indicator (see ai_provider.h) -- "claude" is the only
     // currently-implemented provider; other tokens (e.g. a future "copilot")
