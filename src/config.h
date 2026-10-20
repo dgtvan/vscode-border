@@ -7,14 +7,23 @@
 #include <vector>
 
 // One of config.ini's user profile slots, user_profile_<N>_* (see account.h).
+// Slot 1 is always the account this app runs as; the others are other
+// Windows accounts.
 struct UserProfile {
-    std::wstring account; // Windows account name, as written
-    std::wstring icon;    // user_profile_<N>_icon: an image path or base64 image data, or empty
-    std::wstring vscode;  // user_profile_<N>_vscode: that account's Code.exe, or empty
-    int slot = 0;         // N
+    std::wstring account;  // Windows account name, as written
+    std::wstring icon;     // user_profile_<N>_icon: an image path or base64 image data, or empty
+    std::wstring vscode;   // user_profile_<N>_vscode: that account's Code.exe, or empty
+    bool hasColor = false; // user_profile_<N>_color set: its usage rings' background (see claude_usage.h)
+    COLORREF color = RGB(0, 0, 0);
+    bool ringBadge = true;    // user_profile_<N>_ring_badge: its icon in front of its usage rings
+    int slot = 0;             // N
+    bool thisAccount = false; // slot 1
 };
 
 // Slots user_profile_1_* .. user_profile_<kMaxUserProfiles>_*.
+// user_profile_1_account's value in config.ini: slot 1 is always the account
+// this app runs as, so its account isn't something to fill in.
+extern const char* const kThisAccountMarker;
 const int kMaxUserProfiles = 5;
 
 struct Config {
@@ -43,8 +52,9 @@ struct Config {
     // The distro name is lowercased, as config.ini keys are.
     std::vector<std::pair<std::wstring, std::vector<std::wstring>>> wslVSCodeExtraArgs;
 
-    // Other Windows accounts VS Code can be started as (see account.h): the
-    // user profile slots that have an account, in slot order.
+    // The user profiles in slot order (see account.h): slot 1, this app's
+    // own account, always first; then the other Windows accounts VS Code can
+    // be started as, the slots that have an account.
     std::vector<UserProfile> userProfiles;
 
     // AI status indicator (see ai_provider.h) -- "claude" is the only

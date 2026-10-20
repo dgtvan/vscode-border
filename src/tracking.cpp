@@ -355,6 +355,7 @@ static void SyncProjectListHud() {
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
         entry.wslDistro = kv.second.wslDistro;
         entry.account = kv.second.account;
+        entry.iconAccount = IconAccountFor(kv.second.account);
         entry.loading = IsWindowLoading(kv.second, kv.first);
         // Fixed placeholder text while loading -- entry.label/rawLabel
         // otherwise still churns underneath (see IsWindowLoading), and
@@ -381,28 +382,23 @@ static void SyncProjectListHud() {
     style.showNewWindowButton = true;
     style.newWindowButtonColor = g_config.palette[PeekNextColorIndex() % g_config.palette.size()];
 
-    // The account to focus: that of the VS Code window highest in the
-    // z-order -- the focused one, or while focus is elsewhere the one used
-    // last, so it's the account about to be used next.
-    bool haveFocusedAccount = false;
-    std::wstring focusedAccount;
-    for (HWND w = GetTopWindow(nullptr); w; w = GetWindow(w, GW_HWNDNEXT)) {
-        auto it = g_tracked.find(w);
-        if (it == g_tracked.end() || IsIconic(w)) continue;
-        haveFocusedAccount = true;
-        focusedAccount = it->second.account;
-        break;
-    }
     std::vector<ClaudeUsageSnapshot> usage = GetClaudeUsageSnapshots();
-    for (const ClaudeUsageSnapshot& u : usage) {
+    for (size_t i = 0; i < usage.size(); i++) {
+        const ClaudeUsageSnapshot& u = usage[i];
         ProjectListHudUsageRing ring;
-        ring.account = u.account;
+        ring.iconAccount = IconAccountFor(u.account);
+        for (const UserProfile& p : g_config.userProfiles) {
+            bool same = p.thisAccount ? u.account.empty()
+                                      : CompareStringOrdinal(p.account.c_str(), -1, u.account.c_str(), -1, TRUE) ==
+                                            CSTR_EQUAL;
+            if (!same) continue;
+            ring.hasChipColor = p.hasColor;
+            ring.chipColor = p.color;
+            if (!p.ringBadge) ring.iconAccount.clear();
+        }
         ring.sessionPercent = CurrentUsagePercent(u.session);
         ring.weeklyPercent = CurrentUsagePercent(u.weekly);
         ring.stale = IsClaudeUsageStale(u);
-        // Only worth telling apart with more than one account shown.
-        ring.focused = usage.size() > 1 && haveFocusedAccount &&
-                       CompareStringOrdinal(u.account.c_str(), -1, focusedAccount.c_str(), -1, TRUE) == CSTR_EQUAL;
         ring.tooltip = DescribeClaudeUsage(u);
         style.usageRings.push_back(ring);
     }
@@ -581,7 +577,7 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
         COLORREF color = g_config.palette[tw.colorIndex % g_config.palette.size()];
         PaintOverlay(tw.overlay, ow, oh, color, t, g_config.opacity,
                      borderLabel, g_config.showLabel, g_config.labelHeight, g_config.labelFontSize,
-                     g_config.labelTextColorAuto, g_config.labelTextColor, tw.wslDistro, tw.account, m);
+                     g_config.labelTextColorAuto, g_config.labelTextColor, tw.wslDistro, IconAccountFor(tw.account), m);
         tw.lastWidth = ow;
         tw.lastHeight = oh;
         tw.lastLabel = borderLabel;

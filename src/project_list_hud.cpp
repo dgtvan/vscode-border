@@ -51,16 +51,16 @@ static const int kRingCells[8][2] = {
     {0, 0}, {1, 0}, {2, 0}, {2, 1}, {2, 2}, {1, 2}, {0, 2}, {0, 1},
 };
 
-// Usage rings (see ProjectListHudUsageRing): each account's group is a dark
-// chip holding its icon (other accounts only) and a rowHeight-square pair of
+// Usage rings (see ProjectListHudUsageRing): each account's group is a chip
+// in that account's own background color (or none), holding its icon (other accounts only) and a rowHeight-square pair of
 // rings, outer weekly and inner session.
 static const int kUsageRingPad = 3, kUsageRingBadgeGap = 3, kUsageRingGap = 4;
 static const double kUsageWarnPercent = 70, kUsageCriticalPercent = 90;
-static const COLORREF kUsageChipColor = RGB(44, 47, 52), kUsageTrackColor = RGB(84, 89, 96),
+static const COLORREF kUsageTrackColor = RGB(84, 89, 96),
                       kUsageOkColor = RGB(63, 174, 106), kUsageWarnColor = RGB(224, 165, 38),
                       kUsageCriticalColor = RGB(224, 81, 59), kUsageStaleColor = RGB(138, 148, 156);
-static const int kUsageDimmedOpacityPercent = 45;
 static const wchar_t* kUsageTooltipClassName = L"VSCodeBorderUsageTooltipWndClass";
+static const wchar_t* kUsageStripClassName = L"VSCodeBorderUsageStripWndClass";
 static const int kUsageTooltipPadX = 8, kUsageTooltipPadY = 5;
 static const COLORREF kUsageTooltipBackColor = RGB(43, 43, 43), kUsageTooltipBorderColor = RGB(96, 96, 96),
                       kUsageTooltipTextColor = RGB(235, 235, 235);
@@ -92,8 +92,10 @@ struct ProjectListHudState {
     bool showNewWindowButton = false;
     COLORREF newWindowButtonColor = RGB(0, 0, 0);
     std::vector<ProjectListHudUsageRing> usageRings;
-    std::vector<RECT> usageRingRects; // after the action buttons; ring group j's hover "index" is the
-                                      // sentinel entries.size() + ActionButtonCount + j (see ProjectListHitTest)
+    std::vector<RECT> usageRingRects; // within usageStrip's own client area
+    HWND usageStrip = nullptr;  // the rings' own window, at the right end of the band (see SyncUsageStrip)
+    int usageHoverRing = -1;    // ring group under the cursor, -1 for none
+    bool usageTrackingMouseLeave = false;
     HWND usageTooltip = nullptr; // popup shown above a hovered ring group (see SyncUsageTooltip)
     int usageTooltipRing = -1;   // the ring group it's showing, -1 while hidden
     std::wstring usageTooltipText;
@@ -180,7 +182,7 @@ static int ActionButtonsRowWidth(const ProjectListHudState* state) {
 }
 
 static int UsageRingGroupWidth(const ProjectListHudState* state, const ProjectListHudUsageRing& ring) {
-    return 2 * kUsageRingPad + (ring.account.empty() ? 0 : kAccountIconSize + kUsageRingBadgeGap) + state->rowHeight;
+    return 2 * kUsageRingPad + (ring.iconAccount.empty() ? 0 : kAccountIconSize + kUsageRingBadgeGap) + state->rowHeight;
 }
 
 static int UsageRingsRowWidth(const ProjectListHudState* state) {
@@ -189,18 +191,17 @@ static int UsageRingsRowWidth(const ProjectListHudState* state) {
     return width + (state->usageRings.empty() ? 0 : ((int)state->usageRings.size() - 1) * kUsageRingGap);
 }
 
-// Width of everything fixed at the end of the strip: the action buttons,
-// then the usage rings.
-static int TailRowWidth(const ProjectListHudState* state) {
-    int buttons = ActionButtonsRowWidth(state), rings = UsageRingsRowWidth(state);
-    return buttons + rings + (buttons > 0 && rings > 0 ? kProjectListGap : 0);
-}
-
-// Space the action buttons and usage rings take at the end of the strip,
+// Space the action buttons take at the end of the strip,
 // including the gap separating them from the last entry.
 static int ActionButtonsReserve(const ProjectListHudState* state) {
-    int width = TailRowWidth(state);
-    return width > 0 ? width + kProjectListGap : 0;
+    return ActionButtonCount(state) > 0 ? ActionButtonsRowWidth(state) + kProjectListGap : 0;
+}
+
+// The right edge the HUD itself can reach: the band's, less the usage rings'
+// strip at its right end and a gap before it.
+static int HudRightLimit(const ProjectListHudState* state) {
+    int rings = UsageRingsRowWidth(state);
+    return (int)state->dockRect.right - (rings > 0 ? rings + kProjectListGap : 0);
 }
 
 // The HudActionButton a hover/hit index refers to (see ProjectListHitTest),
@@ -208,13 +209,6 @@ static int ActionButtonsReserve(const ProjectListHudState* state) {
 static int ActionButtonForIndex(const ProjectListHudState* state, int index) {
     int k = index - (int)state->entries.size();
     return (k >= 0 && k < ActionButtonCount(state)) ? k : -1;
-}
-
-// The usage ring group a hover/hit index refers to, or -1.
-static int UsageRingForIndex(const ProjectListHudState* state, int index) {
-    if (!state || index < 0) return -1;
-    int j = index - (int)state->entries.size() - ActionButtonCount(state);
-    return (j >= 0 && j < (int)state->usageRingRects.size()) ? j : -1;
 }
 
 // Returns an entry index for a hit within state->itemRects, or the sentinel
@@ -229,12 +223,6 @@ static int ProjectListHitTest(const ProjectListHudState* state, int x, int y) {
     for (int k = 0; k < ActionButtonCount(state); k++) {
         const RECT& r = state->actionButtonRects[k];
         if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return (int)state->entries.size() + k;
-    }
-    for (size_t j = 0; j < state->usageRingRects.size(); j++) {
-        const RECT& r = state->usageRingRects[j];
-        if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) {
-            return (int)state->entries.size() + ActionButtonCount(state) + (int)j;
-        }
     }
     return -1;
 }
@@ -313,12 +301,13 @@ static void RebuildItemRects(ProjectListHudState* state) {
     }
 
     int size = state->rowHeight;
-    int x = state->width - TailRowWidth(state);
+    int x = state->width - ActionButtonsRowWidth(state);
     for (int k = 0; k < ActionButtonCount(state); k++) {
         state->actionButtonRects[k] = {x, 0, x + size, size};
         x += size + kProjectListGap;
     }
     state->usageRingRects.clear();
+    x = 0;
     for (const ProjectListHudUsageRing& ring : state->usageRings) {
         int w = UsageRingGroupWidth(state, ring);
         state->usageRingRects.push_back({x, 0, x + w, size});
@@ -337,12 +326,11 @@ static LPCWSTR ProjectListCursorForPoint(const ProjectListHudState* state, int x
     if (state && state->dragMode == ProjectListHudState::DragMove) return IDC_SIZEALL;
     bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     if (ctrlDown) return IsProjectListResizeEdge(state, x) ? IDC_SIZEWE : IDC_SIZEALL;
-    // The usage rings do nothing on a click.
-    int hit = ProjectListHitTest(state, x, y);
-    return hit >= 0 && UsageRingForIndex(state, hit) < 0 ? IDC_HAND : IDC_ARROW;
+    return ProjectListHitTest(state, x, y) >= 0 ? IDC_HAND : IDC_ARROW;
 }
 
 static void RenderProjectListHud(HWND hud, ProjectListHudState* state);
+static void SyncUsageStrip(HWND hud, ProjectListHudState* state);
 static void PaintDragGhost(ProjectListHudState* state);
 static void MoveDragGhost(ProjectListHudState* state);
 
@@ -372,11 +360,15 @@ static bool IsHudCovered(HWND hud, const ProjectListHudState* state) {
 // (a visible blink, when these were separate calls).
 static void RaiseBandWindows(HWND hud, ProjectListHudState* state, bool withBackdrop) {
     const UINT flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
-    HDWP batch = BeginDeferWindowPos(withBackdrop ? 2 : 1);
+    // The rings' strip goes along, in front of the backdrop too.
+    bool strip = state->usageStrip && IsWindowVisible(state->usageStrip);
+    HDWP batch = BeginDeferWindowPos((withBackdrop ? 2 : 1) + (strip ? 1 : 0));
     if (batch && withBackdrop) batch = DeferWindowPos(batch, state->backdrop, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    if (batch && strip) batch = DeferWindowPos(batch, state->usageStrip, HWND_TOPMOST, 0, 0, 0, 0, flags);
     if (batch) batch = DeferWindowPos(batch, hud, HWND_TOPMOST, 0, 0, 0, 0, flags | SWP_SHOWWINDOW);
     if (!batch || !EndDeferWindowPos(batch)) {
         if (withBackdrop) SetWindowPos(state->backdrop, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        if (strip) SetWindowPos(state->usageStrip, HWND_TOPMOST, 0, 0, 0, 0, flags);
         SetWindowPos(hud, HWND_TOPMOST, 0, 0, 0, 0, flags | SWP_SHOWWINDOW);
     }
     // Re-asserting HWND_TOPMOST has been seen not to move the HUD ahead of
@@ -396,6 +388,7 @@ static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
     if (!state) return;
     if (state->docked && state->fullscreenAppOpen) {
         ShowWindow(hud, SW_HIDE);
+        SyncUsageStrip(hud, state);
         return;
     }
     bool wasVisible = IsWindowVisible(hud) != FALSE;
@@ -404,8 +397,8 @@ static void PositionProjectListHud(HWND hud, ProjectListHudState* state) {
     // sync and every frame of a drag.
     bool backdrop = state->docked && IsWindowVisible(state->backdrop);
     bool backdropDemoted = backdrop && !(GetWindowLongPtrW(state->backdrop, GWL_EXSTYLE) & WS_EX_TOPMOST);
-    if (wasVisible && !backdropDemoted && !IsHudCovered(hud, state)) return;
-    RaiseBandWindows(hud, state, backdrop);
+    if (!wasVisible || backdropDemoted || IsHudCovered(hud, state)) RaiseBandWindows(hud, state, backdrop);
+    SyncUsageStrip(hud, state);
 }
 
 // Re-checks the current monitor scenario against state->scenarioKey and, if
@@ -447,14 +440,16 @@ static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
     return true;
 }
 
-// Fits state->x/y/width into the reserved band: y is pinned to the band's
-// bottom (the HUD can only slide sideways), the width is capped at the band's, and
-// x is either the remembered one clamped into the band or, if never placed
-// by hand, right-aligned.
+// Fits state->x/y/width into the reserved band, left of the usage rings'
+// strip (see HudRightLimit): y is pinned to the band's bottom (the HUD can
+// only slide sideways), the width is capped at what's left of the band, and
+// x is either the remembered one clamped into it or, if never placed by
+// hand, right-aligned against the rings.
 static void FitIntoDock(ProjectListHudState* state) {
     const RECT& d = state->dockRect;
-    state->width = std::min(state->width, (int)(d.right - d.left));
-    state->x = state->manualPosition ? ClampInt(state->x, d.left, d.right - state->width) : d.right - state->width;
+    int right = HudRightLimit(state);
+    state->width = std::max(1, std::min(state->width, right - (int)d.left));
+    state->x = state->manualPosition ? ClampInt(state->x, d.left, right - state->width) : right - state->width;
     state->y = d.bottom - state->height; // on the taskbar side, clear of the backdrop's border row
 }
 
@@ -1019,10 +1014,11 @@ static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state,
     else RemoveFavourite(favourites[i].path);
 }
 
-// Plain click on the "+" new-window button with user profiles configured
-// (see account.h): which account to open the new VS Code window as -- this
-// app's own (the default, bolded), then config.ini's user profiles in slot
-// order, each with its icon. Without any profiles the click just opens the
+// Plain click on the "+" new-window button with other accounts' user profiles
+// configured (see account.h): which account to open the new VS Code window
+// as -- this app's own (the default, bolded, with its icon if
+// user_profile_1_icon is set), then the other profiles in slot order, each
+// with its icon. Without any profiles the click just opens the
 // window, no menu. (Forgetting a profile's saved password is on the tray
 // menu.)
 static void ShowNewWindowProfileMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
@@ -1032,6 +1028,13 @@ static void ShowNewWindowProfileMenu(HWND hud, ProjectListHudState* state, POINT
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, kThisAccountId, AccountMenuText(CurrentAccountName()).c_str());
     SetMenuDefaultItem(menu, kThisAccountId, FALSE);
+    std::wstring ownIcon = IconAccountFor(L"");
+    if (!ownIcon.empty()) {
+        MENUITEMINFOW mii = {sizeof(mii)};
+        mii.fMask = MIIM_BITMAP;
+        mii.hbmpItem = GetAccountIconMenuBitmap(ownIcon);
+        if (mii.hbmpItem) SetMenuItemInfoW(menu, 0, TRUE, &mii);
+    }
     for (size_t i = 0; i < profiles.size(); i++) {
         AppendMenuW(menu, MF_STRING, (UINT)(2 + i), AccountMenuText(profiles[i]).c_str());
         MENUITEMINFOW mii = {sizeof(mii)};
@@ -1083,11 +1086,10 @@ static void EndMoveResizeDrag(HWND hwnd, ProjectListHudState* state, int mouseX,
 }
 
 // Shows the hovered usage ring group's tooltip just above it and keeps its
-// text current; hides it once nothing (or anything else) is hovered, or a
-// drag is under way.
+// text current; hides it once no ring group is hovered.
 static void SyncUsageTooltip(HWND hud, ProjectListHudState* state) {
     if (!state || !state->usageTooltip) return;
-    int ring = state->dragMode == ProjectListHudState::DragNone ? UsageRingForIndex(state, state->hoverIndex) : -1;
+    int ring = state->usageStrip && IsWindowVisible(state->usageStrip) ? state->usageHoverRing : -1;
     if (ring < 0 || ring >= (int)state->usageRings.size()) {
         if (state->usageTooltipRing >= 0) ShowWindow(state->usageTooltip, SW_HIDE);
         state->usageTooltipRing = -1;
@@ -1110,9 +1112,11 @@ static void SyncUsageTooltip(HWND hud, ProjectListHudState* state) {
     SelectObject(dc, oldFont);
     ReleaseDC(nullptr, dc);
     int w = textRect.right + 2 * kUsageTooltipPadX, h = textRect.bottom + 2 * kUsageTooltipPadY;
+    RECT strip;
+    GetWindowRect(state->usageStrip, &strip);
     const RECT& r = state->usageRingRects[ring];
-    int x = std::max((int)state->dockRect.left, std::min(state->x + (int)r.left, (int)state->dockRect.right - w));
-    int y = state->y - h - 4;
+    int x = std::max((int)state->dockRect.left, std::min((int)strip.left + (int)r.left, (int)state->dockRect.right - w));
+    int y = strip.top - h - 4;
     SetWindowPos(state->usageTooltip, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(state->usageTooltip, nullptr, TRUE);
     state->usageTooltipRing = ring;
@@ -1150,6 +1154,38 @@ static LRESULT CALLBACK UsageTooltipWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             EndPaint(hwnd, &ps);
             return 0;
         }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// The usage rings' strip: GWLP_USERDATA is the HUD's state. Hovering a ring
+// group shows its tooltip; clicks do nothing.
+static LRESULT CALLBACK UsageStripWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    ProjectListHudState* state = (ProjectListHudState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (msg) {
+        case WM_MOUSEMOVE: {
+            if (!state) break;
+            int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam), hit = -1;
+            for (size_t j = 0; j < state->usageRingRects.size(); j++) {
+                const RECT& r = state->usageRingRects[j];
+                if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) hit = (int)j;
+            }
+            if (hit != state->usageHoverRing) {
+                state->usageHoverRing = hit;
+                SyncUsageTooltip(hwnd, state);
+            }
+            if (!state->usageTrackingMouseLeave) {
+                TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
+                state->usageTrackingMouseLeave = TrackMouseEvent(&tme) != 0;
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (!state) break;
+            state->usageTrackingMouseLeave = false;
+            state->usageHoverRing = -1;
+            SyncUsageTooltip(hwnd, state);
+            return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -1253,13 +1289,13 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 state->manualPosition = true;
                 if (state->dragMode == ProjectListHudState::DragMove) {
                     int w = right - left;
-                    left = ClampInt(left + dx, d.left, d.right - w);
+                    left = ClampInt(left + dx, d.left, HudRightLimit(state) - w);
                     right = left + w;
                 } else {
                     if (state->dragMode == ProjectListHudState::DragResizeLeft) {
                         left = std::max(std::min(left + dx, right - kProjectListMinWidth), (int)d.left);
                     } else {
-                        right = std::min(std::max(right + dx, left + kProjectListMinWidth), (int)d.right);
+                        right = std::min(std::max(right + dx, left + kProjectListMinWidth), HudRightLimit(state));
                     }
                     state->manualWidth = true;
                 }
@@ -1296,7 +1332,6 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (hoverIndex != state->hoverIndex) {
                 state->hoverIndex = hoverIndex;
                 RenderProjectListHud(hwnd, state);
-                SyncUsageTooltip(hwnd, state);
                 // The highest-risk activation path in the app: one mouse
                 // sweep across the strip crosses every item and asks to
                 // activate each in turn, which is exactly the shape that
@@ -1338,7 +1373,6 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 GetCursorPos(&state->dragStart);
                 GetWindowRect(hwnd, &state->dragStartRect);
                 SetCapture(hwnd);
-                SyncUsageTooltip(hwnd, state);
                 SetCursor(LoadCursorW(nullptr, state->dragMode == ProjectListHudState::DragMove ? IDC_SIZEALL : IDC_SIZEWE));
             } else if (state) {
                 // The action buttons (hit-tested as sentinel indices from
@@ -1436,7 +1470,6 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     state->hoverIndex = -1;
                     RenderProjectListHud(hwnd, state);
                 }
-                SyncUsageTooltip(hwnd, state);
                 EndProjectListHoverFocus(state, true);
             }
             return 0;
@@ -1488,6 +1521,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 if (open) {
                     state->visibleBeforeFullscreen = IsWindowVisible(hwnd) != FALSE;
                     ShowWindow(hwnd, SW_HIDE);
+                    SyncUsageStrip(hwnd, state);
                 } else if (state->visibleBeforeFullscreen && !state->entries.empty()) {
                     FitIntoDock(state);
                     RenderProjectListHud(hwnd, state);
@@ -1517,6 +1551,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
         case WM_NCDESTROY:
             if (state && state->dragGhost) DestroyWindow(state->dragGhost);
             if (state && state->usageTooltip) DestroyWindow(state->usageTooltip);
+            if (state && state->usageStrip) DestroyWindow(state->usageStrip);
             if (state && state->usageTooltipFont) DeleteObject(state->usageTooltipFont);
             if (state && state->backdrop) DestroyWindow(state->backdrop);
             delete state;
@@ -1610,6 +1645,23 @@ HWND CreateProjectListHud(HINSTANCE hInstance) {
         LogWarn(L"hud: couldn't create the usage rings' tooltip, lastError=%lu", GetLastError());
     }
 
+    // Its own window rather than part of the HUD, so it stays at the band's
+    // right end wherever the HUD is slid to.
+    WNDCLASSW stripClass = {};
+    stripClass.lpfnWndProc = UsageStripWndProc;
+    stripClass.hInstance = hInstance;
+    stripClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    stripClass.lpszClassName = kUsageStripClassName;
+    RegisterClassW(&stripClass);
+    state->usageStrip = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                                        kUsageStripClassName, L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, hInstance,
+                                        nullptr);
+    if (state->usageStrip) {
+        SetWindowLongPtrW(state->usageStrip, GWLP_USERDATA, (LONG_PTR)state);
+    } else {
+        LogWarn(L"hud: couldn't create the usage rings' window, lastError=%lu", GetLastError());
+    }
+
     return hwnd;
 }
 
@@ -1677,7 +1729,7 @@ static int WslIconTextShift(const ProjectListHudEntry& entry) {
     return entry.wslDistro.empty() ? 0 : kWslIconSize + kWslIconGap;
 }
 static int LabelIconsTextShift(const ProjectListHudEntry& entry) {
-    return WslIconTextShift(entry) + (entry.account.empty() ? 0 : kAccountIconSize + kAccountIconGap);
+    return WslIconTextShift(entry) + (entry.iconAccount.empty() ? 0 : kAccountIconSize + kAccountIconGap);
 }
 
 // Draws one entry's chip (background + label text, alpha-blended by
@@ -1773,8 +1825,8 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
                      item);
         leftTextPad += WslIconTextShift(entry);
     }
-    if (!entry.account.empty()) {
-        BlendAccountIcon(entry.account, pixels, width, height, (int)item.left + leftTextPad,
+    if (!entry.iconAccount.empty()) {
+        BlendAccountIcon(entry.iconAccount, pixels, width, height, (int)item.left + leftTextPad,
                          (int)item.top + (rowHeight - kAccountIconSize) / 2, item);
         leftTextPad += kAccountIconSize + kAccountIconGap;
     }
@@ -1960,20 +2012,25 @@ static COLORREF UsageRingColor(double percent, bool stale) {
 }
 
 // Draws one account's usage ring group (see ProjectListHudUsageRing) at
-// `item`: the chip, the account's icon, the twin rings -- antialiased by
-// supersampling -- then the same opacity pass as DrawHudItem.
+// `item`: the chip in the account's own color, its icon, the twin
+// rings -- antialiased by supersampling -- then the same opacity pass as
+// DrawHudItem.
 static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight, const RECT& item,
                            const ProjectListHudUsageRing& ring, int opacity) {
     int rowStart = std::max((int)item.top, 0), rowEnd = std::min((int)item.bottom, height);
     int colStart = std::max((int)item.left, 0), colEnd = std::min((int)item.right, width);
-    UINT32 chipPx = OpaquePixel(kUsageChipColor);
-    for (int row = rowStart; row < rowEnd; row++) {
-        for (int col = colStart; col < colEnd; col++) pixels[row * width + col] = chipPx;
+    // Without a chip color the group is left as the surface's own near-
+    // transparent background, and only what's drawn on it shows.
+    if (ring.hasChipColor) {
+        UINT32 chipPx = OpaquePixel(ring.chipColor);
+        for (int row = rowStart; row < rowEnd; row++) {
+            for (int col = colStart; col < colEnd; col++) pixels[row * width + col] = chipPx;
+        }
     }
 
     int left = (int)item.left + kUsageRingPad;
-    if (!ring.account.empty()) {
-        BlendAccountIcon(ring.account, pixels, width, height, left, (int)item.top + (rowHeight - kAccountIconSize) / 2,
+    if (!ring.iconAccount.empty()) {
+        BlendAccountIcon(ring.iconAccount, pixels, width, height, left, (int)item.top + (rowHeight - kAccountIconSize) / 2,
                          item);
         left += kAccountIconSize + kUsageRingBadgeGap;
     }
@@ -1995,36 +2052,46 @@ static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight,
     int ringRight = std::min(colEnd, left + (int)size);
     for (int row = rowStart; row < rowEnd; row++) {
         for (int col = std::max(colStart, left); col < ringRight; col++) {
-            double sumR = 0, sumG = 0, sumB = 0;
+            // Premultiplied sums: a sample on the bare background adds the
+            // chip's color when there is one, and nothing (no coverage)
+            // when it's transparent.
+            double sumR = 0, sumG = 0, sumB = 0, covered = 0;
             for (int sy = 0; sy < kSamples; sy++) {
                 for (int sx = 0; sx < kSamples; sx++) {
                     double dx = col + (sx + 0.5) / kSamples - cx, dy = row + (sy + 0.5) / kSamples - cy;
                     double dist = sqrt(dx * dx + dy * dy);
                     double turn = atan2(dx, -dy) / (2 * kPi); // clockwise from 12 o'clock
                     if (turn < 0) turn += 1;
-                    COLORREF c = kUsageChipColor;
+                    bool onBand = false;
+                    COLORREF c = ring.chipColor;
                     for (const Band& b : bands) {
-                        if (dist >= b.inner && dist < b.outer) c = turn < b.fraction ? b.fill : kUsageTrackColor;
+                        if (dist >= b.inner && dist < b.outer) {
+                            c = turn < b.fraction ? b.fill : kUsageTrackColor;
+                            onBand = true;
+                        }
                     }
+                    if (!onBand && !ring.hasChipColor) continue;
                     sumR += GetRValue(c);
                     sumG += GetGValue(c);
                     sumB += GetBValue(c);
+                    covered++;
                 }
             }
+            if (covered == 0) continue;
             const int n = kSamples * kSamples;
-            pixels[row * width + col] = OpaquePixel(RGB((BYTE)(sumR / n), (BYTE)(sumG / n), (BYTE)(sumB / n)));
+            pixels[row * width + col] = (UINT32(covered * 255 / n) << 24) | (UINT32(sumR / n) << 16) |
+                                        (UINT32(sumG / n) << 8) | UINT32(sumB / n);
         }
     }
 
-    BYTE alpha = (BYTE)opacity;
+    // Scales the premultiplied pixels, keeping at least the background's
+    // alpha of 1 so the whole group still takes the mouse.
     for (int row = rowStart; row < rowEnd; row++) {
         for (int col = colStart; col < colEnd; col++) {
             UINT32 px = pixels[row * width + col];
-            BYTE pxR = (BYTE)((px >> 16) & 0xFF);
-            BYTE pxG = (BYTE)((px >> 8) & 0xFF);
-            BYTE pxB = (BYTE)(px & 0xFF);
-            pixels[row * width + col] = (UINT32(alpha) << 24) | (UINT32((pxR * alpha) / 255) << 16) |
-                                        (UINT32((pxG * alpha) / 255) << 8) | UINT32((pxB * alpha) / 255);
+            UINT32 a = std::max<UINT32>(1, ((px >> 24) * opacity) / 255);
+            pixels[row * width + col] = (a << 24) | (((((px >> 16) & 0xFF) * opacity) / 255) << 16) |
+                                        (((((px >> 8) & 0xFF) * opacity) / 255) << 8) | (((px & 0xFF) * opacity) / 255);
         }
     }
 }
@@ -2093,18 +2160,6 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
         }
         DrawActionButton(screenDC, pixels, width, height, state->actionButtonRects[k], kGlyphs[k], color,
                          highlighted, opacity, font, state->labelTextColorAuto, state->labelTextColor);
-    }
-
-    // With one account's rings focused, the others are dimmed -- except
-    // one nearing a limit, which stays at full strength so it isn't missed.
-    bool anyFocused = std::any_of(state->usageRings.begin(), state->usageRings.end(),
-                                  [](const ProjectListHudUsageRing& r) { return r.focused; });
-    for (size_t j = 0; j < state->usageRings.size() && j < state->usageRingRects.size(); j++) {
-        const ProjectListHudUsageRing& ring = state->usageRings[j];
-        bool nearLimit = !ring.stale && std::max(ring.sessionPercent, ring.weeklyPercent) >= kUsageWarnPercent;
-        int opacity = state->normalOpacity;
-        if (anyFocused && !ring.focused && !nearLimit) opacity = opacity * kUsageDimmedOpacityPercent / 100;
-        DrawUsageRings(pixels, width, height, rowHeight, state->usageRingRects[j], ring, opacity);
     }
 
     DeleteObject(font);
@@ -2223,8 +2278,62 @@ static void PaintDragGhost(ProjectListHudState* state) {
     ReleaseDC(nullptr, screenDC);
 }
 
+// Shows the usage rings' strip exactly while the HUD is, at the right end of
+// the band level with it, freshly painted; hides it otherwise.
+static void SyncUsageStrip(HWND hud, ProjectListHudState* state) {
+    if (!state || !state->usageStrip) return;
+    int width = UsageRingsRowWidth(state), height = state->rowHeight;
+    if (!IsWindowVisible(hud) || width <= 0 || height <= 0) {
+        if (IsWindowVisible(state->usageStrip)) ShowWindow(state->usageStrip, SW_HIDE);
+        if (state->usageHoverRing >= 0) {
+            state->usageHoverRing = -1;
+            SyncUsageTooltip(hud, state);
+        }
+        return;
+    }
+
+    HDC screenDC = GetDC(nullptr);
+    HDC memDC = CreateCompatibleDC(screenDC);
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp) {
+        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, bmp);
+        UINT32* pixels = (UINT32*)bits;
+        // Nearly transparent rather than fully, so the gaps between groups
+        // still take the mouse, same as the HUD's own background.
+        for (int i = 0; i < width * height; i++) pixels[i] = 0x01000000u;
+        for (size_t j = 0; j < state->usageRings.size() && j < state->usageRingRects.size(); j++) {
+            DrawUsageRings(pixels, width, height, height, state->usageRingRects[j], state->usageRings[j],
+                           state->normalOpacity);
+        }
+        POINT ptDst = {(int)state->dockRect.right - width, state->y}, ptSrc = {0, 0};
+        SIZE sz = {width, height};
+        BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+        UpdateLayeredWindow(state->usageStrip, screenDC, &ptDst, &sz, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
+        SelectObject(memDC, oldBmp);
+        DeleteObject(bmp);
+    }
+    DeleteDC(memDC);
+    ReleaseDC(nullptr, screenDC);
+
+    if (!IsWindowVisible(state->usageStrip)) {
+        SetWindowPos(state->usageStrip, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    }
+    SyncUsageTooltip(hud, state);
+}
+
 void HideProjectListHud(HWND hud) {
-    if (hud) ShowWindow(hud, SW_HIDE);
+    if (!hud) return;
+    ShowWindow(hud, SW_HIDE);
+    SyncUsageStrip(hud, (ProjectListHudState*)GetWindowLongPtrW(hud, GWLP_USERDATA));
 }
 
 void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTaskbar) {
@@ -2338,6 +2447,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     // SetProjectListHudDocked): nowhere to put the hub.
     if (!state->docked) {
         ShowWindow(hud, SW_HIDE);
+        SyncUsageStrip(hud, state);
         return;
     }
 
@@ -2427,7 +2537,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     // The action buttons' hover "indices" are the sentinels from
     // sorted.size() up (see ProjectListHitTest) -- past the last valid entry
     // index, not out of range, while they're shown.
-    int maxHoverIndex = (int)sorted.size() - 1 + ActionButtonCount(state) + (int)state->usageRings.size();
+    int maxHoverIndex = (int)sorted.size() - 1 + ActionButtonCount(state);
     if (state->hoverIndex > maxHoverIndex) state->hoverIndex = -1;
 
     // Both the Working ring spinner and the Attention pulse need a repaint
@@ -2446,7 +2556,8 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
         state->pulseTimerActive = false;
     }
 
+    if (state->usageHoverRing >= (int)state->usageRings.size()) state->usageHoverRing = -1;
+
     RenderProjectListHud(hud, state);
-    PositionProjectListHud(hud, state);
-    SyncUsageTooltip(hud, state);
+    PositionProjectListHud(hud, state); // also syncs the rings' strip
 }

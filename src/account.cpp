@@ -68,8 +68,18 @@ std::wstring CurrentAccountName() {
 
 std::vector<std::wstring> ConfiguredUserProfiles() {
     std::vector<std::wstring> out;
-    for (const UserProfile& p : g_config.userProfiles) out.push_back(p.account);
+    for (const UserProfile& p : g_config.userProfiles) {
+        if (!p.thisAccount) out.push_back(p.account);
+    }
     return out;
+}
+
+std::wstring IconAccountFor(const std::wstring& account) {
+    if (!account.empty()) return account;
+    for (const UserProfile& p : g_config.userProfiles) {
+        if (p.thisAccount && !p.icon.empty()) return p.account;
+    }
+    return L"";
 }
 
 // Windows account names are case-insensitive, non-ASCII letters included

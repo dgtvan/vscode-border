@@ -1,6 +1,8 @@
 #include "vscode_cli.h"
 #include "wsl.h"
 
+#include "config.h"
+#include "file_util.h"
 #include "focus_trace.h"
 #include "logger.h"
 
@@ -23,20 +25,8 @@ bool FileExists(const std::wstring& path) {
     return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-bool ResolveFromWindow(HWND window, std::wstring& outCmdPath) {
-    if (!window || !IsWindow(window)) return false;
-
-    DWORD pid = 0;
-    GetWindowThreadProcessId(window, &pid);
-    if (!pid) return false;
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!hProcess) return false;
-    wchar_t exePath[MAX_PATH] = {};
-    DWORD size = MAX_PATH;
-    bool ok = QueryFullProcessImageNameW(hProcess, 0, exePath, &size) != 0;
-    CloseHandle(hProcess);
-    if (!ok) return false;
-
+// The CLI shim (bin\*.cmd) of the install whose Code.exe is `exePath`.
+bool ResolveFromExe(const std::wstring& exePath, std::wstring& outCmdPath) {
     std::wstring installDir(exePath);
     size_t slash = installDir.find_last_of(L"\\/");
     if (slash == std::wstring::npos) return false;
@@ -52,6 +42,32 @@ bool ResolveFromWindow(HWND window, std::wstring& outCmdPath) {
     outCmdPath = installDir + L"\\bin\\" + findData.cFileName;
     FindClose(hFind);
     return true;
+}
+
+bool ResolveFromWindow(HWND window, std::wstring& outCmdPath) {
+    if (!window || !IsWindow(window)) return false;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (!pid) return false;
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProcess) return false;
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD size = MAX_PATH;
+    bool ok = QueryFullProcessImageNameW(hProcess, 0, exePath, &size) != 0;
+    CloseHandle(hProcess);
+    return ok && ResolveFromExe(exePath, outCmdPath);
+}
+
+// This account's user_profile_1_vscode (relative to config.ini's folder),
+// or empty.
+std::wstring ConfiguredOwnVSCodeExe() {
+    for (const UserProfile& p : g_config.userProfiles) {
+        if (!p.thisAccount || p.vscode.empty()) continue;
+        bool absolute = p.vscode.size() > 1 && (p.vscode[1] == L':' || (p.vscode[0] == L'\\' && p.vscode[1] == L'\\'));
+        return absolute ? p.vscode : GetExeDir() + L"\\" + p.vscode;
+    }
+    return L"";
 }
 
 bool ResolveStandalone(std::wstring& outCmdPath) {
@@ -87,6 +103,12 @@ bool ResolveStandalone(std::wstring& outCmdPath) {
 } // namespace
 
 bool ResolveVSCodeCliShim(HWND runningWindow, std::wstring& outCmdPath) {
+    std::wstring configured = ConfiguredOwnVSCodeExe();
+    if (!configured.empty()) {
+        if (ResolveFromExe(configured, outCmdPath)) return true;
+        LogWarn(L"vscode CLI shim: none next to user_profile_1_vscode [%ls] -- falling back to the usual lookup",
+                configured.c_str());
+    }
     if (ResolveFromWindow(runningWindow, outCmdPath)) {
         g_lastWindowDerivedShim = outCmdPath;
         return true;

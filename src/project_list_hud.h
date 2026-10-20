@@ -34,7 +34,8 @@ struct ProjectListHudEntry {
     std::wstring wslDistro; // distro a WSLg window's Linux VS Code runs in (see wsl.h), empty for Windows
                             // VS Code -- a WSLg entry shows the WSL icon in front of its label
     std::wstring account;   // Windows account the window's VS Code runs as, when that isn't this app's own
-                            // (see account.h), else empty -- shows that account's icon in front of the label
+                            // (see account.h), else empty
+    std::wstring iconAccount; // whose icon to show in front of the label (see IconAccountFor), empty for none
     // True while rawLabel might still change (VS Code's title/worktree
     // mapping still settling -- see tracking.cpp's IsWindowLoading). Drawn
     // greyed out with a spinner instead of its real color/AI status, and
@@ -43,17 +44,17 @@ struct ProjectListHudEntry {
     bool loading = false;
 };
 
-// One account's Claude usage (see claude_usage.h), drawn after the action
-// buttons as twin rings -- outer weekly, inner session -- with the account's
-// icon in front unless it's this app's own account, the same rule the items
-// follow. Hovering shows `tooltip`.
+// One account's Claude usage (see claude_usage.h), drawn in a strip of its own
+// at the right end of the hub's band as twin rings -- outer weekly, inner session -- with the account's
+// icon in front by the same rule as the items (see IconAccountFor). Hovering
+// shows `tooltip`.
 struct ProjectListHudUsageRing {
-    std::wstring account;       // empty for this app's own account
+    std::wstring iconAccount;   // whose icon to show in front, empty for none
     double sessionPercent = -1; // -1 when unknown
     double weeklyPercent = -1;
-    bool stale = false;   // drawn grey: the numbers aren't current (see IsClaudeUsageStale)
-    bool focused = false; // the account of the VS Code window that had focus last -- the other
-                          // accounts' rings are dimmed (unless at a warning level themselves)
+    bool stale = false; // drawn grey: the numbers aren't current (see IsClaudeUsageStale)
+    bool hasChipColor = false; // the account's own background (its profile's _color); none: transparent
+    COLORREF chipColor = RGB(0, 0, 0);
     std::wstring tooltip;
 };
 

@@ -10,6 +10,8 @@
 
 Config g_config;
 
+const char* const kThisAccountMarker = "<the account running VS Code Border - do not edit>";
+
 static std::vector<COLORREF> DefaultPalette() {
     return {
         RGB(0xE6, 0x4A, 0x4A), RGB(0x4A, 0x9C, 0xE6), RGB(0x4A, 0xE6, 0x7A), RGB(0xE6, 0xB8, 0x4A),
@@ -45,6 +47,18 @@ static COLORREF ParseHexColor(const std::string& hex) {
     unsigned long v = strtoul(hex.c_str(), nullptr, 16);
     BYTE r = (BYTE)((v >> 16) & 0xFF), g = (BYTE)((v >> 8) & 0xFF), b = (BYTE)(v & 0xFF);
     return RGB(r, g, b);
+}
+
+// An optional RRGGBB value: false when empty, and when it isn't one (warned
+// about, naming `key`).
+static bool ParseOptionalHexColor(const std::string& key, const std::string& val, COLORREF& out) {
+    if (val.empty()) return false;
+    if (val.size() != 6 || val.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
+        LogWarn(L"config: %hs=[%hs] isn't a hex RRGGBB color -- ignoring it", key.c_str(), val.c_str());
+        return false;
+    }
+    out = ParseHexColor(val);
+    return true;
 }
 
 Config LoadConfig(const std::wstring& path) {
@@ -125,9 +139,19 @@ Config LoadConfig(const std::wstring& path) {
             long slot = strtol(rest, &end, 10);
             std::string field = (end && *end == '_') ? std::string(end + 1) : std::string();
             if (end == rest || slot < 1 || slot > kMaxUserProfiles ||
-                (field != "account" && field != "icon" && field != "vscode")) {
-                LogWarn(L"config: unknown key [%hs] -- user profiles are user_profile_<1-%d>_account/_icon/_vscode",
+                (field != "account" && field != "icon" && field != "vscode" && field != "color" &&
+                 field != "ring_badge")) {
+                LogWarn(L"config: unknown key [%hs] -- user profiles are "
+                        L"user_profile_<1-%d>_account/_icon/_vscode/_color/_ring_badge",
                         key.c_str(), kMaxUserProfiles);
+            } else if (field == "color") {
+                UserProfile& p = slots[slot - 1];
+                p.hasColor = ParseOptionalHexColor(key, val, p.color);
+            } else if (field == "ring_badge") {
+                // Empty keeps the default (shown).
+                slots[slot - 1].ringBadge = !(val == "0" || _stricmp(val.c_str(), "false") == 0);
+            } else if (slot == 1 && field == "account" && val == kThisAccountMarker) {
+                // Filled in below.
             } else {
                 UserProfile& p = slots[slot - 1];
                 (field == "account" ? p.account : field == "icon" ? p.icon : p.vscode) = Utf8ToWide(val);
@@ -180,7 +204,20 @@ Config LoadConfig(const std::wstring& path) {
         }
     }
 
-    // A slot without an account is unused, whatever else it has.
+    // Slot 1 is this app's own account whatever its _account says (the
+    // marker, empty, or the account's own name are all fine). Any other slot
+    // without an account is unused, whatever else it has.
+    wchar_t ownName[256] = {};
+    DWORD ownLen = 256;
+    std::wstring own = GetUserNameW(ownName, &ownLen) ? ownName : L"";
+    if (!slots[0].account.empty() &&
+        CompareStringOrdinal(slots[0].account.c_str(), -1, own.c_str(), -1, TRUE) != CSTR_EQUAL) {
+        LogWarn(L"config: user_profile_1 is the account this app runs as, [%ls], but its _account says [%ls] -- "
+                L"using it as [%ls]; another account goes in slot 2 or later, and slot 1's stays %hs",
+                own.c_str(), slots[0].account.c_str(), own.c_str(), kThisAccountMarker);
+    }
+    slots[0].account = own;
+    slots[0].thisAccount = true;
     for (int i = 0; i < kMaxUserProfiles; i++) {
         const UserProfile& p = slots[i];
         if (p.account.empty()) continue;
@@ -195,9 +232,12 @@ Config LoadConfig(const std::wstring& path) {
             continue;
         }
         // The icon can be a whole base64 image -- logged by size only.
-        Log(L"config: user profile %d: account=[%ls] icon=[%ls] vscode=[%ls]", i + 1, p.account.c_str(),
+        wchar_t color[8] = L"";
+        if (p.hasColor) swprintf(color, 8, L"%02X%02X%02X", GetRValue(p.color), GetGValue(p.color), GetBValue(p.color));
+        Log(L"config: user profile %d: account=[%ls] icon=[%ls] vscode=[%ls] color=[%ls] ring_badge=%d", i + 1,
+            p.account.c_str(),
             p.icon.size() > 260 ? (std::to_wstring(p.icon.size()) + L" chars").c_str() : p.icon.c_str(),
-            p.vscode.c_str());
+            p.vscode.c_str(), color, p.ringBadge);
         cfg.userProfiles.push_back(p);
         cfg.userProfiles.back().slot = i + 1;
     }

@@ -503,7 +503,7 @@ void SyncClaudeUsageMonitor(HWND notifyWnd, UINT notifyMsg) {
     std::vector<std::wstring> accounts;
     if (g_config.usageMeterEnabled) {
         accounts.push_back(L"");
-        for (const UserProfile& p : g_config.userProfiles) accounts.push_back(p.account);
+        for (const std::wstring& account : ConfiguredUserProfiles()) accounts.push_back(account);
     }
     bool same = accounts.size() == g_workers.size() && g_config.usageMeterRefreshMinutes == g_intervalMinutes;
     for (size_t i = 0; same && i < accounts.size(); i++) same = accounts[i] == g_workers[i]->account;

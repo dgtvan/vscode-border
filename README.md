@@ -116,6 +116,7 @@ first build):
 | `ai_indicator_border_color` | Indicator border color: `auto` (black/white by contrast) or a fixed hex `RRGGBB`. Default `auto`. |
 | `usage_meter_enabled` | Show Claude usage rings at the right end of the project list HUD (`true`/`false` -- see [Claude usage rings](#claude-usage-rings)). Default `true`. |
 | `usage_meter_refresh_minutes` | How often to re-read Claude usage, in minutes (1-60). Default `5`. |
+| `user_profile_<N>_account` / `_icon` / `_vscode` / `_color` / `_ring_badge` | User profiles (see `config.ini`): profile 1 is this account (its `_account` is a fixed placeholder; its `_vscode`, the Code.exe new windows as this account open with), 2-5 other Windows accounts. `_color` is the background of that account's usage rings, hex `RRGGBB`; empty (default) leaves it transparent. `_ring_badge=false` hides the account's icon in front of its usage rings (default shown). |
 
 After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
@@ -423,19 +424,21 @@ up automatically -- see "Known limitations" below for exactly how.
 
 ### Claude usage rings
 
-After the hub's "+" button, each account gets a pair of rings showing its
-Claude usage limits, the same numbers as Claude Code's `/usage`: the outer
-ring is the weekly limit, the inner ring the session (5-hour) limit. This
-account comes first, then each user profile's account (`config.ini`'s
-`user_profile_<N>_account`) with its icon in front, the same icon its
-windows' items carry.
+At the right end of the hub's band, above the system tray, each account
+gets a pair of rings showing its Claude usage limits, the same numbers as
+Claude Code's `/usage`: the outer ring is the weekly limit, the inner ring the session (5-hour) limit. This
+account (user profile 1) comes first, then each other user profile's
+account (`config.ini`'s `user_profile_<N>_account`, from 2), each with its
+icon in front -- the same icon its windows' items carry, so this account's
+rings have one only when `user_profile_1_icon` is set. `user_profile_<N>_ring_badge=false`
+hides it on the rings alone.
 
 - **Colors:** green, amber from 70%, red from 90%. Grey means the numbers
   aren't current: the last update failed, or none has worked yet.
-- **Focus:** the rings of the account whose VS Code window was used last
-  (the highest one in the z-order) stay bright, and the other accounts'
-  rings are dimmed, so the account you're about to use stands out. A ring
-  pair at 70% or more is never dimmed.
+- **Background:** an account's rings can sit on a chip of its own color,
+  so the accounts are easy to tell apart: its profile's
+  `user_profile_<N>_color` (hex `RRGGBB`). Without one there's no chip;
+  the rings sit straight on the band.
 - **Hover** for the exact percentages, when each limit resets, when the
   numbers were read, and why the last update failed, if it did.
 

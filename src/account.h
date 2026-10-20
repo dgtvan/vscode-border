@@ -26,8 +26,16 @@ std::wstring OtherAccountOfProcess(DWORD pid);
 // The account this app runs as.
 std::wstring CurrentAccountName();
 
-// The accounts of config.ini's user profiles, in slot order.
+// The other accounts of config.ini's user profiles -- slot 2 on, in slot
+// order (slot 1 is this app's own account).
 std::vector<std::wstring> ConfiguredUserProfiles();
+
+// The account whose icon goes in front of a window's label (or a usage ring
+// pair, see claude_usage.h), given the account it runs as (empty for this
+// app's own): another account always has one -- its profile's icon, or the
+// letter badge -- and this account only when user_profile_1_icon is set.
+// Empty for none.
+std::wstring IconAccountFor(const std::wstring& account);
 
 // Size (px, square) and trailing gap of the account icon drawn in front of
 // another account's window's label -- on its border's label chip and its hub

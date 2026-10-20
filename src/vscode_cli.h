@@ -17,6 +17,7 @@
 // (and keeping in sync) that internal path resolution here.
 //
 // Tried in order:
+//   0. config.ini's user_profile_1_vscode (this account's Code.exe), if set.
 //   1. `runningWindow`'s own install (bin\*.cmd next to its exe), so the
 //      build the user is actually running (Stable vs. Insiders) wins.
 //   2. The last shim step 1 found -- keeps that same build once every VS
