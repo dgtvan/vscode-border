@@ -9,6 +9,7 @@
 #include "project_list_order.h"
 #include "taskbar_backdrop.h"
 #include "vscode_cli.h"
+#include "window_discovery.h"
 #include "wsl.h"
 
 #include <dwmapi.h>
@@ -481,12 +482,25 @@ static void UnregisterAppBar(HWND hud) {
 // deactivates anything -- see SetHudClickActivates for the way out.
 // ControlCenterWindow (Quick Settings) was added after logs showed the same
 // refused-request/flashing-taskbar-button symptom with it in the foreground.
+//
+// The shell's CoreWindow panels -- Search and Start (SearchHost.exe, and
+// StartMenuExperienceHost.exe on builds where Start lives there) and the
+// Notification Center (ShellExperienceHost.exe) -- were added the same way:
+// four refused HUD clicks in a row with Search in the foreground. Measured
+// with the stand-in: Search and Notification Center each refused every plain
+// request and granted every one with SetHudClickActivates. The class alone
+// is not enough -- packaged apps use it too -- so the owning process decides.
 static bool ForegroundIsTaskbarFlyout() {
     HWND fg = GetForegroundWindow();
     if (!fg || !IsWindowVisible(fg)) return false; // Alt+Tab's switcher shares the class but is invisible
     wchar_t cls[64] = {};
     GetClassNameW(fg, cls, 64);
-    return wcscmp(cls, L"XamlExplorerHostIslandWindow") == 0 || wcscmp(cls, L"ControlCenterWindow") == 0;
+    if (wcscmp(cls, L"XamlExplorerHostIslandWindow") == 0 || wcscmp(cls, L"ControlCenterWindow") == 0) return true;
+    if (wcscmp(cls, L"Windows.UI.Core.CoreWindow") != 0) return false;
+    std::wstring exe;
+    if (!GetProcessImageName(fg, exe)) return false;
+    return _wcsicmp(exe.c_str(), L"SearchHost.exe") == 0 || _wcsicmp(exe.c_str(), L"StartMenuExperienceHost.exe") == 0 ||
+           _wcsicmp(exe.c_str(), L"ShellExperienceHost.exe") == 0;
 }
 
 // The HUD is WS_EX_NOACTIVATE so that using it never takes focus away from

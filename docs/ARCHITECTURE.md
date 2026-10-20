@@ -401,6 +401,18 @@ as before. It has to be done on hover rather than on the click: the style is
 consulted before any message reaches the HUD, and no `WM_MOUSEACTIVATE`
 arrives for a no-activate window to change its mind in.
 
+The same holds for the shell's other panels, which `ForegroundIsTaskbarFlyout`
+now recognises too: Quick Settings (`ControlCenterWindow`), and the
+`Windows.UI.Core.CoreWindow` panels owned by `SearchHost.exe` (Search, and
+Start on builds that host it there), `StartMenuExperienceHost.exe` and
+`ShellExperienceHost.exe` (Notification Center). Search was found the same
+way as the thumbnail flyout: four refused HUD clicks within a second, each
+retried, with `before:` the `Search` CoreWindow. Re-measured with the harness
+for Search and Notification Center: every plain request refused, every one
+granted with the style lifted; then confirmed in the real app with the
+`before:` the HUD / `== target` shape above. The class alone is not matched
+-- packaged apps use it as well -- so the owning process is checked.
+
 `project_list_activate_on_hover` gets the matching treatment: while a flyout
 is up, hover activation is skipped (logged as `hud-hover: skipped`), since
 without a click there is nothing to dismiss the flyout with and every request

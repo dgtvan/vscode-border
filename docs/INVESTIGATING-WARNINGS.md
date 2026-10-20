@@ -255,9 +255,14 @@ so the surrounding log lines are the evidence, not any file on disk.
   removing whatever made the request unwinnable -- see "A click past a
   taskbar flyout" in `docs/ARCHITECTURE.md`.
 
-  The one trigger ever seen in practice was the taskbar's thumbnail flyout
+  The triggers seen in practice were shell panels holding the foreground
+  when a HUD click landed: the taskbar's thumbnail flyout
   (`XamlExplorerHostIslandWindow`, opened by clicking VS Code's grouped
-  taskbar button) holding the foreground when a HUD click landed. That is
+  taskbar button), Quick Settings (`ControlCenterWindow`), and Windows
+  Search (`Windows.UI.Core.CoreWindow` titled `Search`, owned by
+  `SearchHost.exe`). A new one will look the same: a `before:` that is a
+  shell window, and repeated clicks on the same item. Add it to
+  `ForegroundIsTaskbarFlyout` after measuring it. These are
   **no longer benign and no longer expected**: the HUD now dismisses the
   flyout with the click itself (`SetHudClickActivates`, see "A click past a
   taskbar flyout" in `docs/ARCHITECTURE.md`), and a working instance logs
