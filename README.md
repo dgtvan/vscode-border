@@ -114,6 +114,8 @@ first build):
 | `ai_indicator_provider` | Comma-separated AI services to source it from: `claude` (implemented) and/or `copilot` (reserved, not yet implemented). |
 | `ai_indicator_color_working` / `_attention` / `_waiting` | Hex `RRGGBB` colors for the 3 states -- see below. |
 | `ai_indicator_border_color` | Indicator border color: `auto` (black/white by contrast) or a fixed hex `RRGGBB`. Default `auto`. |
+| `usage_meter_enabled` | Show Claude usage rings at the right end of the project list HUD (`true`/`false` -- see [Claude usage rings](#claude-usage-rings)). Default `true`. |
+| `usage_meter_refresh_minutes` | How often to re-read Claude usage, in minutes (1-60). Default `5`. |
 
 After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
@@ -419,6 +421,48 @@ they all show the same status, because nothing in a session says which of them
 it runs in. Stale/abandoned status files are cleaned
 up automatically -- see "Known limitations" below for exactly how.
 
+### Claude usage rings
+
+After the hub's "+" button, each account gets a pair of rings showing its
+Claude usage limits, the same numbers as Claude Code's `/usage`: the outer
+ring is the weekly limit, the inner ring the session (5-hour) limit. This
+account comes first, then each user profile's account (`config.ini`'s
+`user_profile_<N>_account`) with its icon in front, the same icon its
+windows' items carry.
+
+- **Colors:** green, amber from 70%, red from 90%. Grey means the numbers
+  aren't current: the last update failed, or none has worked yet.
+- **Focus:** the rings of the account whose VS Code window was used last
+  (the highest one in the z-order) stay bright, and the other accounts'
+  rings are dimmed, so the account you're about to use stands out. A ring
+  pair at 70% or more is never dimmed.
+- **Hover** for the exact percentages, when each limit resets, when the
+  numbers were read, and why the last update failed, if it did.
+
+The numbers come from `https://api.anthropic.com/api/oauth/usage`, called
+with the account's own Claude Code login token (`.credentials.json` in its
+`%USERPROFILE%\.claude`, or `CLAUDE_CONFIG_DIR`), every
+`usage_meter_refresh_minutes`. That endpoint isn't a documented API, so
+its format can change; when it does, the rings go grey and the log says
+why. The token is only read, never refreshed: refreshing it would rotate
+the refresh token Claude Code holds and sign Claude Code out. When it has
+expired (no Claude Code session has run in that account for a while), the
+rings stay grey until Claude Code next runs there and renews it.
+
+Another account's token is inside that account's profile, which this
+account can't read. So for each user profile the app runs a hidden copy of
+itself as that account (`vscode_border.exe --claude-usage-helper`), started
+with the password saved in Credential Manager, which reads the token and
+fetches on the same schedule and passes each result back over a pipe. It
+exits as soon as the app does. A profile without a saved password gets grey
+rings until you open a window as it from the "+" button and tick
+**Remember**. A saved password that's rejected is dropped rather than
+retried, so the schedule can't lock the account out.
+
+Every failure is logged as a `[WARN]` (once per distinct error, so the
+same failure every few minutes doesn't flood the log), which also badges
+the tray icon. A recovery is logged too.
+
 ### Project list HUD position/size memory
 
 Ctrl+left-click-dragging the project list HUD to slide or resize it is
@@ -593,6 +637,8 @@ Not yet: the AI status indicator for Claude Code running inside the distro.
   registrations in `%USERPROFILE%\.claude\settings.json`, reads the per-session status files
   `claude_status_hook.ps1` writes, and auto-expires ones whose recorded pid is no longer a live
   `claude.exe` process (see "Known limitations" above).
+- `src/claude_usage.*` -- Claude session/weekly usage per account for the hub's usage rings: fetching,
+  the helper run as each user profile's account, and the tooltip text (see "Claude usage rings" above).
 - `src/json_scan.*` -- minimal JSONC span-scanner (find/insert/remove one key or array element without
   parsing/reserializing the rest of the file), generalized from `vscode_settings.cpp`'s scanner.
 - `src/logger.*` -- file logging.

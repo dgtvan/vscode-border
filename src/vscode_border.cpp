@@ -34,6 +34,7 @@
 //   tracking.*          - tracked-window bookkeeping, WinEvent hooks, sync
 //   vscode_cli.*        - VS Code CLI shim lookup, opening/closing VS Code windows
 //   favourites.*        - persisted favourite projects, open-all
+//   claude_usage.*      - Claude session/weekly usage per account, for the hub's usage rings
 
 #include <windows.h>
 #include <shellapi.h>
@@ -41,6 +42,7 @@
 
 #include "account.h"
 #include "ai_provider.h"
+#include "claude_usage.h"
 #include "config.h"
 #include "diagnostic_snapshot.h"
 #include "focus_trace.h"
@@ -64,6 +66,7 @@ static HINSTANCE g_hInstance = nullptr;
 // ---------------------------------------------------------------------------
 
 static const UINT WM_APP_TRAYICON = WM_APP + 1;
+static const UINT WM_APP_CLAUDE_USAGE = WM_APP + 2; // a usage worker has a new result (see claude_usage.h)
 static const UINT ID_TRAY_RELOAD = 1;
 static const UINT ID_TRAY_OPEN_CONFIG = 2;
 static const UINT ID_TRAY_OPEN_LOG_FOLDER = 3;
@@ -191,6 +194,7 @@ static void ReloadConfig() {
     g_config = LoadConfig(GetConfigPath());
     SyncWindowTitleSetting(g_config.showLabel);
     SyncAllAiProviders(g_config);
+    SyncClaudeUsageMonitor(g_nid.hWnd, WM_APP_CLAUDE_USAGE);
     RefreshWorktreeCache();
     ReloadAliases();
     RefreshAllLabels();
@@ -254,6 +258,7 @@ static void CaptureSnapshotAndNotify() {
 }
 
 static void CleanupAndQuit(HWND hwnd) {
+    StopClaudeUsageMonitor();
     CleanupAllTracked();
 
     if (g_hookCreate) UnhookWinEvent(g_hookCreate);
@@ -277,6 +282,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             } else if (lParam == NIN_BALLOONTIMEOUT || lParam == NIN_BALLOONHIDE) {
                 g_snapshotBalloonDir.clear();
             }
+            return 0;
+        case WM_APP_CLAUDE_USAGE:
+            ProcessClaudeUsageResults();
+            RefreshProjectListHud();
+            UpdateTrayIconWarningState();
             return 0;
         case WM_COMMAND:
             if (LOWORD(wParam) == ID_TRAY_EXIT) {
@@ -321,6 +331,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
+    // Before the single-instance check: the helper runs alongside the app,
+    // as another account in the same session.
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv && argc >= 2 && wcscmp(argv[1], kClaudeUsageHelperArg) == 0) {
+        int minutes = argc >= 3 ? _wtoi(argv[2]) : 5;
+        LocalFree(argv);
+        return RunClaudeUsageHelper(minutes);
+    }
+    if (argv) LocalFree(argv);
+
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\VSCodeBorderApp_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         Log(L"another instance already running, exiting");
@@ -355,6 +376,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     }
 
     TrackingInit(hInstance, hwnd);
+    SyncClaudeUsageMonitor(hwnd, WM_APP_CLAUDE_USAGE);
 
     Log(L"=== startup ===");
     AddTrayIcon(hwnd);

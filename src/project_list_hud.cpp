@@ -51,6 +51,20 @@ static const int kRingCells[8][2] = {
     {0, 0}, {1, 0}, {2, 0}, {2, 1}, {2, 2}, {1, 2}, {0, 2}, {0, 1},
 };
 
+// Usage rings (see ProjectListHudUsageRing): each account's group is a dark
+// chip holding its icon (other accounts only) and a rowHeight-square pair of
+// rings, outer weekly and inner session.
+static const int kUsageRingPad = 3, kUsageRingBadgeGap = 3, kUsageRingGap = 4;
+static const double kUsageWarnPercent = 70, kUsageCriticalPercent = 90;
+static const COLORREF kUsageChipColor = RGB(44, 47, 52), kUsageTrackColor = RGB(84, 89, 96),
+                      kUsageOkColor = RGB(63, 174, 106), kUsageWarnColor = RGB(224, 165, 38),
+                      kUsageCriticalColor = RGB(224, 81, 59), kUsageStaleColor = RGB(138, 148, 156);
+static const int kUsageDimmedOpacityPercent = 45;
+static const wchar_t* kUsageTooltipClassName = L"VSCodeBorderUsageTooltipWndClass";
+static const int kUsageTooltipPadX = 8, kUsageTooltipPadY = 5;
+static const COLORREF kUsageTooltipBackColor = RGB(43, 43, 43), kUsageTooltipBorderColor = RGB(96, 96, 96),
+                      kUsageTooltipTextColor = RGB(235, 235, 235);
+
 static HFONT CreateHudFont(int fontSize, int weight) {
     return CreateFontW(-fontSize, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
                        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
@@ -77,6 +91,14 @@ struct ProjectListHudState {
     COLORREF claudeBorderColor = RGB(255, 255, 255);
     bool showNewWindowButton = false;
     COLORREF newWindowButtonColor = RGB(0, 0, 0);
+    std::vector<ProjectListHudUsageRing> usageRings;
+    std::vector<RECT> usageRingRects; // after the action buttons; ring group j's hover "index" is the
+                                      // sentinel entries.size() + ActionButtonCount + j (see ProjectListHitTest)
+    HWND usageTooltip = nullptr; // popup shown above a hovered ring group (see SyncUsageTooltip)
+    int usageTooltipRing = -1;   // the ring group it's showing, -1 while hidden
+    std::wstring usageTooltipText;
+    HFONT usageTooltipFont = nullptr;
+    int usageTooltipFontSize = 0;
     RECT actionButtonRects[3] = {}; // indexed by HudActionButton; only the first ActionButtonCount are
                                      // valid -- see Rebuild*ItemRects. Not part of itemRects/entries: fixed
                                      // at the end, no drag-reorder. Button k's "index" for hover/click
@@ -157,10 +179,28 @@ static int ActionButtonsRowWidth(const ProjectListHudState* state) {
     return count > 0 ? count * state->rowHeight + (count - 1) * kProjectListGap : 0;
 }
 
-// Space the action buttons take at the end of the strip,
+static int UsageRingGroupWidth(const ProjectListHudState* state, const ProjectListHudUsageRing& ring) {
+    return 2 * kUsageRingPad + (ring.account.empty() ? 0 : kAccountIconSize + kUsageRingBadgeGap) + state->rowHeight;
+}
+
+static int UsageRingsRowWidth(const ProjectListHudState* state) {
+    int width = 0;
+    for (const ProjectListHudUsageRing& ring : state->usageRings) width += UsageRingGroupWidth(state, ring);
+    return width + (state->usageRings.empty() ? 0 : ((int)state->usageRings.size() - 1) * kUsageRingGap);
+}
+
+// Width of everything fixed at the end of the strip: the action buttons,
+// then the usage rings.
+static int TailRowWidth(const ProjectListHudState* state) {
+    int buttons = ActionButtonsRowWidth(state), rings = UsageRingsRowWidth(state);
+    return buttons + rings + (buttons > 0 && rings > 0 ? kProjectListGap : 0);
+}
+
+// Space the action buttons and usage rings take at the end of the strip,
 // including the gap separating them from the last entry.
 static int ActionButtonsReserve(const ProjectListHudState* state) {
-    return ActionButtonCount(state) > 0 ? ActionButtonsRowWidth(state) + kProjectListGap : 0;
+    int width = TailRowWidth(state);
+    return width > 0 ? width + kProjectListGap : 0;
 }
 
 // The HudActionButton a hover/hit index refers to (see ProjectListHitTest),
@@ -168,6 +208,13 @@ static int ActionButtonsReserve(const ProjectListHudState* state) {
 static int ActionButtonForIndex(const ProjectListHudState* state, int index) {
     int k = index - (int)state->entries.size();
     return (k >= 0 && k < ActionButtonCount(state)) ? k : -1;
+}
+
+// The usage ring group a hover/hit index refers to, or -1.
+static int UsageRingForIndex(const ProjectListHudState* state, int index) {
+    if (!state || index < 0) return -1;
+    int j = index - (int)state->entries.size() - ActionButtonCount(state);
+    return (j >= 0 && j < (int)state->usageRingRects.size()) ? j : -1;
 }
 
 // Returns an entry index for a hit within state->itemRects, or the sentinel
@@ -182,6 +229,12 @@ static int ProjectListHitTest(const ProjectListHudState* state, int x, int y) {
     for (int k = 0; k < ActionButtonCount(state); k++) {
         const RECT& r = state->actionButtonRects[k];
         if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return (int)state->entries.size() + k;
+    }
+    for (size_t j = 0; j < state->usageRingRects.size(); j++) {
+        const RECT& r = state->usageRingRects[j];
+        if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) {
+            return (int)state->entries.size() + ActionButtonCount(state) + (int)j;
+        }
     }
     return -1;
 }
@@ -260,10 +313,16 @@ static void RebuildItemRects(ProjectListHudState* state) {
     }
 
     int size = state->rowHeight;
-    int x = state->width - ActionButtonsRowWidth(state);
+    int x = state->width - TailRowWidth(state);
     for (int k = 0; k < ActionButtonCount(state); k++) {
         state->actionButtonRects[k] = {x, 0, x + size, size};
         x += size + kProjectListGap;
+    }
+    state->usageRingRects.clear();
+    for (const ProjectListHudUsageRing& ring : state->usageRings) {
+        int w = UsageRingGroupWidth(state, ring);
+        state->usageRingRects.push_back({x, 0, x + w, size});
+        x += w + kUsageRingGap;
     }
 }
 
@@ -278,7 +337,9 @@ static LPCWSTR ProjectListCursorForPoint(const ProjectListHudState* state, int x
     if (state && state->dragMode == ProjectListHudState::DragMove) return IDC_SIZEALL;
     bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     if (ctrlDown) return IsProjectListResizeEdge(state, x) ? IDC_SIZEWE : IDC_SIZEALL;
-    return ProjectListHitTest(state, x, y) >= 0 ? IDC_HAND : IDC_ARROW;
+    // The usage rings do nothing on a click.
+    int hit = ProjectListHitTest(state, x, y);
+    return hit >= 0 && UsageRingForIndex(state, hit) < 0 ? IDC_HAND : IDC_ARROW;
 }
 
 static void RenderProjectListHud(HWND hud, ProjectListHudState* state);
@@ -1021,6 +1082,78 @@ static void EndMoveResizeDrag(HWND hwnd, ProjectListHudState* state, int mouseX,
     SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, mouseX, mouseY)));
 }
 
+// Shows the hovered usage ring group's tooltip just above it and keeps its
+// text current; hides it once nothing (or anything else) is hovered, or a
+// drag is under way.
+static void SyncUsageTooltip(HWND hud, ProjectListHudState* state) {
+    if (!state || !state->usageTooltip) return;
+    int ring = state->dragMode == ProjectListHudState::DragNone ? UsageRingForIndex(state, state->hoverIndex) : -1;
+    if (ring < 0 || ring >= (int)state->usageRings.size()) {
+        if (state->usageTooltipRing >= 0) ShowWindow(state->usageTooltip, SW_HIDE);
+        state->usageTooltipRing = -1;
+        state->usageTooltipText.clear();
+        return;
+    }
+    const std::wstring& text = state->usageRings[ring].tooltip;
+    if (ring == state->usageTooltipRing && text == state->usageTooltipText) return;
+    state->usageTooltipText = text;
+
+    if (!state->usageTooltipFont || state->usageTooltipFontSize != state->fontSize) {
+        if (state->usageTooltipFont) DeleteObject(state->usageTooltipFont);
+        state->usageTooltipFontSize = state->fontSize;
+        state->usageTooltipFont = CreateHudFont(state->fontSize, FW_NORMAL);
+    }
+    HDC dc = GetDC(nullptr);
+    HFONT oldFont = (HFONT)SelectObject(dc, state->usageTooltipFont);
+    RECT textRect = {0, 0, 0, 0};
+    DrawTextW(dc, text.c_str(), (int)text.size(), &textRect, DT_CALCRECT | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
+    ReleaseDC(nullptr, dc);
+    int w = textRect.right + 2 * kUsageTooltipPadX, h = textRect.bottom + 2 * kUsageTooltipPadY;
+    const RECT& r = state->usageRingRects[ring];
+    int x = std::max((int)state->dockRect.left, std::min(state->x + (int)r.left, (int)state->dockRect.right - w));
+    int y = state->y - h - 4;
+    SetWindowPos(state->usageTooltip, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(state->usageTooltip, nullptr, TRUE);
+    state->usageTooltipRing = ring;
+}
+
+// The usage tooltip popup: GWLP_USERDATA is the HUD's state, whose
+// usageTooltipText/usageTooltipFont it paints. Never takes the mouse.
+static LRESULT CALLBACK UsageTooltipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_NCHITTEST:
+            return HTTRANSPARENT;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(hwnd, &ps);
+            const ProjectListHudState* state = (const ProjectListHudState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            HBRUSH bg = CreateSolidBrush(kUsageTooltipBackColor), border = CreateSolidBrush(kUsageTooltipBorderColor);
+            FillRect(dc, &rc, bg);
+            FrameRect(dc, &rc, border);
+            DeleteObject(bg);
+            DeleteObject(border);
+            if (state && state->usageTooltipFont) {
+                HFONT oldFont = (HFONT)SelectObject(dc, state->usageTooltipFont);
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, kUsageTooltipTextColor);
+                RECT textRect = {kUsageTooltipPadX, kUsageTooltipPadY, rc.right - kUsageTooltipPadX,
+                                 rc.bottom - kUsageTooltipPadY};
+                DrawTextW(dc, state->usageTooltipText.c_str(), (int)state->usageTooltipText.size(), &textRect,
+                          DT_NOPREFIX);
+                SelectObject(dc, oldFont);
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     ProjectListHudState* state = (ProjectListHudState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
@@ -1163,6 +1296,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (hoverIndex != state->hoverIndex) {
                 state->hoverIndex = hoverIndex;
                 RenderProjectListHud(hwnd, state);
+                SyncUsageTooltip(hwnd, state);
                 // The highest-risk activation path in the app: one mouse
                 // sweep across the strip crosses every item and asks to
                 // activate each in turn, which is exactly the shape that
@@ -1204,6 +1338,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 GetCursorPos(&state->dragStart);
                 GetWindowRect(hwnd, &state->dragStartRect);
                 SetCapture(hwnd);
+                SyncUsageTooltip(hwnd, state);
                 SetCursor(LoadCursorW(nullptr, state->dragMode == ProjectListHudState::DragMove ? IDC_SIZEALL : IDC_SIZEWE));
             } else if (state) {
                 // The action buttons (hit-tested as sentinel indices from
@@ -1301,6 +1436,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     state->hoverIndex = -1;
                     RenderProjectListHud(hwnd, state);
                 }
+                SyncUsageTooltip(hwnd, state);
                 EndProjectListHoverFocus(state, true);
             }
             return 0;
@@ -1380,6 +1516,8 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             break;
         case WM_NCDESTROY:
             if (state && state->dragGhost) DestroyWindow(state->dragGhost);
+            if (state && state->usageTooltip) DestroyWindow(state->usageTooltip);
+            if (state && state->usageTooltipFont) DeleteObject(state->usageTooltipFont);
             if (state && state->backdrop) DestroyWindow(state->backdrop);
             delete state;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -1454,6 +1592,23 @@ HWND CreateProjectListHud(HINSTANCE hInstance) {
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kProjectListGhostClassName, L"", WS_POPUP,
         0, 0, 1, 1, nullptr, nullptr, hInstance, nullptr);
+
+    // Drawn by hand rather than with a common-controls tooltip: without a
+    // manifest this exe gets comctl32 5.82, whose tooltip crashed the app
+    // here. Not owned by `hwnd`, for the same reason as the drag ghost.
+    WNDCLASSW tipClass = {};
+    tipClass.lpfnWndProc = UsageTooltipWndProc;
+    tipClass.hInstance = hInstance;
+    tipClass.lpszClassName = kUsageTooltipClassName;
+    RegisterClassW(&tipClass);
+    state->usageTooltip = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+                                          kUsageTooltipClassName, L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr,
+                                          hInstance, nullptr);
+    if (state->usageTooltip) {
+        SetWindowLongPtrW(state->usageTooltip, GWLP_USERDATA, (LONG_PTR)state);
+    } else {
+        LogWarn(L"hud: couldn't create the usage rings' tooltip, lastError=%lu", GetLastError());
+    }
 
     return hwnd;
 }
@@ -1793,6 +1948,87 @@ static void DrawActionButton(HDC screenDC, UINT32* pixels, int width, int height
     }
 }
 
+static UINT32 OpaquePixel(COLORREF c) {
+    return 0xFF000000u | (UINT32(GetRValue(c)) << 16) | (UINT32(GetGValue(c)) << 8) | UINT32(GetBValue(c));
+}
+
+static COLORREF UsageRingColor(double percent, bool stale) {
+    if (stale) return kUsageStaleColor;
+    if (percent >= kUsageCriticalPercent) return kUsageCriticalColor;
+    if (percent >= kUsageWarnPercent) return kUsageWarnColor;
+    return kUsageOkColor;
+}
+
+// Draws one account's usage ring group (see ProjectListHudUsageRing) at
+// `item`: the chip, the account's icon, the twin rings -- antialiased by
+// supersampling -- then the same opacity pass as DrawHudItem.
+static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight, const RECT& item,
+                           const ProjectListHudUsageRing& ring, int opacity) {
+    int rowStart = std::max((int)item.top, 0), rowEnd = std::min((int)item.bottom, height);
+    int colStart = std::max((int)item.left, 0), colEnd = std::min((int)item.right, width);
+    UINT32 chipPx = OpaquePixel(kUsageChipColor);
+    for (int row = rowStart; row < rowEnd; row++) {
+        for (int col = colStart; col < colEnd; col++) pixels[row * width + col] = chipPx;
+    }
+
+    int left = (int)item.left + kUsageRingPad;
+    if (!ring.account.empty()) {
+        BlendAccountIcon(ring.account, pixels, width, height, left, (int)item.top + (rowHeight - kAccountIconSize) / 2,
+                         item);
+        left += kAccountIconSize + kUsageRingBadgeGap;
+    }
+
+    const double kPi = 3.14159265358979323846;
+    double size = rowHeight, cx = left + size / 2, cy = item.top + size / 2;
+    double stroke = size * 0.13;
+    double outerMid = size / 2 - 1 - stroke / 2, innerMid = outerMid - stroke - 1.2;
+    struct Band {
+        double inner, outer, fraction;
+        COLORREF fill;
+    } bands[2] = {
+        {outerMid - stroke / 2, outerMid + stroke / 2, ring.weeklyPercent / 100,
+         UsageRingColor(ring.weeklyPercent, ring.stale)},
+        {innerMid - stroke / 2, innerMid + stroke / 2, ring.sessionPercent / 100,
+         UsageRingColor(ring.sessionPercent, ring.stale)},
+    };
+    const int kSamples = 4;
+    int ringRight = std::min(colEnd, left + (int)size);
+    for (int row = rowStart; row < rowEnd; row++) {
+        for (int col = std::max(colStart, left); col < ringRight; col++) {
+            double sumR = 0, sumG = 0, sumB = 0;
+            for (int sy = 0; sy < kSamples; sy++) {
+                for (int sx = 0; sx < kSamples; sx++) {
+                    double dx = col + (sx + 0.5) / kSamples - cx, dy = row + (sy + 0.5) / kSamples - cy;
+                    double dist = sqrt(dx * dx + dy * dy);
+                    double turn = atan2(dx, -dy) / (2 * kPi); // clockwise from 12 o'clock
+                    if (turn < 0) turn += 1;
+                    COLORREF c = kUsageChipColor;
+                    for (const Band& b : bands) {
+                        if (dist >= b.inner && dist < b.outer) c = turn < b.fraction ? b.fill : kUsageTrackColor;
+                    }
+                    sumR += GetRValue(c);
+                    sumG += GetGValue(c);
+                    sumB += GetBValue(c);
+                }
+            }
+            const int n = kSamples * kSamples;
+            pixels[row * width + col] = OpaquePixel(RGB((BYTE)(sumR / n), (BYTE)(sumG / n), (BYTE)(sumB / n)));
+        }
+    }
+
+    BYTE alpha = (BYTE)opacity;
+    for (int row = rowStart; row < rowEnd; row++) {
+        for (int col = colStart; col < colEnd; col++) {
+            UINT32 px = pixels[row * width + col];
+            BYTE pxR = (BYTE)((px >> 16) & 0xFF);
+            BYTE pxG = (BYTE)((px >> 8) & 0xFF);
+            BYTE pxB = (BYTE)(px & 0xFF);
+            pixels[row * width + col] = (UINT32(alpha) << 24) | (UINT32((pxR * alpha) / 255) << 16) |
+                                        (UINT32((pxG * alpha) / 255) << 8) | UINT32((pxB * alpha) / 255);
+        }
+    }
+}
+
 static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
     if (!state || state->width <= 0 || state->height <= 0) return;
     if (state->entries.empty() && !state->showNewWindowButton) return; // nothing to draw at all
@@ -1857,6 +2093,18 @@ static void RenderProjectListHud(HWND hud, ProjectListHudState* state) {
         }
         DrawActionButton(screenDC, pixels, width, height, state->actionButtonRects[k], kGlyphs[k], color,
                          highlighted, opacity, font, state->labelTextColorAuto, state->labelTextColor);
+    }
+
+    // With one account's rings focused, the others are dimmed -- except
+    // one nearing a limit, which stays at full strength so it isn't missed.
+    bool anyFocused = std::any_of(state->usageRings.begin(), state->usageRings.end(),
+                                  [](const ProjectListHudUsageRing& r) { return r.focused; });
+    for (size_t j = 0; j < state->usageRings.size() && j < state->usageRingRects.size(); j++) {
+        const ProjectListHudUsageRing& ring = state->usageRings[j];
+        bool nearLimit = !ring.stale && std::max(ring.sessionPercent, ring.weeklyPercent) >= kUsageWarnPercent;
+        int opacity = state->normalOpacity;
+        if (anyFocused && !ring.focused && !nearLimit) opacity = opacity * kUsageDimmedOpacityPercent / 100;
+        DrawUsageRings(pixels, width, height, rowHeight, state->usageRingRects[j], ring, opacity);
     }
 
     DeleteObject(font);
@@ -2139,6 +2387,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     state->entries = sorted;
     state->showNewWindowButton = style.showNewWindowButton;
     state->newWindowButtonColor = style.newWindowButtonColor;
+    state->usageRings = style.usageRings;
     int buttonReserve = ActionButtonsReserve(state); // after entries/rowHeight/showNewWindowButton are set
     size_t n = sorted.size();
 
@@ -2178,7 +2427,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     // The action buttons' hover "indices" are the sentinels from
     // sorted.size() up (see ProjectListHitTest) -- past the last valid entry
     // index, not out of range, while they're shown.
-    int maxHoverIndex = (int)sorted.size() - 1 + ActionButtonCount(state);
+    int maxHoverIndex = (int)sorted.size() - 1 + ActionButtonCount(state) + (int)state->usageRings.size();
     if (state->hoverIndex > maxHoverIndex) state->hoverIndex = -1;
 
     // Both the Working ring spinner and the Attention pulse need a repaint
@@ -2199,4 +2448,5 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
 
     RenderProjectListHud(hud, state);
     PositionProjectListHud(hud, state);
+    SyncUsageTooltip(hud, state);
 }

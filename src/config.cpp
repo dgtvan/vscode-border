@@ -160,6 +160,10 @@ Config LoadConfig(const std::wstring& path) {
                 }
             }
             cfg.aiIndicatorProviders = providers;
+        } else if (key == "usage_meter_enabled") {
+            cfg.usageMeterEnabled = (val == "1" || _stricmp(val.c_str(), "true") == 0);
+        } else if (key == "usage_meter_refresh_minutes") {
+            cfg.usageMeterRefreshMinutes = std::min(60, std::max(1, atoi(val.c_str())));
         } else if (key == "ai_indicator_color_working") {
             cfg.aiIndicatorColorWorking = ParseHexColor(val);
         } else if (key == "ai_indicator_color_attention") {
@@ -204,13 +208,14 @@ Config LoadConfig(const std::wstring& path) {
         providersJoined += p;
     }
 
-    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_fixed_match_taskbar=%d project_list_order=%ls project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X label_alias_format=[%ls] verbose_logging=%d colors=%zu ai_indicator_enabled=%d ai_indicator_provider=%hs",
+    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_fixed_match_taskbar=%d project_list_order=%ls project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X label_alias_format=[%ls] verbose_logging=%d colors=%zu ai_indicator_enabled=%d ai_indicator_provider=%hs usage_meter_enabled=%d usage_meter_refresh_minutes=%d",
         cfg.thickness, cfg.opacity, cfg.rescanIntervalMs, cfg.showLabel, cfg.showProjectList,
         cfg.projectListFixedMatchTaskbar,
         cfg.projectListManualOrder ? L"manual" : L"auto",
         cfg.projectListOpacityNormal, cfg.projectListOpacityHover, cfg.projectListActivateOnHover,
         cfg.labelHeight, cfg.labelFontSize,
         cfg.labelTextColorAuto, (unsigned)((GetRValue(cfg.labelTextColor) << 16) | (GetGValue(cfg.labelTextColor) << 8) | GetBValue(cfg.labelTextColor)),
-        cfg.labelAliasFormat.c_str(), cfg.verboseLogging, cfg.palette.size(), cfg.aiIndicatorEnabled, providersJoined.c_str());
+        cfg.labelAliasFormat.c_str(), cfg.verboseLogging, cfg.palette.size(), cfg.aiIndicatorEnabled, providersJoined.c_str(),
+        cfg.usageMeterEnabled, cfg.usageMeterRefreshMinutes);
     return cfg;
 }

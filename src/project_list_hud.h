@@ -43,6 +43,20 @@ struct ProjectListHudEntry {
     bool loading = false;
 };
 
+// One account's Claude usage (see claude_usage.h), drawn after the action
+// buttons as twin rings -- outer weekly, inner session -- with the account's
+// icon in front unless it's this app's own account, the same rule the items
+// follow. Hovering shows `tooltip`.
+struct ProjectListHudUsageRing {
+    std::wstring account;       // empty for this app's own account
+    double sessionPercent = -1; // -1 when unknown
+    double weeklyPercent = -1;
+    bool stale = false;   // drawn grey: the numbers aren't current (see IsClaudeUsageStale)
+    bool focused = false; // the account of the VS Code window that had focus last -- the other
+                          // accounts' rings are dimmed (unless at a warning level themselves)
+    std::wstring tooltip;
+};
+
 struct ProjectListHudStyle {
     bool manualOrder = false; // true = user can drag items to reorder (see project_list_order.h);
                               // false = always sorted by window left edge
@@ -73,6 +87,7 @@ struct ProjectListHudStyle {
     // color palette of its own.
     bool showNewWindowButton = false;
     COLORREF newWindowButtonColor = RGB(0, 0, 0);
+    std::vector<ProjectListHudUsageRing> usageRings; // in display order; none while the usage meter is off
 };
 
 // Creates the hub hidden; it shows up once SetProjectListHudDocked has

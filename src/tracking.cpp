@@ -2,6 +2,7 @@
 
 #include "account.h"
 #include "ai_provider.h"
+#include "claude_usage.h"
 #include "config.h"
 #include "focus_trace.h"
 #include "label_alias.h"
@@ -379,7 +380,37 @@ static void SyncProjectListHud() {
     style.claudeBorderColor = g_config.aiIndicatorBorderColor;
     style.showNewWindowButton = true;
     style.newWindowButtonColor = g_config.palette[PeekNextColorIndex() % g_config.palette.size()];
+
+    // The account to focus: that of the VS Code window highest in the
+    // z-order -- the focused one, or while focus is elsewhere the one used
+    // last, so it's the account about to be used next.
+    bool haveFocusedAccount = false;
+    std::wstring focusedAccount;
+    for (HWND w = GetTopWindow(nullptr); w; w = GetWindow(w, GW_HWNDNEXT)) {
+        auto it = g_tracked.find(w);
+        if (it == g_tracked.end() || IsIconic(w)) continue;
+        haveFocusedAccount = true;
+        focusedAccount = it->second.account;
+        break;
+    }
+    std::vector<ClaudeUsageSnapshot> usage = GetClaudeUsageSnapshots();
+    for (const ClaudeUsageSnapshot& u : usage) {
+        ProjectListHudUsageRing ring;
+        ring.account = u.account;
+        ring.sessionPercent = CurrentUsagePercent(u.session);
+        ring.weeklyPercent = CurrentUsagePercent(u.weekly);
+        ring.stale = IsClaudeUsageStale(u);
+        // Only worth telling apart with more than one account shown.
+        ring.focused = usage.size() > 1 && haveFocusedAccount &&
+                       CompareStringOrdinal(u.account.c_str(), -1, focusedAccount.c_str(), -1, TRUE) == CSTR_EQUAL;
+        ring.tooltip = DescribeClaudeUsage(u);
+        style.usageRings.push_back(ring);
+    }
     UpdateProjectListHud(g_projectListHud, entries, style);
+}
+
+void RefreshProjectListHud() {
+    SyncProjectListHud();
 }
 
 // EVENT_OBJECT_LOCATIONCHANGE fires for every move/resize/visibility/Z-order

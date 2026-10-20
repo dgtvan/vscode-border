@@ -435,6 +435,31 @@ static DWORD LaunchAs(const std::wstring& account, const std::wstring& password,
     return 0;
 }
 
+HANDLE StartHiddenProcessAsAccount(const std::wstring& account, const std::wstring& application,
+                                   std::wstring commandLine, const std::wstring& workingDir, HANDLE stdIn,
+                                   HANDLE stdOut, DWORD& error) {
+    std::wstring password;
+    if (!LoadSavedPassword(account, password)) {
+        error = ERROR_NOT_FOUND;
+        return nullptr;
+    }
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = stdIn;
+    si.hStdOutput = stdOut;
+    si.hStdError = stdOut;
+    PROCESS_INFORMATION pi = {};
+    BOOL ok = CreateProcessWithLogonW(account.c_str(), L".", password.c_str(), LOGON_WITH_PROFILE,
+                                      application.c_str(), &commandLine[0], CREATE_NO_WINDOW, nullptr,
+                                      workingDir.c_str(), &si, &pi);
+    error = ok ? 0 : GetLastError();
+    WipeString(password);
+    if (!ok) return nullptr;
+    CloseHandle(pi.hThread);
+    return pi.hProcess;
+}
+
 void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::wstring& folder,
                            const wchar_t* reason) {
     // Through the install's CLI shim (bin\code.cmd next to Code.exe), for the

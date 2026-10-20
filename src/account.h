@@ -62,6 +62,17 @@ std::wstring AccountMenuText(const std::wstring& account);
 void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::wstring& folder,
                            const wchar_t* reason);
 
+// Starts `application` with `commandLine` as `account`, hidden, with its
+// profile loaded and stdin/stdout/stderr on `stdIn`/`stdOut`, using only the
+// password saved in Credential Manager -- it never asks for one. Returns the
+// process handle (the caller closes it), or null with `error` set:
+// ERROR_NOT_FOUND when no password is saved, ERROR_LOGON_FAILURE when the
+// saved one is wrong (left saved -- the caller decides), else the Win32
+// error. Doesn't log, so it's safe off the main thread.
+HANDLE StartHiddenProcessAsAccount(const std::wstring& account, const std::wstring& application,
+                                   std::wstring commandLine, const std::wstring& workingDir, HANDLE stdIn,
+                                   HANDLE stdOut, DWORD& error);
+
 // Whether a password for `account` is saved, and dropping it.
 bool HasSavedAccountPassword(const std::wstring& account);
 void ForgetSavedAccountPassword(const std::wstring& account);

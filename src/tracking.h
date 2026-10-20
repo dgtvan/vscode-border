@@ -29,6 +29,10 @@ extern const UINT_PTR kForegroundPollTimerId;
 // over it (see overlay.h's UpdateOverlayLabelHover).
 void PollForegroundChange();
 
+// Re-syncs the project list HUD alone (e.g. new Claude usage numbers for
+// its usage rings -- see claude_usage.h).
+void RefreshProjectListHud();
+
 // Forces every tracked overlay to repaint on its next sync (e.g. after a
 // config reload changes colors/thickness/label settings).
 void ForceRepaintAllTracked();

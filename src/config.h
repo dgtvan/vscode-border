@@ -57,6 +57,10 @@ struct Config {
     COLORREF aiIndicatorColorWaiting = RGB(52, 199, 89);
     bool aiIndicatorBorderColorAuto = true; // true = auto black/white contrast against the item's own color
     COLORREF aiIndicatorBorderColor = RGB(255, 255, 255); // used when aiIndicatorBorderColorAuto is false
+
+    // Claude usage rings on the hub, one pair per account (see claude_usage.h).
+    bool usageMeterEnabled = true;
+    int usageMeterRefreshMinutes = 5;
 };
 
 // Global, live config -- reloadable at runtime via the tray menu.
