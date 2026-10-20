@@ -35,7 +35,9 @@ void UpdateOverlayLabelHover(HWND overlay);
 // Label text color is either fixed (`labelTextColor`, used when
 // `labelTextColorAuto` is false) or auto-picked for contrast against `color`
 // (when `labelTextColorAuto` is true). A non-empty `wslDistro` (a WSLg
-// window -- see wsl.h) puts the WSL icon in front of the label text. A
+// window -- see wsl.h) puts the WSL icon in front of the label text, and a
+// non-empty `account` (VS Code run as another Windows account -- see
+// account.h) that account's icon. A
 // non-zero `resizeMargin` adds an invisible strip that wide all around,
 // outside the border (so `width`/`height` include it), which works as the
 // window's resize edges -- see UpdateOverlayLabelHover. Also records where
@@ -43,4 +45,4 @@ void UpdateOverlayLabelHover(HWND overlay);
 void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thickness, int opacity,
                    const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,
                    bool labelTextColorAuto, COLORREF labelTextColor, const std::wstring& wslDistro,
-                   int resizeMargin);
+                   const std::wstring& account, int resizeMargin);

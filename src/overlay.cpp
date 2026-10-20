@@ -1,5 +1,6 @@
 #include "overlay.h"
 
+#include "account.h"
 #include "focus_trace.h"
 #include "layered_rendering.h"
 #include "logger.h"
@@ -319,7 +320,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thickness, int opacity,
                    const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,
                    bool labelTextColorAuto, COLORREF labelTextColor, const std::wstring& wslDistro,
-                   int resizeMargin) {
+                   const std::wstring& account, int resizeMargin) {
     if (width <= 0 || height <= 0) return;
     RECT labelRect = {}; // where the chip ends up, if drawn -- see UpdateOverlayLabelHover
     // Everything below is drawn inside the resize margin: the border and the
@@ -408,7 +409,8 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
             GetTextExtentPoint32W(memDC, label.c_str(), (int)label.size(), &textSz);
             SelectObject(memDC, oldFont);
             const int paddingX = 10;
-            int iconShift = wslDistro.empty() ? 0 : kWslIconSize + kWslIconGap;
+            int wslShift = wslDistro.empty() ? 0 : kWslIconSize + kWslIconGap;
+            int iconShift = wslShift + (account.empty() ? 0 : kAccountIconSize + kAccountIconGap);
             int lw = std::min(width - 2 * t, (int)textSz.cx + paddingX * 2 + iconShift);
             if (lw > 4) {
                 int lx = t, ly = t;
@@ -423,6 +425,10 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
                 if (!wslDistro.empty()) {
                     BlendWslIcon(surface, fullWidth, height + 2 * m, m + lx + paddingX,
                                  m + ly + (lh - kWslIconSize) / 2, labelRect);
+                }
+                if (!account.empty()) {
+                    BlendAccountIcon(account, surface, fullWidth, height + 2 * m, m + lx + paddingX + wslShift,
+                                     m + ly + (lh - kAccountIconSize) / 2, labelRect);
                 }
 
                 // GDI's ClearType/antialiased text rendering writes partial

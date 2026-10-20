@@ -1,5 +1,6 @@
 #include "project_list_hud.h"
 
+#include "account.h"
 #include "favourites.h"
 #include "focus_trace.h"
 #include "label_alias.h"
@@ -557,11 +558,12 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index, const
 // The running VS Code window the CLI shim is derived from (see
 // vscode_cli.h's ResolveVSCodeCliShim) -- null once every window is closed,
 // which that resolver falls back from. Never a WSLg window: its process is
-// WSL's msrdc.exe, not a VS Code install with a shim next to it.
+// WSL's msrdc.exe, not a VS Code install with a shim next to it. Nor another
+// account's window (see account.h): its install may not be this account's.
 static HWND AnyTrackedWindow(const ProjectListHudState* state) {
     if (!state) return nullptr;
     for (const ProjectListHudEntry& e : state->entries) {
-        if (e.wslDistro.empty()) return e.target;
+        if (e.wslDistro.empty() && e.account.empty()) return e.target;
     }
     return nullptr;
 }
@@ -956,6 +958,42 @@ static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state,
     else RemoveFavourite(favourites[i].path);
 }
 
+// Plain click on the "+" new-window button with user profiles configured
+// (see account.h): which account to open the new VS Code window as -- this
+// app's own (the default, bolded), then config.ini's user profiles in slot
+// order, each with its icon. Without any profiles the click just opens the
+// window, no menu. (Forgetting a profile's saved password is on the tray
+// menu.)
+static void ShowNewWindowProfileMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
+    const std::vector<std::wstring> profiles = ConfiguredUserProfiles();
+    // Command ids: this account = 1, profile i = 2 + i.
+    const UINT kThisAccountId = 1;
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, kThisAccountId, AccountMenuText(CurrentAccountName()).c_str());
+    SetMenuDefaultItem(menu, kThisAccountId, FALSE);
+    for (size_t i = 0; i < profiles.size(); i++) {
+        AppendMenuW(menu, MF_STRING, (UINT)(2 + i), AccountMenuText(profiles[i]).c_str());
+        MENUITEMINFOW mii = {sizeof(mii)};
+        mii.fMask = MIIM_BITMAP;
+        mii.hbmpItem = GetAccountIconMenuBitmap(profiles[i]);
+        if (mii.hbmpItem) SetMenuItemInfoW(menu, GetMenuItemCount(menu) - 1, TRUE, &mii);
+    }
+
+    RequestForeground(hud, FocusTargetKind::OwnUi, L"new-window-profile-menu");
+    state->contextMenuOpen = true; // see UpdateProjectListHud's guard
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
+    state->contextMenuOpen = false;
+    DestroyMenu(menu);
+
+    if (cmd <= 0) return;
+    if (cmd == (int)kThisAccountId) {
+        OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button");
+        return;
+    }
+    size_t i = (size_t)(cmd - 2);
+    if (i < profiles.size()) OpenNewVSCodeWindowAs(hud, profiles[i], L"", L"hud-new-window-profile");
+}
+
 // Shared cleanup for ending a DragReorder, called both from a real
 // WM_LBUTTONUP and from WM_MOUSEMOVE's defensive check for a left button
 // that's no longer physically down (see that check's comment).
@@ -1204,7 +1242,15 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 EndProjectListHoverFocus(state, false);
             } else if (state) {
                 switch (ActionButtonForIndex(state, state->hoverIndex)) {
-                    case HudActionNewWindow: OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button"); break;
+                    case HudActionNewWindow:
+                        if (ConfiguredUserProfiles().empty()) {
+                            OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button");
+                        } else {
+                            POINT screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                            ClientToScreen(hwnd, &screenPt);
+                            ShowNewWindowProfileMenu(hwnd, state, screenPt);
+                        }
+                        break;
                     case HudActionMinimizeAll:
                         EndProjectListHoverFocus(state, false);
                         MinimizeAllVSCodeWindows(state);
@@ -1469,10 +1515,14 @@ static void DrawFavouriteMarker(UINT32* pixels, int width, int height, const REC
     FillStar(pixels, width, height, cx, cy, kFillRadius, kFillColorPx);
 }
 
-// How much further right a WSLg entry's label starts, to make room for its
-// WSL icon in front of it (see ProjectListHudEntry::wslDistro).
+// How much further right an entry's label starts, to make room for the
+// icons in front of it: WSL (see ProjectListHudEntry::wslDistro), then the
+// account's (ProjectListHudEntry::account).
 static int WslIconTextShift(const ProjectListHudEntry& entry) {
     return entry.wslDistro.empty() ? 0 : kWslIconSize + kWslIconGap;
+}
+static int LabelIconsTextShift(const ProjectListHudEntry& entry) {
+    return WslIconTextShift(entry) + (entry.account.empty() ? 0 : kAccountIconSize + kAccountIconGap);
 }
 
 // Draws one entry's chip (background + label text, alpha-blended by
@@ -1567,6 +1617,11 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
         BlendWslIcon(pixels, width, height, (int)item.left + leftTextPad, (int)item.top + (rowHeight - kWslIconSize) / 2,
                      item);
         leftTextPad += WslIconTextShift(entry);
+    }
+    if (!entry.account.empty()) {
+        BlendAccountIcon(entry.account, pixels, width, height, (int)item.left + leftTextPad,
+                         (int)item.top + (rowHeight - kAccountIconSize) / 2, item);
+        leftTextPad += kAccountIconSize + kAccountIconGap;
     }
 
     COLORREF tx = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
@@ -1981,7 +2036,7 @@ static int MeasureRequiredWidth(const std::vector<ProjectListHudEntry>& entries,
         // favourite's label isn't truncated any more than a non-favourite's
         // would be at the same text width.
         int reserve = kProjectListMeasurePaddingX + (EntryIsFavourite(entry) ? (kFavouriteMarkerLeftPad - 12) : 0) +
-                      WslIconTextShift(entry);
+                      LabelIconsTextShift(entry);
         GetTextExtentPoint32W(screenDC, entry.label.c_str(), (int)entry.label.size(), &textSz);
         width = std::max(width, (int)textSz.cx + reserve);
     }

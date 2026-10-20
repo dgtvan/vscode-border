@@ -6,6 +6,17 @@
 #include <utility>
 #include <vector>
 
+// One of config.ini's user profile slots, user_profile_<N>_* (see account.h).
+struct UserProfile {
+    std::wstring account; // Windows account name, as written
+    std::wstring icon;    // user_profile_<N>_icon: an image path or base64 image data, or empty
+    std::wstring vscode;  // user_profile_<N>_vscode: that account's Code.exe, or empty
+    int slot = 0;         // N
+};
+
+// Slots user_profile_1_* .. user_profile_<kMaxUserProfiles>_*.
+const int kMaxUserProfiles = 5;
+
 struct Config {
     int thickness = 4;
     int opacity = 255;
@@ -31,6 +42,10 @@ struct Config {
     // `wsl_vscode_extra_args.<distro>` keys (see wsl.h's LinuxVSCodeOpenCommand).
     // The distro name is lowercased, as config.ini keys are.
     std::vector<std::pair<std::wstring, std::vector<std::wstring>>> wslVSCodeExtraArgs;
+
+    // Other Windows accounts VS Code can be started as (see account.h): the
+    // user profile slots that have an account, in slot order.
+    std::vector<UserProfile> userProfiles;
 
     // AI status indicator (see ai_provider.h) -- "claude" is the only
     // currently-implemented provider; other tokens (e.g. a future "copilot")

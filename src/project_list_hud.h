@@ -33,6 +33,8 @@ struct ProjectListHudEntry {
     ClaudeStatus claudeStatus = ClaudeStatus::None;
     std::wstring wslDistro; // distro a WSLg window's Linux VS Code runs in (see wsl.h), empty for Windows
                             // VS Code -- a WSLg entry shows the WSL icon in front of its label
+    std::wstring account;   // Windows account the window's VS Code runs as, when that isn't this app's own
+                            // (see account.h), else empty -- shows that account's icon in front of the label
     // True while rawLabel might still change (VS Code's title/worktree
     // mapping still settling -- see tracking.cpp's IsWindowLoading). Drawn
     // greyed out with a spinner instead of its real color/AI status, and

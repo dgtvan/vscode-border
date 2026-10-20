@@ -1,5 +1,6 @@
 #include "tracking.h"
 
+#include "account.h"
 #include "ai_provider.h"
 #include "config.h"
 #include "focus_trace.h"
@@ -74,6 +75,8 @@ struct TrackedWindow {
                               // recorded folders that share folderName
     std::wstring wslDistro;  // distro a WSLg window's Linux VS Code runs in (from its title, see wsl.h),
                               // empty for a Windows VS Code window
+    std::wstring account;    // Windows account this window's VS Code runs as, when that isn't this app's own
+                              // (see account.h), else empty
     std::wstring lastTitle; // window title as of the last NAMECHANGE acted on (or tracking) -- see WinEventProc
     std::wstring lastLabel; // label last painted, to detect changes
     RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized -- lets a minimized
@@ -350,6 +353,7 @@ static void SyncProjectListHud() {
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
         entry.wslDistro = kv.second.wslDistro;
+        entry.account = kv.second.account;
         entry.loading = IsWindowLoading(kv.second, kv.first);
         // Fixed placeholder text while loading -- entry.label/rawLabel
         // otherwise still churns underneath (see IsWindowLoading), and
@@ -546,7 +550,7 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
         COLORREF color = g_config.palette[tw.colorIndex % g_config.palette.size()];
         PaintOverlay(tw.overlay, ow, oh, color, t, g_config.opacity,
                      borderLabel, g_config.showLabel, g_config.labelHeight, g_config.labelFontSize,
-                     g_config.labelTextColorAuto, g_config.labelTextColor, tw.wslDistro, m);
+                     g_config.labelTextColorAuto, g_config.labelTextColor, tw.wslDistro, tw.account, m);
         tw.lastWidth = ow;
         tw.lastHeight = oh;
         tw.lastLabel = borderLabel;
@@ -658,6 +662,7 @@ static void TrackWindow(HWND hwnd) {
     tw.overlay = CreateOverlay(g_hInstance, hwnd);
     tw.colorIndex = AllocateColorIndex();
     tw.pid = pid;
+    tw.account = OtherAccountOfProcess(pid);
     tw.trackSeq = g_nextTrackSeq++;
     tw.loadingEpisodeStartTick = GetTickCount64();
     ApplyLabelForTitle(tw, title);
@@ -669,8 +674,8 @@ static void TrackWindow(HWND hwnd) {
     AddPidHooks(pid);
     UpdateForegroundPollTimer();
 
-    Log(L"tracked hwnd=%p colorIndex=%d overlay=%p pid=%lu title=[%ls] label=[%ls]",
-        hwnd, tw.colorIndex, tw.overlay, pid, title, tw.label.c_str());
+    Log(L"tracked hwnd=%p colorIndex=%d overlay=%p pid=%lu%ls%ls title=[%ls] label=[%ls]", hwnd, tw.colorIndex,
+        tw.overlay, pid, tw.account.empty() ? L"" : L" account=", tw.account.c_str(), title, tw.label.c_str());
 }
 
 static void UntrackWindow(HWND hwnd) {

@@ -1,5 +1,6 @@
 #include "wsl.h"
 #include "config.h"
+#include "layered_rendering.h"
 #include "logger.h"
 #include "resource.h"
 
@@ -239,23 +240,7 @@ HBITMAP GetWslIconMenuBitmap() {
 void BlendWslIcon(UINT32* pixels, int surfaceWidth, int surfaceHeight, int left, int top, const RECT& clip) {
     const std::vector<UINT32>& icon = WslIconPixels();
     if (icon.empty()) return;
-    for (int y = 0; y < kWslIconSize; y++) {
-        int row = top + y;
-        if (row < 0 || row >= surfaceHeight || row < clip.top || row >= clip.bottom) continue;
-        for (int x = 0; x < kWslIconSize; x++) {
-            int col = left + x;
-            if (col < 0 || col >= surfaceWidth || col < clip.left || col >= clip.right) continue;
-            UINT32 s = icon[y * kWslIconSize + x];
-            UINT32 a = s >> 24;
-            if (!a) continue;
-            UINT32 d = pixels[row * surfaceWidth + col];
-            auto blend = [&](int shift) {
-                UINT32 sc = (s >> shift) & 0xFF, dc = (d >> shift) & 0xFF;
-                return std::min<UINT32>(255, sc + dc * (255 - a) / 255) << shift; // src is premultiplied
-            };
-            pixels[row * surfaceWidth + col] = 0xFF000000u | blend(16) | blend(8) | blend(0);
-        }
-    }
+    BlendPremultipliedIcon(icon.data(), kWslIconSize, pixels, surfaceWidth, surfaceHeight, left, top, clip);
 }
 
 // One argument quoted for a Windows command line (CommandLineToArgvW rules).

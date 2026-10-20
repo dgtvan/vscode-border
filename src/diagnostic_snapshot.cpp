@@ -1,5 +1,6 @@
 #include "diagnostic_snapshot.h"
 
+#include "account.h"
 #include "config.h"
 #include "file_util.h"
 #include "focus_trace.h"
@@ -563,7 +564,9 @@ void WriteTrackedWindows(Report& rep, const std::vector<TrackedWindowDiag>& trac
     for (const TrackedWindowDiag& d : tracked) {
         HWND w = d.target;
         rep.Line(L"");
-        rep.Line(L"target %p pid=%lu%ls", w, d.pid, w == fg ? L"  <-- FOREGROUND" : L"");
+        std::wstring account = OtherAccountOfProcess(d.pid);
+        rep.Line(L"target %p pid=%lu%ls%ls%ls", w, d.pid, account.empty() ? L"" : L" account=", account.c_str(),
+                 w == fg ? L"  <-- FOREGROUND" : L"");
         rep.Line(L"  title=[%ls]", TitleOf(w, 400).c_str());
         rep.Line(L"  label=[%ls] rawLabel=[%ls] borderLabel=[%ls] branch=[%ls] folderName=[%ls] repoName=[%ls] "
                  L"loading=%d",

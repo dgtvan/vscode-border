@@ -1,5 +1,7 @@
 #include "layered_rendering.h"
 
+#include <algorithm>
+
 COLORREF ContrastTextColor(COLORREF bg) {
     double luminance = 0.299 * GetRValue(bg) + 0.587 * GetGValue(bg) + 0.114 * GetBValue(bg);
     return luminance > 150.0 ? RGB(0, 0, 0) : RGB(255, 255, 255);
@@ -58,4 +60,25 @@ void BlendTextIntoPixels(HDC screenDC, UINT32* pixels, int surfaceWidth, int sur
     SelectObject(maskDC, oldMaskBmp);
     DeleteObject(maskBmp);
     DeleteDC(maskDC);
+}
+
+void BlendPremultipliedIcon(const UINT32* icon, int size, UINT32* pixels, int surfaceWidth, int surfaceHeight,
+                            int left, int top, const RECT& clip) {
+    for (int y = 0; y < size; y++) {
+        int row = top + y;
+        if (row < 0 || row >= surfaceHeight || row < clip.top || row >= clip.bottom) continue;
+        for (int x = 0; x < size; x++) {
+            int col = left + x;
+            if (col < 0 || col >= surfaceWidth || col < clip.left || col >= clip.right) continue;
+            UINT32 s = icon[y * size + x];
+            UINT32 a = s >> 24;
+            if (!a) continue;
+            UINT32 d = pixels[row * surfaceWidth + col];
+            auto blend = [&](int shift) {
+                UINT32 sc = (s >> shift) & 0xFF, dc = (d >> shift) & 0xFF;
+                return std::min<UINT32>(255, sc + dc * (255 - a) / 255) << shift; // src is premultiplied
+            };
+            pixels[row * surfaceWidth + col] = 0xFF000000u | blend(16) | blend(8) | blend(0);
+        }
+    }
 }

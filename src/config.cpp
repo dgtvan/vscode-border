@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 Config g_config;
 
@@ -49,6 +50,7 @@ static COLORREF ParseHexColor(const std::string& hex) {
 Config LoadConfig(const std::wstring& path) {
     Config cfg;
     cfg.palette = DefaultPalette();
+    UserProfile slots[kMaxUserProfiles];
 
     std::string content = ReadFileBytes(path);
     if (content.empty()) {
@@ -116,6 +118,20 @@ Config LoadConfig(const std::wstring& path) {
                 Log(L"config: wsl_vscode_extra_args for distro [%ls]: [%hs]", distro.c_str(), val.c_str());
                 cfg.wslVSCodeExtraArgs.emplace_back(distro, args);
             }
+        } else if (key.rfind("user_profile_", 0) == 0) {
+            // user_profile_<N>_account / _icon / _vscode
+            const char* rest = key.c_str() + strlen("user_profile_");
+            char* end = nullptr;
+            long slot = strtol(rest, &end, 10);
+            std::string field = (end && *end == '_') ? std::string(end + 1) : std::string();
+            if (end == rest || slot < 1 || slot > kMaxUserProfiles ||
+                (field != "account" && field != "icon" && field != "vscode")) {
+                LogWarn(L"config: unknown key [%hs] -- user profiles are user_profile_<1-%d>_account/_icon/_vscode",
+                        key.c_str(), kMaxUserProfiles);
+            } else {
+                UserProfile& p = slots[slot - 1];
+                (field == "account" ? p.account : field == "icon" ? p.icon : p.vscode) = Utf8ToWide(val);
+            }
         } else if (key == "colors") {
             std::vector<COLORREF> palette;
             for (const std::string& item : SplitChar(val, ',')) {
@@ -158,6 +174,28 @@ Config LoadConfig(const std::wstring& path) {
                 cfg.aiIndicatorBorderColor = ParseHexColor(val);
             }
         }
+    }
+
+    // A slot without an account is unused, whatever else it has.
+    for (int i = 0; i < kMaxUserProfiles; i++) {
+        const UserProfile& p = slots[i];
+        if (p.account.empty()) continue;
+        bool duplicate = false;
+        for (const UserProfile& q : cfg.userProfiles) {
+            duplicate = duplicate || CompareStringOrdinal(q.account.c_str(), -1, p.account.c_str(), -1, TRUE) ==
+                                         CSTR_EQUAL;
+        }
+        if (duplicate) {
+            LogWarn(L"config: user_profile_%d_account [%ls] repeats an earlier profile's account -- ignoring it",
+                    i + 1, p.account.c_str());
+            continue;
+        }
+        // The icon can be a whole base64 image -- logged by size only.
+        Log(L"config: user profile %d: account=[%ls] icon=[%ls] vscode=[%ls]", i + 1, p.account.c_str(),
+            p.icon.size() > 260 ? (std::to_wstring(p.icon.size()) + L" chars").c_str() : p.icon.c_str(),
+            p.vscode.c_str());
+        cfg.userProfiles.push_back(p);
+        cfg.userProfiles.back().slot = i + 1;
     }
 
     std::string providersJoined;
