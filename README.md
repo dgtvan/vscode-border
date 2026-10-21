@@ -116,7 +116,7 @@ first build):
 | `ai_indicator_border_color` | Indicator border color: `auto` (black/white by contrast) or a fixed hex `RRGGBB`. Default `auto`. |
 | `usage_meter_enabled` | Show Claude usage rings at the right end of the project list HUD (`true`/`false` -- see [Claude usage rings](#claude-usage-rings)). Default `true`. |
 | `usage_meter_refresh_minutes` | How often to re-read Claude usage, in minutes (1-60). Default `5`. |
-| `user_profile_<N>_account` / `_icon` / `_vscode` / `_color` / `_ring_badge` | User profiles (see `config.ini`): profile 1 is this account (its `_account` is a fixed placeholder; its `_vscode`, the Code.exe new windows as this account open with), 2-5 other Windows accounts. `_color` is the background of that account's usage rings, hex `RRGGBB`; empty (default) leaves it transparent. `_ring_badge=false` hides the account's icon in front of its usage rings (default shown). |
+| `user_profile_<N>_account` / `_icon` / `_color` / `_ring_badge` | User profiles (see `config.ini`): profile 1 is this account (its `_account` is a fixed placeholder), 2-5 other Windows accounts. Each account's VS Code is found automatically (see `src/vscode_installs.h`). `_color` is the background of that account's usage rings, hex `RRGGBB`; empty (default) leaves it transparent. `_ring_badge=false` hides the account's icon in front of its usage rings (default shown). |
 
 After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
@@ -671,6 +671,8 @@ Not yet: the AI status indicator for Claude Code running inside the distro.
 - `src/tray_icon.*` -- tray icon warning-badge compositing.
 - `src/diagnostic_snapshot.*` -- tray menu's Capture Diagnostic Snapshot (screenshot + monitor/DPI/geometry report).
 - `src/vscode_cli.*` -- locates VS Code's `code`/`code-insiders` CLI shim; opens new VS Code windows and closes all of them (shared by the hub and the tray menu).
+- `src/vscode_installs.*` -- remembers each account's VS Code install from its windows (`vscode_installs.ini`), so
+  new windows as any account find VS Code without configuration.
 - `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, border sync, and feeding the HUD its entries.
 - `src/resource.rc`, `assets/app.ico`, `assets/square-dashed.png` -- tray icon resource (`app.ico` is generated from the PNG; see [Credits](#credits)).
 - `assets/wsl.ico` -- the Tux icon shown on WSL windows (see [Credits](#credits)).

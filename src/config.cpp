@@ -142,7 +142,7 @@ Config LoadConfig(const std::wstring& path) {
                 (field != "account" && field != "icon" && field != "vscode" && field != "color" &&
                  field != "ring_badge")) {
                 LogWarn(L"config: unknown key [%hs] -- user profiles are "
-                        L"user_profile_<1-%d>_account/_icon/_vscode/_color/_ring_badge",
+                        L"user_profile_<1-%d>_account/_icon/_color/_ring_badge",
                         key.c_str(), kMaxUserProfiles);
             } else if (field == "color") {
                 UserProfile& p = slots[slot - 1];
@@ -152,9 +152,16 @@ Config LoadConfig(const std::wstring& path) {
                 slots[slot - 1].ringBadge = !(val == "0" || _stricmp(val.c_str(), "false") == 0);
             } else if (slot == 1 && field == "account" && val == kThisAccountMarker) {
                 // Filled in below.
+            } else if (field == "vscode") {
+                // Gone: each account's VS Code is found by itself (see
+                // vscode_installs.h). Only a set value is worth a word.
+                if (!val.empty() && val[0] != '<') {
+                    LogWarn(L"config: %hs is no longer used -- VS Code is found automatically; remove the line",
+                            key.c_str());
+                }
             } else {
                 UserProfile& p = slots[slot - 1];
-                (field == "account" ? p.account : field == "icon" ? p.icon : p.vscode) = Utf8ToWide(val);
+                (field == "account" ? p.account : p.icon) = Utf8ToWide(val);
             }
         } else if (key == "colors") {
             std::vector<COLORREF> palette;
@@ -234,10 +241,9 @@ Config LoadConfig(const std::wstring& path) {
         // The icon can be a whole base64 image -- logged by size only.
         wchar_t color[8] = L"";
         if (p.hasColor) swprintf(color, 8, L"%02X%02X%02X", GetRValue(p.color), GetGValue(p.color), GetBValue(p.color));
-        Log(L"config: user profile %d: account=[%ls] icon=[%ls] vscode=[%ls] color=[%ls] ring_badge=%d", i + 1,
-            p.account.c_str(),
-            p.icon.size() > 260 ? (std::to_wstring(p.icon.size()) + L" chars").c_str() : p.icon.c_str(),
-            p.vscode.c_str(), color, p.ringBadge);
+        Log(L"config: user profile %d: account=[%ls] icon=[%ls] color=[%ls] ring_badge=%d", i + 1, p.account.c_str(),
+            p.icon.size() > 260 ? (std::to_wstring(p.icon.size()) + L" chars").c_str() : p.icon.c_str(), color,
+            p.ringBadge);
         cfg.userProfiles.push_back(p);
         cfg.userProfiles.back().slot = i + 1;
     }

@@ -12,6 +12,7 @@
 #include "window_discovery.h"
 #include "window_title.h"
 #include "worktree_resolver.h"
+#include "vscode_installs.h"
 #include "vscode_settings.h"
 #include "wsl.h"
 
@@ -691,6 +692,7 @@ static void TrackWindow(HWND hwnd) {
     tw.colorIndex = AllocateColorIndex();
     tw.pid = pid;
     tw.account = OtherAccountOfProcess(pid);
+    NoteVSCodeInstall(pid, tw.account);
     tw.trackSeq = g_nextTrackSeq++;
     tw.loadingEpisodeStartTick = GetTickCount64();
     ApplyLabelForTitle(tw, title);

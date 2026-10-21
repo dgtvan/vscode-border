@@ -61,12 +61,14 @@ HBITMAP GetAccountIconMenuBitmap(const std::wstring& account);
 std::wstring AccountMenuText(const std::wstring& account);
 
 // Opens a new VS Code window (with `folder` open, if not empty) as
-// `account`, through that account's VS Code CLI shim. Starting a process as
-// another account takes its password: the one saved in Windows Credential
-// Manager by an earlier launch, or else asked for in a dialog owned by
-// `owner` (which offers to save it). A saved password that no longer works
-// is dropped and asked for again. `reason` tags the focus-trace launch
-// record.
+// `account`, through that account's VS Code CLI shim. Which VS Code is
+// found by itself (see vscode_installs.h): its remembered install, else a
+// search as that account, else another account's install every account can
+// use. Starting a process as another account takes its password: the one
+// saved in Windows Credential Manager by an earlier launch, or else asked
+// for in a dialog owned by `owner` (which offers to save it). A saved
+// password that no longer works is dropped and asked for again. `reason`
+// tags the focus-trace launch record.
 void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::wstring& folder,
                            const wchar_t* reason);
 
@@ -80,6 +82,16 @@ void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::w
 HANDLE StartHiddenProcessAsAccount(const std::wstring& account, const std::wstring& application,
                                    std::wstring commandLine, const std::wstring& workingDir, HANDLE stdIn,
                                    HANDLE stdOut, DWORD& error);
+
+// Command-line switch that runs the exe as a one-shot search for VS Code,
+// run as another account by OpenNewVSCodeWindowAs (see RunFindVSCode).
+extern const wchar_t* const kFindVSCodeArg;
+
+// Entry point of that search: writes the Code.exe of the VS Code install
+// found for the account this runs as (see vscode_cli.h's
+// FindInstalledVSCodeCli) to stdout, one line; exit code 1 if none. Never
+// logs -- it runs as another account.
+int RunFindVSCode();
 
 // Whether a password for `account` is saved, and dropping it.
 bool HasSavedAccountPassword(const std::wstring& account);

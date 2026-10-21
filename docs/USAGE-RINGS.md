@@ -49,7 +49,7 @@ exploration, not the current design.
 ## Profile 1 is this account
 
 User profile 1 is always the account the app runs as, so this account
-takes the same `_icon`, `_vscode` and `_color` settings as the others
+takes the same `_icon`, `_color` and `_ring_badge` settings as the others
 instead of settings of its own. Its `_account` holds a fixed placeholder
 (`<the account running VS Code Border - do not edit>`) rather than a name to
 fill in. Other accounts are profiles 2-5.

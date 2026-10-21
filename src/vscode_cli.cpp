@@ -1,18 +1,15 @@
 #include "vscode_cli.h"
 #include "wsl.h"
 
-#include "config.h"
-#include "file_util.h"
 #include "focus_trace.h"
 #include "logger.h"
+#include "vscode_installs.h"
 
 #include <shellapi.h>
 
 #include <cwchar>
 
 namespace {
-
-std::wstring g_lastWindowDerivedShim; // see ResolveVSCodeCliShim's step 2
 
 std::wstring GetEnvVar(const wchar_t* name) {
     wchar_t buf[MAX_PATH] = {};
@@ -59,18 +56,9 @@ bool ResolveFromWindow(HWND window, std::wstring& outCmdPath) {
     return ok && ResolveFromExe(exePath, outCmdPath);
 }
 
-// This account's user_profile_1_vscode (relative to config.ini's folder),
-// or empty.
-std::wstring ConfiguredOwnVSCodeExe() {
-    for (const UserProfile& p : g_config.userProfiles) {
-        if (!p.thisAccount || p.vscode.empty()) continue;
-        bool absolute = p.vscode.size() > 1 && (p.vscode[1] == L':' || (p.vscode[0] == L'\\' && p.vscode[1] == L'\\'));
-        return absolute ? p.vscode : GetExeDir() + L"\\" + p.vscode;
-    }
-    return L"";
-}
+} // namespace
 
-bool ResolveStandalone(std::wstring& outCmdPath) {
+bool FindInstalledVSCodeCli(std::wstring& outCmdPath) {
     const wchar_t* kShimNames[] = {L"code.cmd", L"code-insiders.cmd"};
     for (const wchar_t* name : kShimNames) {
         wchar_t found[MAX_PATH] = {};
@@ -100,26 +88,20 @@ bool ResolveStandalone(std::wstring& outCmdPath) {
     return false;
 }
 
-} // namespace
-
 bool ResolveVSCodeCliShim(HWND runningWindow, std::wstring& outCmdPath) {
-    std::wstring configured = ConfiguredOwnVSCodeExe();
-    if (!configured.empty()) {
-        if (ResolveFromExe(configured, outCmdPath)) return true;
-        LogWarn(L"vscode CLI shim: none next to user_profile_1_vscode [%ls] -- falling back to the usual lookup",
-                configured.c_str());
+    if (ResolveFromWindow(runningWindow, outCmdPath)) return true;
+    std::wstring remembered = RememberedVSCodeInstall(L"");
+    if (!remembered.empty() && ResolveFromExe(remembered, outCmdPath)) return true;
+    if (FindInstalledVSCodeCli(outCmdPath)) return true;
+    for (const std::wstring& shared : SharedVSCodeInstalls(L"")) {
+        if (ResolveFromExe(shared, outCmdPath)) {
+            Log(L"vscode CLI shim: using another account's install, %ls", shared.c_str());
+            return true;
+        }
     }
-    if (ResolveFromWindow(runningWindow, outCmdPath)) {
-        g_lastWindowDerivedShim = outCmdPath;
-        return true;
-    }
-    if (!g_lastWindowDerivedShim.empty() && FileExists(g_lastWindowDerivedShim)) {
-        outCmdPath = g_lastWindowDerivedShim;
-        return true;
-    }
-    if (ResolveStandalone(outCmdPath)) return true;
     LogWarn(L"vscode CLI shim: could not locate code.cmd/code-insiders.cmd (no running window to derive it "
-            L"from, and none on PATH or in the usual install locations)");
+            L"from, none remembered, none on PATH or in the usual install locations, and no other account's "
+            L"shared install)");
     return false;
 }
 

@@ -16,18 +16,22 @@
 // IPC, or to start a fresh one. Reusing the shim sidesteps reimplementing
 // (and keeping in sync) that internal path resolution here.
 //
-// Tried in order:
-//   0. config.ini's user_profile_1_vscode (this account's Code.exe), if set.
+// Tried in order (see vscode_installs.h):
 //   1. `runningWindow`'s own install (bin\*.cmd next to its exe), so the
 //      build the user is actually running (Stable vs. Insiders) wins.
-//   2. The last shim step 1 found -- keeps that same build once every VS
-//      Code window is closed, which is exactly when a "new window" action
-//      is the only way back in.
-//   3. PATH, then the well-known per-user and machine-wide install
-//      locations (Stable before Insiders at each step) -- e.g. at startup,
-//      before any VS Code window is running.
+//   2. This account's remembered install -- the one its windows last ran,
+//      kept across restarts -- for once every VS Code window is closed,
+//      which is exactly when a "new window" action is the only way back in.
+//   3. FindInstalledVSCodeCli.
+//   4. Another account's remembered install that every account can use
+//      (see SharedVSCodeInstalls) -- e.g. a portable one outside any profile.
 // `runningWindow` may be null. Logs a warning when nothing is found.
 bool ResolveVSCodeCliShim(HWND runningWindow, std::wstring& outCmdPath);
+
+// The CLI shim on PATH, else in the well-known per-user and machine-wide
+// install locations (Stable before Insiders at each step), for the account
+// this runs as. Doesn't log.
+bool FindInstalledVSCodeCli(std::wstring& outCmdPath);
 
 // Runs the shim with `args` (e.g. `-n "D:\path"`), hidden -- the shim's own
 // cmd.exe console would otherwise flash on screen, though it only forwards

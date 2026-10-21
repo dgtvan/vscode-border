@@ -12,7 +12,6 @@
 struct UserProfile {
     std::wstring account;  // Windows account name, as written
     std::wstring icon;     // user_profile_<N>_icon: an image path or base64 image data, or empty
-    std::wstring vscode;   // user_profile_<N>_vscode: that account's Code.exe, or empty
     bool hasColor = false; // user_profile_<N>_color set: its usage rings' background (see claude_usage.h)
     COLORREF color = RGB(0, 0, 0);
     bool ringBadge = true;    // user_profile_<N>_ring_badge: its icon in front of its usage rings
@@ -21,10 +20,12 @@ struct UserProfile {
 };
 
 // Slots user_profile_1_* .. user_profile_<kMaxUserProfiles>_*.
+const int kMaxUserProfiles = 5;
+
 // user_profile_1_account's value in config.ini: slot 1 is always the account
 // this app runs as, so its account isn't something to fill in.
 extern const char* const kThisAccountMarker;
-const int kMaxUserProfiles = 5;
+
 
 struct Config {
     int thickness = 4;

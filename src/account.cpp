@@ -5,15 +5,19 @@
 #include "layered_rendering.h"
 #include "logger.h"
 #include "resource.h"
+#include "text_util.h"
+#include "vscode_cli.h"
+#include "vscode_installs.h"
 
 #include <gdiplus.h>
-#include <sddl.h>
 #include <shlwapi.h>
 #include <wincred.h>
 
 #include <algorithm>
 #include <map>
 #include <vector>
+
+const wchar_t* const kFindVSCodeArg = L"--find-vscode";
 
 // The SID inside a TOKEN_USER buffer read from `process`'s token, or empty.
 static std::vector<BYTE> ProcessUserSid(HANDLE process) {
@@ -389,45 +393,6 @@ static INT_PTR CALLBACK PasswordDialogProc(HWND dlg, UINT msg, WPARAM wParam, LP
     return FALSE;
 }
 
-// The account's profile folder, from the registry's profile list (readable
-// by any account, unlike the folder itself); empty if it has none yet (an
-// account that has never signed in).
-static std::wstring AccountProfileDir(const std::wstring& account) {
-    BYTE sid[SECURITY_MAX_SID_SIZE];
-    DWORD sidSize = sizeof(sid);
-    wchar_t domain[256];
-    DWORD domainLen = 256;
-    SID_NAME_USE use;
-    if (!LookupAccountNameW(nullptr, account.c_str(), sid, &sidSize, domain, &domainLen, &use)) return L"";
-    LPWSTR sidString = nullptr;
-    if (!ConvertSidToStringSidW(sid, &sidString)) return L"";
-    std::wstring key = std::wstring(L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\") + sidString;
-    LocalFree(sidString);
-    wchar_t dir[MAX_PATH] = {};
-    DWORD size = sizeof(dir);
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, key.c_str(), L"ProfileImagePath", RRF_RT_REG_SZ, nullptr, dir, &size) !=
-        ERROR_SUCCESS) {
-        return L"";
-    }
-    return dir;
-}
-
-// The Code.exe `account` runs: its profile's user_profile_<N>_vscode, else a
-// machine-wide install, else the account's own per-user install (which this
-// account can't look into, so it isn't checked).
-static std::wstring AccountVSCodeExe(const std::wstring& account) {
-    const UserProfile* profile = FindUserProfile(account);
-    if (profile && !profile->vscode.empty()) return ConfigRelativePath(profile->vscode);
-    wchar_t programFiles[MAX_PATH] = {};
-    if (GetEnvironmentVariableW(L"ProgramFiles", programFiles, MAX_PATH)) {
-        std::wstring machineWide = std::wstring(programFiles) + L"\\Microsoft VS Code\\Code.exe";
-        if (GetFileAttributesW(machineWide.c_str()) != INVALID_FILE_ATTRIBUTES) return machineWide;
-    }
-    std::wstring profileDir = AccountProfileDir(account);
-    if (profileDir.empty()) profileDir = L"C:\\Users\\" + account;
-    return profileDir + L"\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe";
-}
-
 // Runs `commandLine` as `account`, hidden, with its profile loaded. 0 on
 // success, else the Win32 error.
 static DWORD LaunchAs(const std::wstring& account, const std::wstring& password, const std::wstring& application,
@@ -445,14 +410,13 @@ static DWORD LaunchAs(const std::wstring& account, const std::wstring& password,
     return 0;
 }
 
-HANDLE StartHiddenProcessAsAccount(const std::wstring& account, const std::wstring& application,
-                                   std::wstring commandLine, const std::wstring& workingDir, HANDLE stdIn,
-                                   HANDLE stdOut, DWORD& error) {
-    std::wstring password;
-    if (!LoadSavedPassword(account, password)) {
-        error = ERROR_NOT_FOUND;
-        return nullptr;
-    }
+
+// Starts `application` with `commandLine` as `account` (with its profile
+// loaded, hidden) and stdin/stdout/stderr on `stdIn`/`stdOut`. The process
+// handle, or null with `error` set.
+static HANDLE StartAs(const std::wstring& account, const std::wstring& password, const std::wstring& application,
+                      std::wstring commandLine, const std::wstring& workingDir, HANDLE stdIn, HANDLE stdOut,
+                      DWORD& error) {
     STARTUPINFOW si = {sizeof(si)};
     si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
     si.wShowWindow = SW_HIDE;
@@ -460,33 +424,63 @@ HANDLE StartHiddenProcessAsAccount(const std::wstring& account, const std::wstri
     si.hStdOutput = stdOut;
     si.hStdError = stdOut;
     PROCESS_INFORMATION pi = {};
-    BOOL ok = CreateProcessWithLogonW(account.c_str(), L".", password.c_str(), LOGON_WITH_PROFILE,
-                                      application.c_str(), &commandLine[0], CREATE_NO_WINDOW, nullptr,
-                                      workingDir.c_str(), &si, &pi);
-    error = ok ? 0 : GetLastError();
-    WipeString(password);
-    if (!ok) return nullptr;
+    if (!CreateProcessWithLogonW(account.c_str(), L".", password.c_str(), LOGON_WITH_PROFILE, application.c_str(),
+                                 &commandLine[0], CREATE_NO_WINDOW, nullptr, workingDir.c_str(), &si, &pi)) {
+        error = GetLastError();
+        return nullptr;
+    }
+    error = 0;
     CloseHandle(pi.hThread);
     return pi.hProcess;
 }
 
+// Searches for VS Code as `account` -- its PATH, its own per-user install,
+// a machine-wide one (see vscode_cli.h's FindInstalledVSCodeCli) -- by
+// running this exe with kFindVSCodeArg as that account, since this account
+// can't look into its profile. The Code.exe found, or empty; `error` is set
+// when the search couldn't even start (ERROR_LOGON_FAILURE for a wrong
+// password).
+static std::wstring FindVSCodeAs(const std::wstring& account, const std::wstring& password, DWORD& error) {
+    error = 0;
+    SECURITY_ATTRIBUTES inherit = {sizeof(inherit), nullptr, TRUE};
+    HANDLE ourOut = nullptr, childOut = nullptr;
+    if (!CreatePipe(&ourOut, &childOut, &inherit, 0)) {
+        error = GetLastError();
+        return L"";
+    }
+    SetHandleInformation(ourOut, HANDLE_FLAG_INHERIT, 0);
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring commandLine = L"\"" + std::wstring(exe) + L"\" " + kFindVSCodeArg;
+    HANDLE child = StartAs(account, password, exe, commandLine, GetExeDir(), nullptr, childOut, error);
+    CloseHandle(childOut);
+    std::string output;
+    if (child) {
+        char buf[512];
+        DWORD read = 0;
+        while (ReadFile(ourOut, buf, sizeof(buf), &read, nullptr) && read > 0) output.append(buf, read);
+        WaitForSingleObject(child, 5000);
+        CloseHandle(child);
+    }
+    CloseHandle(ourOut);
+    while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
+    return Utf8ToWide(output);
+}
+
+int RunFindVSCode() {
+    std::wstring shim;
+    if (!FindInstalledVSCodeCli(shim)) return 1;
+    std::string line = WideToUtf8(VSCodeExeForShim(shim)) + "\n";
+    DWORD written = 0;
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line.data(), (DWORD)line.size(), &written, nullptr);
+    return 0;
+}
+
 void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::wstring& folder,
                            const wchar_t* reason) {
-    // Through the install's CLI shim (bin\code.cmd next to Code.exe), for the
-    // same reason as vscode_cli.h's ResolveVSCodeCliShim: raw Code.exe
-    // rejects -n.
-    std::wstring exe = AccountVSCodeExe(account);
-    size_t slash = exe.find_last_of(L"\\/");
-    std::wstring installDir = slash == std::wstring::npos ? L"." : exe.substr(0, slash);
-    std::wstring exeName = slash == std::wstring::npos ? exe : exe.substr(slash + 1);
-    std::wstring shim = installDir + (_wcsicmp(exeName.c_str(), L"Code - Insiders.exe") == 0
-                                          ? L"\\bin\\code-insiders.cmd"
-                                          : L"\\bin\\code.cmd");
     wchar_t system32[MAX_PATH] = {};
     GetSystemDirectoryW(system32, MAX_PATH);
     std::wstring cmdExe = std::wstring(system32) + L"\\cmd.exe";
-    std::wstring commandLine =
-        L"cmd.exe /d /c \"\"" + shim + L"\" -n" + (folder.empty() ? L"" : L" \"" + folder + L"\"") + L"\"";
 
     PasswordPrompt prompt;
     prompt.account = account;
@@ -502,14 +496,41 @@ void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::w
             password = prompt.password;
             WipeString(prompt.password);
         }
-        NoteWindowLaunchRequest(reason, 1);
-        DWORD err = LaunchAs(account, password, cmdExe, commandLine, installDir);
-        if (err == 0) {
-            Log(L"account: opened a new VS Code window as [%ls] via %ls%ls%ls", account.c_str(), shim.c_str(),
-                folder.empty() ? L"" : L" folder=", folder.c_str());
-            if (!saved && prompt.remember) SavePassword(account, password);
-            WipeString(password);
-            return;
+
+        // Which VS Code: see vscode_installs.h. (A running window of the
+        // account is what keeps its remembered install current.)
+        DWORD err = 0;
+        const wchar_t* source = L"its remembered install";
+        std::wstring exe = RememberedVSCodeInstall(account);
+        if (exe.empty()) {
+            source = L"a search as that account";
+            exe = FindVSCodeAs(account, password, err);
+        }
+        if (exe.empty() && err != ERROR_LOGON_FAILURE) {
+            std::vector<std::wstring> shared = SharedVSCodeInstalls(account);
+            if (!shared.empty()) {
+                source = L"another account's shared install";
+                exe = shared.front();
+            }
+        }
+
+        std::wstring shim, commandLine;
+        if (!exe.empty()) {
+            // Through the install's CLI shim, for the same reason as
+            // vscode_cli.h's ResolveVSCodeCliShim: raw Code.exe rejects -n.
+            shim = VSCodeShimForExe(exe);
+            commandLine =
+                L"cmd.exe /d /c \"\"" + shim + L"\" -n" + (folder.empty() ? L"" : L" \"" + folder + L"\"") + L"\"";
+            std::wstring installDir = exe.substr(0, exe.find_last_of(L"\\/"));
+            NoteWindowLaunchRequest(reason, 1);
+            err = LaunchAs(account, password, cmdExe, commandLine, installDir);
+            if (err == 0) {
+                Log(L"account: opened a new VS Code window as [%ls] via %ls (%ls)%ls%ls", account.c_str(),
+                    shim.c_str(), source, folder.empty() ? L"" : L" folder=", folder.c_str());
+                if (!saved && prompt.remember) SavePassword(account, password);
+                WipeString(password);
+                return;
+            }
         }
         WipeString(password);
         if (err == ERROR_LOGON_FAILURE) {
@@ -518,24 +539,46 @@ void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::w
             prompt.retry = true;
             continue;
         }
-        LogWarn(L"account: couldn't start VS Code as [%ls] (%ls), error=%lu", account.c_str(), commandLine.c_str(),
-                err);
-        const UserProfile* profile = FindUserProfile(account);
+
         wchar_t text[1024];
-        if (err == ERROR_DIRECTORY) {
+        if (exe.empty()) {
+            LogWarn(L"account: couldn't find VS Code for [%ls] -- nothing remembered, none found as that account, "
+                    L"and no other account's install it can share",
+                    account.c_str());
+            swprintf(text, 1024,
+                     L"Couldn't find VS Code for \"%ls\".\n\nStart VS Code once as that account (or install it "
+                     L"there) -- the app then remembers where it is.",
+                     account.c_str());
+        } else if (err == ERROR_DIRECTORY) {
             // The working directory is the install folder, so this is where a
             // missing install shows up: this account can't look into the
             // other account's profile to check beforehand.
+            LogWarn(L"account: [%ls]'s VS Code (%ls, from %ls) isn't there", account.c_str(), exe.c_str(), source);
+            ForgetVSCodeInstall(account);
             swprintf(text, 1024,
-                     L"VS Code isn't installed for \"%ls\" at:\n%ls\n\nSet user_profile_%d_vscode in config.ini to the "
-                     L"Code.exe that account should run (one it can reach -- not inside another account's profile), "
-                     L"then Reload Config.",
-                     account.c_str(), exe.c_str(), profile ? profile->slot : 0);
+                     L"VS Code for \"%ls\" isn't at:\n%ls\n\nStart VS Code once as that account -- the app then "
+                     L"remembers where it is.",
+                     account.c_str(), exe.c_str());
         } else {
+            LogWarn(L"account: couldn't start VS Code as [%ls] (%ls), error=%lu", account.c_str(), commandLine.c_str(),
+                    err);
             swprintf(text, 1024, L"Couldn't start VS Code as \"%ls\" (error %lu).\n\nVS Code used: %ls",
                      account.c_str(), err, exe.c_str());
         }
         MessageBoxW(owner, text, L"VS Code Border", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
         return;
     }
+}
+
+HANDLE StartHiddenProcessAsAccount(const std::wstring& account, const std::wstring& application,
+                                   std::wstring commandLine, const std::wstring& workingDir, HANDLE stdIn,
+                                   HANDLE stdOut, DWORD& error) {
+    std::wstring password;
+    if (!LoadSavedPassword(account, password)) {
+        error = ERROR_NOT_FOUND;
+        return nullptr;
+    }
+    HANDLE process = StartAs(account, password, application, commandLine, workingDir, stdIn, stdOut, error);
+    WipeString(password);
+    return process;
 }

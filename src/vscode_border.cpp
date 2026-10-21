@@ -35,6 +35,7 @@
 //   vscode_cli.*        - VS Code CLI shim lookup, opening/closing VS Code windows
 //   favourites.*        - persisted favourite projects, open-all
 //   claude_usage.*      - Claude session/weekly usage per account, for the hub's usage rings
+//   vscode_installs.*   - each account's VS Code install, as last seen, for opening windows as it
 
 #include <windows.h>
 #include <shellapi.h>
@@ -331,7 +332,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
-    // Before the single-instance check: the helper runs alongside the app,
+    // Before the single-instance check: the helpers run alongside the app,
     // as another account in the same session.
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -339,6 +340,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         int minutes = argc >= 3 ? _wtoi(argv[2]) : 5;
         LocalFree(argv);
         return RunClaudeUsageHelper(minutes);
+    }
+    if (argv && argc >= 2 && wcscmp(argv[1], kFindVSCodeArg) == 0) {
+        LocalFree(argv);
+        return RunFindVSCode();
     }
     if (argv) LocalFree(argv);
 
