@@ -430,11 +430,18 @@ Claude Code's `/usage`: the outer ring is the weekly limit, the inner ring the s
 account (user profile 1) comes first, then each other user profile's
 account (`config.ini`'s `user_profile_<N>_account`, from 2), each with its
 icon in front -- the same icon its windows' items carry, so this account's
-rings have one only when `user_profile_1_icon` is set. `user_profile_<N>_ring_badge=false`
-hides it on the rings alone.
+rings have one only when `user_profile_1_icon` is set.
+`user_profile_<N>_ring_badge=false` hides it on the rings alone.
+
+![This account's rings reading normally, next to another account's ring showing the pulsing amber "!" of an expired login](assets/usage-rings.png)
 
 - **Colors:** green, amber from 70%, red from 90%. Grey means the numbers
   aren't current: the last update failed, or none has worked yet.
+- **Needs you:** when an account can't be read until someone acts -- its
+  login expired or is missing, the API rejects its token, or its
+  password is missing or rejected -- its rings are replaced by a grey ring
+  around a pulsing amber "!", so an empty ring is never mistaken for 0%.
+  Passing failures (network, rate limit, server errors) stay plain grey.
 - **Background:** an account's rings can sit on a chip of its own color,
   so the accounts are easy to tell apart: its profile's
   `user_profile_<N>_color` (hex `RRGGBB`). Without one there's no chip;
@@ -450,7 +457,8 @@ its format can change; when it does, the rings go grey and the log says
 why. The token is only read, never refreshed: refreshing it would rotate
 the refresh token Claude Code holds and sign Claude Code out. When it has
 expired (no Claude Code session has run in that account for a while), the
-rings stay grey until Claude Code next runs there and renews it.
+rings show the "!" until Claude Code next runs there and renews it; the app
+watches the login file and reads usage again within seconds of that.
 
 Another account's token is inside that account's profile, which this
 account can't read. So for each user profile the app runs a hidden copy of
@@ -458,13 +466,15 @@ itself as that account (`vscode_border.exe --claude-usage-helper`), started
 with the password saved in Credential Manager, which reads the token and
 fetches on the same schedule and passes each result back over a pipe. It
 exits as soon as the app does. A profile without a saved password gets grey
-rings until you open a window as it from the "+" button and tick
+rings with the "!" until you open a window as it from the "+" button and tick
 **Remember**. A saved password that's rejected is dropped rather than
 retried, so the schedule can't lock the account out.
 
 Every failure is logged as a `[WARN]` (once per distinct error, so the
 same failure every few minutes doesn't flood the log), which also badges
-the tray icon. A recovery is logged too.
+the tray icon. A recovery is logged too. The design decisions behind all
+this, and the options that were tried and dropped, are in
+[docs/USAGE-RINGS.md](docs/USAGE-RINGS.md).
 
 ### Project list HUD position/size memory
 
@@ -672,6 +682,8 @@ Not yet: the AI status indicator for Claude Code running inside the distro.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) -- design decisions and why.
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md) -- measured resource usage and optimizations.
 - [docs/INVESTIGATING-WARNINGS.md](docs/INVESTIGATING-WARNINGS.md) -- how to chase down a `[WARN]` line in `bin\logs\`.
+- [docs/USAGE-RINGS.md](docs/USAGE-RINGS.md) -- the Claude usage rings' design decisions, with the archived
+  mockup [docs/usage-rings-mockup.html](docs/usage-rings-mockup.html).
 
 ## Credits
 

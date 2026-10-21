@@ -42,6 +42,8 @@ struct ClaudeUsageSnapshot {
     long long fetchedAt = 0;          // Unix seconds of that fetch
     std::wstring error;               // why the latest attempt failed, empty if it succeeded
     long long errorAt = 0;
+    bool needsYou = false; // the latest attempt failed in a way that lasts until someone acts: the login
+                           // expired or is missing, or the account's password is -- not a passing network error
 };
 
 // Starts, restarts or stops fetching to match g_config (usage_meter_enabled,

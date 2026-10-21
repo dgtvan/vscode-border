@@ -399,6 +399,7 @@ static void SyncProjectListHud() {
         ring.sessionPercent = CurrentUsagePercent(u.session);
         ring.weeklyPercent = CurrentUsagePercent(u.weekly);
         ring.stale = IsClaudeUsageStale(u);
+        ring.needsYou = !u.error.empty() && u.needsYou;
         ring.tooltip = DescribeClaudeUsage(u);
         style.usageRings.push_back(ring);
     }

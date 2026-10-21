@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Usage Meter</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column; each proposal is a strip of "your screen" (desktop, hub, taskbar) drawn to the hub's real proportions, with notes under it. */
+:root {
+  --bg: #f3f5f7;
+  --surface: #ffffff;
+  --fg: #1b232b;
+  --muted: #5b6874;
+  --line: #d9e0e6;
+  --accent: #2f6f8f;
+  --ok: #3fae6a;
+  --warn: #e0a526;
+  --crit: #e0513b;
+  --stale: #8a949c;
+  /* the mock screen keeps the desktop's own colors in both themes */
+  --desk: #2c7896;
+  --taskbar: #1f1f1f;
+  --hubtext: #101010;
+  --chip-dark: #2a2d31;
+  --chip-text: #e9edf0;
+  --track: #4a4f55;
+  --f-display: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+  --f-body: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", Consolas, ui-monospace, monospace;
+  --f-hud: "Segoe UI", Tahoma, system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #13181d; --surface: #1b2228; --fg: #e3e8ec; --muted: #9aa6b0; --line: #2c363e; --accent: #7cb8d6; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #13181d; --surface: #1b2228; --fg: #e3e8ec; --muted: #9aa6b0; --line: #2c363e; --accent: #7cb8d6; color-scheme: dark }
+
+body { background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 15px; line-height: 1.55; }
+.wrap { max-width: 900px; margin: 0 auto; padding-block: 40px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 40px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; line-height: 1.2; }
+h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 21px; font-weight: 600; }
+h3 { font-size: 15px; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+.lede { color: var(--muted); font-size: 16px; }
+section { display: flex; flex-direction: column; gap: 14px; }
+code, .mono { font-family: var(--f-mono); font-size: 0.88em; }
+code { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+
+.answer { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
+.stat .num { font-family: var(--f-mono); font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat .sub { color: var(--muted); font-size: 13px; }
+
+/* --- the mock screen --- */
+.screen { border-radius: 8px; overflow: hidden; border: 1px solid var(--line); }
+.desk { background: var(--desk); height: 46px; position: relative; }
+.hub { background: var(--desk); display: flex; gap: 6px; align-items: stretch; padding: 0 4px; height: 22px; position: relative; }
+.item { display: flex; align-items: center; gap: 6px; padding: 0 6px; font-family: var(--f-hud); font-weight: 700; font-size: 12px; color: var(--hubtext); flex: 0 1 190px; min-width: 0; white-space: nowrap; overflow: hidden; }
+.item .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.item .ai { width: 10px; height: 10px; border: 1px solid #111; background: var(--ok); flex: none; }
+.plus { background: #2ab3b3; width: 22px; display: grid; place-items: center; font-weight: 700; color: #111; font-family: var(--f-hud); flex: none; }
+.spacer { flex: 1; }
+.taskbar { background: var(--taskbar); height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 12px; }
+.taskbar i { width: 20px; height: 20px; border-radius: 4px; background: #4b5560; flex: none; }
+.taskbar i:nth-child(2) { background: #2f8fd8; } .taskbar i:nth-child(4) { background: #c94b4b; } .taskbar i:nth-child(6) { background: #e2b33b; }
+.taskbar .clock { margin-left: auto; color: #ddd; font-family: var(--f-hud); font-size: 11px; text-align: right; line-height: 1.25; }
+.scroll { overflow-x: auto; }
+.scroll .screen { min-width: 640px; }
+
+/* option A: usage chip */
+.uchip { background: var(--chip-dark); color: var(--chip-text); display: flex; align-items: center; gap: 10px; padding: 0 8px; font-family: var(--f-hud); font-size: 11px; flex: none; }
+.meter { display: flex; align-items: center; gap: 5px; }
+.meter b { font-weight: 700; opacity: .75; }
+.bar { position: relative; width: 54px; height: 6px; background: var(--track); border-radius: 1px; }
+.bar > span { position: absolute; inset: 0 auto 0 0; border-radius: 1px; }
+.bar .pace { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #fff; opacity: .85; }
+.meter .pct { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-size: 11px; min-width: 3ch; text-align: right; }
+.meter .rst { opacity: .6; font-family: var(--f-mono); font-size: 10px; }
+
+/* option B: edge lines */
+.edge { position: absolute; left: 0; right: 0; height: 3px; background: rgba(0,0,0,.35); }
+.edge > span { position: absolute; inset: 0 auto 0 0; }
+.edge .pace { position: absolute; top: -1px; bottom: -1px; width: 2px; background: #fff; }
+.edge-tag { position: absolute; right: 6px; font-family: var(--f-mono); font-size: 10px; color: #fff; text-shadow: 0 0 2px #000; }
+
+/* option C: rings */
+.rings { flex: none; width: 22px; height: 22px; background: var(--chip-dark); display: grid; place-items: center; }
+
+/* tooltip */
+.tip { position: absolute; right: 30px; bottom: 30px; background: #2b2b2b; color: #eee; border: 1px solid #555; font-family: var(--f-hud); font-size: 12px; padding: 8px 10px; line-height: 1.5; box-shadow: 0 4px 14px rgba(0,0,0,.4); z-index: 2; }
+.tip .row { display: grid; grid-template-columns: 70px 42px auto; gap: 8px; }
+.tip .mono { font-size: 11px; }
+.tip .dim { color: #aaa; }
+
+.badge { flex: none; width: 14px; height: 14px; border-radius: 50%; background: #000; color: #fff; display: grid; place-items: center; font-family: var(--f-hud); font-size: 10px; font-weight: 800; line-height: 1; }
+.rgroup { flex: none; display: flex; align-items: center; gap: 3px; padding: 0 4px; background: var(--chip-dark); }
+.rgroup .badge { outline: 1px solid #777; }
+.rgroup.dim { opacity: .45; }
+.rgroup.on { box-shadow: inset 0 -2px 0 #fff; }
+.rg { display: block; width: 20px; height: 20px; }
+.bgopts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.bgopt { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.bgopt p { color: var(--muted); font-size: 13px; }
+.band { background: #1c1c1c; display: flex; align-items: stretch; gap: 4px; height: 22px; padding: 4px 6px; align-self: flex-start; }
+.band.z2 { zoom: 2; }
+.band .rgroup { padding: 0 3px; }
+.sep { width: 1px; margin: 3px 4px; background: #555; }
+.breathe { animation: breathe 1.6s ease-in-out infinite; }
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+.spinarc { transform-origin: 10px 10px; animation: spin 1.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.blinkdash svg { animation: breathe 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .breathe, .spinarc, .blinkdash svg { animation: none; } }
+.statetable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.statetable th, .statetable td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.statetable th { color: var(--muted); font-weight: 600; }
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 24px; font-size: 14px; }
+.notes ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.pill { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--accent); color: var(--accent); }
+
+.states { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.state { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.state .uchip { height: 22px; align-self: flex-start; }
+.state p { color: var(--muted); }
+
+.source { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+.source ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+pre { margin: 0; font-family: var(--f-mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; overflow-x: auto; }
+.rec { border-left: 3px solid var(--accent); padding-left: 14px; }
+</style>
+
+<div class="wrap">
+
+<header style="display:flex;flex-direction:column;gap:10px">
+  <span class="eyebrow">vscode-border · design exploration (archived) -- the decisions are in USAGE-RINGS.md</span>
+  <h1>Claude usage meter for the hub</h1>
+  <p class="lede">Yes, the session (5-hour) and weekly limits can be read. These are three ways to keep them on screen next to the project list HUD. All mockups use your real numbers, read at 16:29 UTC on 20 Oct 2026.</p>
+</header>
+
+<section>
+  <span class="eyebrow">What the account reports right now</span>
+  <div class="answer">
+    <div class="stat"><span class="sub">Session · 5-hour window</span><span class="num">2%</span><span class="sub">resets 21:20 UTC (in 4h 51m)</span></div>
+    <div class="stat"><span class="sub">Weekly · all models</span><span class="num">38%</span><span class="sub">resets Sat 25 Oct 07:00 UTC (in 4d 14h)</span></div>
+    <div class="stat"><span class="sub">Weekly pace</span><span class="num">34%</span><span class="sub">of the week has passed, so you are slightly ahead of an even pace</span></div>
+  </div>
+</section>
+
+<!-- ============ A ============ -->
+<section>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><h2>A · Usage chip at the end of the hub</h2><span class="pill">Recommended</span></div>
+  <p>A dark chip after the "+" button, the same height as the hub items. Two short bars with the percentage and the time until reset. The white tick on each bar marks where an even pace would be.</p>
+  <div class="scroll"><div class="screen">
+    <div class="desk"></div>
+    <div class="hub">
+      <div class="item" style="background:#9b59d6"><span class="lbl">comms</span><span class="ai"></span></div>
+      <div class="item" style="background:#c9b061"><span class="lbl">side analysis</span><span class="ai"></span></div>
+      <div class="item" style="background:#c95aa6"><span class="lbl">cc-sandbox</span><span class="ai"></span></div>
+      <div class="plus">+</div>
+      <div class="spacer"></div>
+      <div class="uchip">
+        <span class="meter"><b>5h</b><span class="bar"><span style="width:2%;background:var(--ok)"></span><i class="pace" style="left:3%"></i></span><span class="pct">2%</span><span class="rst">4h51m</span></span>
+        <span class="meter"><b>7d</b><span class="bar"><span style="width:38%;background:var(--ok)"></span><i class="pace" style="left:34%"></i></span><span class="pct">38%</span><span class="rst">4d14h</span></span>
+      </div>
+    </div>
+    <div class="taskbar"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><span class="clock">4:29 PM<br>20/10/2026</span></div>
+  </div></div>
+  <div class="notes">
+    <ul><li>Readable without hovering: exact numbers and reset times.</li><li>Fits the hub's existing look, so it isn't another floating window.</li></ul>
+    <ul><li>Takes about 230 px of the hub row.</li><li>Only visible while the hub is shown.</li></ul>
+  </div>
+</section>
+
+<!-- ============ B ============ -->
+<section>
+  <h2>B · Edge lines across the top of the hub</h2>
+  <p>Two 3 px lines along the full width of the hub band: session on top, weekly under it. No extra space taken. You read the color and length at a glance and hover for the numbers.</p>
+  <div class="scroll"><div class="screen">
+    <div class="desk">
+      <div class="edge" style="bottom:4px"><span style="width:2%;background:var(--ok)"></span><i class="pace" style="left:3%"></i></div>
+      <div class="edge" style="bottom:0"><span style="width:38%;background:var(--ok)"></span><i class="pace" style="left:34%"></i></div>
+      <span class="edge-tag" style="bottom:8px">5h 2% · 7d 38%</span>
+    </div>
+    <div class="hub">
+      <div class="item" style="background:#9b59d6"><span class="lbl">comms</span><span class="ai"></span></div>
+      <div class="item" style="background:#c9b061"><span class="lbl">side analysis</span><span class="ai"></span></div>
+      <div class="item" style="background:#c95aa6"><span class="lbl">cc-sandbox</span><span class="ai"></span></div>
+      <div class="plus">+</div>
+    </div>
+    <div class="taskbar"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><span class="clock">4:29 PM<br>20/10/2026</span></div>
+  </div></div>
+  <div class="notes">
+    <ul><li>Uses no space in the hub row.</li><li>Very long, so even a small change is visible.</li></ul>
+    <ul><li>Numbers need a hover (or the small tag at the right).</li><li>Sits on the desktop edge, so it can clash with a light wallpaper.</li></ul>
+  </div>
+</section>
+
+<!-- ============ C ============ -->
+<section>
+  <h2>C · Twin rings next to "+"</h2>
+  <p>One 22 px square with two rings: outer is weekly, inner is session. It is the smallest option. Hover opens the details.</p>
+  <div class="scroll"><div class="screen" style="position:relative">
+    <div class="desk"></div>
+    <div class="hub">
+      <div class="item" style="background:#9b59d6"><span class="lbl">comms</span><span class="ai"></span></div>
+      <div class="item" style="background:#c9b061"><span class="lbl">side analysis</span><span class="ai"></span></div>
+      <div class="item" style="background:#c95aa6"><span class="lbl">cc-sandbox</span><span class="ai"></span></div>
+      <div class="plus">+</div>
+      <div class="rings">
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-label="Session 2 percent, weekly 38 percent">
+          <circle cx="9" cy="9" r="7.5" fill="none" stroke="#4a4f55" stroke-width="2.5"/>
+          <circle cx="9" cy="9" r="7.5" fill="none" stroke="#3fae6a" stroke-width="2.5" stroke-dasharray="17.9 47.1" transform="rotate(-90 9 9)"/>
+          <circle cx="9" cy="9" r="3.8" fill="none" stroke="#4a4f55" stroke-width="2.5"/>
+          <circle cx="9" cy="9" r="3.8" fill="none" stroke="#3fae6a" stroke-width="2.5" stroke-dasharray="0.6 23.3" transform="rotate(-90 9 9)"/>
+        </svg>
+      </div>
+    </div>
+    <div class="taskbar"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><span class="clock">4:29 PM<br>20/10/2026</span></div>
+    <div class="tip" style="left:330px;right:auto;bottom:66px">
+      <div class="row"><span>Session</span><span class="mono">2%</span><span class="dim">resets 21:20 (4h 51m)</span></div>
+      <div class="row"><span>Weekly</span><span class="mono">38%</span><span class="dim">resets Sat 07:00 (4d 14h)</span></div>
+      <div class="dim" style="font-size:11px">Updated 16:29 · on pace: 34%</div>
+    </div>
+  </div></div>
+  <div class="notes">
+    <ul><li>Smallest footprint, about the size of the "+" button.</li><li>The same hover tooltip works for A and B too.</li></ul>
+    <ul><li>Small rings are hard to read below about 20%.</li><li>No numbers without hovering.</li></ul>
+  </div>
+</section>
+
+<!-- ============ multi-account ============ -->
+<section id="accounts">
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><h2>Rings for several accounts</h2><span class="pill">New</span></div>
+  <p>The hub already marks a window from another Windows account with that account's icon (your black "2" and "3" badges), and leaves this account's windows unmarked. The rings can use the same rule, so a badge means the same thing everywhere on the hub. Only your own numbers below are real. The numbers for profile 2 and profile 3 are examples.</p>
+
+  <h3>1 · Badge in front of each ring pair</h3>
+  <div class="scroll"><div class="screen">
+    <div class="desk"></div>
+    <div class="hub">
+      <div class="item" style="background:#9b59d6"><span class="lbl">comms</span><span class="ai"></span></div>
+      <div class="item" style="background:#c9b061"><span class="badge">2</span><span class="lbl">side analysis</span><span class="ai"></span></div>
+      <div class="item" style="background:#c95aa6"><span class="badge">3</span><span class="lbl">cc-sandbox</span><span class="ai"></span></div>
+      <div class="plus">+</div>
+      <div class="rgroup"><span class="rg" data-s="2" data-w="38"></span></div>
+      <div class="rgroup"><span class="badge">2</span><span class="rg" data-s="61" data-w="72"></span></div>
+      <div class="rgroup"><span class="badge">3</span><span class="rg" data-s="12" data-w="91"></span></div>
+    </div>
+    <div class="taskbar"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><span class="clock">4:29 PM<br>20/10/2026</span></div>
+  </div></div>
+  <div class="notes">
+    <ul><li>Uses the same 14 px icon as the hub items, so you match a ring to its windows without thinking.</li><li>An account added in <code>config.ini</code> gets its ring pair automatically.</li></ul>
+    <ul><li>About 40 px per account. Three accounts take roughly the width of one small hub item.</li></ul>
+  </div>
+
+  <h3>2 · Badge in the middle of the rings</h3>
+  <div class="scroll"><div class="screen">
+    <div class="desk"></div>
+    <div class="hub">
+      <div class="item" style="background:#9b59d6"><span class="lbl">comms</span><span class="ai"></span></div>
+      <div class="item" style="background:#c9b061"><span class="badge">2</span><span class="lbl">side analysis</span><span class="ai"></span></div>
+      <div class="item" style="background:#c95aa6"><span class="badge">3</span><span class="lbl">cc-sandbox</span><span class="ai"></span></div>
+      <div class="plus">+</div>
+      <div class="rgroup"><span class="rg" data-s="2" data-w="38" data-mid=""></span></div>
+      <div class="rgroup"><span class="rg" data-s="61" data-w="72" data-mid="2"></span></div>
+      <div class="rgroup"><span class="rg" data-s="12" data-w="91" data-mid="3"></span></div>
+    </div>
+    <div class="taskbar"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><span class="clock">4:29 PM<br>20/10/2026</span></div>
+  </div></div>
+  <div class="notes">
+    <ul><li>Narrowest, one 22 px square per account.</li></ul>
+    <ul><li>The rings get thin so the badge has room, and at this size the badge is only about 8 px. Your "2" and "3" stay readable, but a detailed picture icon wouldn't.</li></ul>
+  </div>
+
+  <h3>3 · Highlight the account of the focused window</h3>
+  <div class="scroll"><div class="screen">
+    <div class="desk"></div>
+    <div class="hub">
+      <div class="item" style="background:#9b59d6"><span class="lbl">comms</span><span class="ai"></span></div>
+      <div class="item" style="background:#c9b061;outline:2px solid #fff;outline-offset:-2px"><span class="badge">2</span><span class="lbl">side analysis</span><span class="ai"></span></div>
+      <div class="item" style="background:#c95aa6"><span class="badge">3</span><span class="lbl">cc-sandbox</span><span class="ai"></span></div>
+      <div class="plus">+</div>
+      <div class="rgroup dim"><span class="rg" data-s="2" data-w="38"></span></div>
+      <div class="rgroup on"><span class="badge">2</span><span class="rg" data-s="61" data-w="72"></span></div>
+      <div class="rgroup dim"><span class="badge">3</span><span class="rg" data-s="12" data-w="91"></span></div>
+    </div>
+    <div class="taskbar"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><span class="clock">4:29 PM<br>20/10/2026</span></div>
+  </div></div>
+  <div class="notes">
+    <ul><li>Works on top of layout 1 or 2. When you switch to a profile 2 window, its rings light up and the rest dim, so the rings you see first are for the account you're about to use.</li></ul>
+    <ul><li>A dimmed account that is nearly out of its limit should stay at full strength, so a critical warning is never hidden.</li></ul>
+  </div>
+
+  <div class="source">
+    <h3>Getting the other accounts' numbers</h3>
+    <p>This app runs as one account and can't read another account's login token. Windows refused access to profile 2's <span class="mono">.claude</span> folder, and profile 3 has no token file in its profile. So each account has to report its own numbers.</p>
+    <ul>
+      <li><strong>Hook in each account (proposed).</strong> A small hook script is added to each account's Claude settings. When Claude finishes a turn in that account, the script runs as that account, reads that account's own token, fetches its usage, and writes it to a shared folder the app watches. Usage only goes up while that account is in use, and the app can work out resets itself from <span class="mono">resets_at</span>, so updating on each turn is enough.</li>
+      <li><strong>Fetch as the account (fallback).</strong> The app already starts VS Code as another account with the password saved in Credential Manager. It could start a hidden fetch the same way. That only works for accounts whose password is saved, so I'd keep it as a fallback.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ backgrounds ============ -->
+<section id="backgrounds">
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><h2>Telling the accounts apart: chip backgrounds</h2><span class="pill">New</span></div>
+  <p>In the built version both ring pairs sit on the same dark grey chip, so they read as one block. Each option below gives every account its own look. The numbers are your real ones from the last run (yours 26% / 41%, profile 2 4% / 1%), and profile 2's window was the last one used, so your pair is dimmed. Each strip is shown at 2× and then at real size.</p>
+
+  <div class="bgopts">
+    <div class="bgopt">
+      <h3>A · Tinted chip per account</h3>
+      <div class="band z2"><div class="rgroup" style="background:#22364d;opacity:.45"><span class="rg" data-s="26" data-w="41"></span></div><div class="rgroup" style="background:#43294a"><span class="badge">2</span><span class="rg" data-s="4" data-w="1"></span></div></div>
+      <div class="band"><div class="rgroup" style="background:#22364d;opacity:.45"><span class="rg" data-s="26" data-w="41"></span></div><div class="rgroup" style="background:#43294a"><span class="badge">2</span><span class="rg" data-s="4" data-w="1"></span></div></div>
+      <p>Each account's chip gets a dark tint of its own color: navy for you, plum for profile 2. The rings stay readable on top. You could set the colors per account in <code>config.ini</code>, or let them come from a palette.</p>
+    </div>
+
+    <div class="bgopt">
+      <h3>B · Colored edge stripe</h3>
+      <div class="band z2"><div class="rgroup" style="box-shadow:inset 3px 0 0 #4f8fd6;opacity:.45"><span class="rg" data-s="26" data-w="41"></span></div><div class="rgroup" style="box-shadow:inset 3px 0 0 #c070d0"><span class="badge">2</span><span class="rg" data-s="4" data-w="1"></span></div></div>
+      <div class="band"><div class="rgroup" style="box-shadow:inset 3px 0 0 #4f8fd6;opacity:.45"><span class="rg" data-s="26" data-w="41"></span></div><div class="rgroup" style="box-shadow:inset 3px 0 0 #c070d0"><span class="badge">2</span><span class="rg" data-s="4" data-w="1"></span></div></div>
+      <p>Same grey chip, with a 3 px stripe in the account's color on the left edge. Quieter than A, but at real size the stripe is thin.</p>
+    </div>
+
+    <div class="bgopt">
+      <h3>C · Your account lighter, others dark</h3>
+      <div class="band z2"><div class="rgroup" style="background:#4a4f57;opacity:.45"><span class="rg" data-s="26" data-w="41"></span></div><div class="rgroup" style="background:#25272b"><span class="badge">2</span><span class="rg" data-s="4" data-w="1"></span></div></div>
+      <div class="band"><div class="rgroup" style="background:#4a4f57;opacity:.45"><span class="rg" data-s="26" data-w="41"></span></div><div class="rgroup" style="background:#25272b"><span class="badge">2</span><span class="rg" data-s="4" data-w="1"></span></div></div>
+      <p>No new colors: your own account gets a lighter grey and every user profile a darker one. This only separates you from the profiles, not one profile from another.</p>
+    </div>
+
+    <div class="bgopt">
+      <h3>D · Tint plus a clear gap</h3>
+      <div class="band z2"><div class="rgroup" style="background:#22364d;opacity:.45"><span class="rg" data-s="26" data-w="41"></span></div><span class="sep"></span><div class="rgroup" style="background:#43294a"><span class="badge">2</span><span class="rg" data-s="4" data-w="1"></span></div></div>
+      <div class="band"><div class="rgroup" style="background:#22364d;opacity:.45"><span class="rg" data-s="26" data-w="41"></span></div><span class="sep"></span><div class="rgroup" style="background:#43294a"><span class="badge">2</span><span class="rg" data-s="4" data-w="1"></span></div></div>
+      <p>A, with the gap between pairs widened from 4 px to 10 px and a thin divider in it. This costs about 6 px per extra account.</p>
+    </div>
+  </div>
+  <p><strong>My pick: A</strong>, with an optional color per account in <code>config.ini</code> (<code>usage_meter_color</code> for yours, <code>user_profile_&lt;N&gt;_color</code> for each profile) and defaults from a small set of dark tints. Dimming still works on top, because the whole chip fades.</p>
+</section>
+
+<!-- ============ expired ============ -->
+<section id="expired">
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><h2>Showing an expired login without hovering</h2><span class="pill">New</span></div>
+  <p>Today an expired login just greys the rings, which can look like 0% usage. Each option below makes "can't read this account" look different from any real reading. Left pair: your account, read fine (10% / 46%). Right pair: profile 2, whose login expired at 01:13 (its last reading was 5% / 1%). Transparent background and no badge, as in your config. Each strip is shown at 2× and then at real size.</p>
+  <div class="bgopts">
+    <div class="bgopt"><h3>A · Last reading in grey, breathing</h3><div class="band z2"><div class="rgroup" style="background:transparent"><span class="rg" data-s="10" data-w="46"></span></div><div class="rgroup breathe" style="background:transparent"><span class="rg" data-s="5" data-w="1" data-grey></span></div></div><div class="band"><div class="rgroup" style="background:transparent"><span class="rg" data-s="10" data-w="46"></span></div><div class="rgroup breathe" style="background:transparent"><span class="rg" data-s="5" data-w="1" data-grey></span></div></div><p>The last numbers stay, in grey, and the pair slowly fades in and out. It's clear the numbers are old, and you still see roughly where the account was.</p></div>
+    <div class="bgopt"><h3>B · Dashed amber outline, breathing</h3><div class="band z2"><div class="rgroup" style="background:transparent"><span class="rg" data-s="10" data-w="46"></span></div><div class="rgroup blinkdash" style="background:transparent"><span class="rg" data-s="5" data-w="1" data-dash></span></div></div><div class="band"><div class="rgroup" style="background:transparent"><span class="rg" data-s="10" data-w="46"></span></div><div class="rgroup blinkdash" style="background:transparent"><span class="rg" data-s="5" data-w="1" data-dash></span></div></div><p>No arcs at all, just a dashed amber outline that fades in and out. A broken ring can't be mistaken for a number.</p></div>
+    <div class="bgopt"><h3>C · Amber arc chasing round</h3><div class="band z2"><div class="rgroup" style="background:transparent"><span class="rg" data-s="10" data-w="46"></span></div><div class="rgroup " style="background:transparent"><span class="rg" data-s="5" data-w="1" data-spin></span></div></div><div class="band"><div class="rgroup" style="background:transparent"><span class="rg" data-s="10" data-w="46"></span></div><div class="rgroup " style="background:transparent"><span class="rg" data-s="5" data-w="1" data-spin></span></div></div><p>No arcs, and a short amber arc runs round the outer ring, like the AI indicator's Working spinner. It reads as "waiting", which matches what's happening: the app is waiting for Claude Code to renew the login.</p></div>
+    <div class="bgopt"><h3>D · Amber "!" instead of rings</h3><div class="band z2"><div class="rgroup" style="background:transparent"><span class="rg" data-s="10" data-w="46"></span></div><div class="rgroup breathe" style="background:transparent"><span class="rg" data-s="5" data-w="1" data-glyph></span></div></div><div class="band"><div class="rgroup" style="background:transparent"><span class="rg" data-s="10" data-w="46"></span></div><div class="rgroup breathe" style="background:transparent"><span class="rg" data-s="5" data-w="1" data-glyph></span></div></div><p>The rings are replaced by a single grey circle with a pulsing amber "!". It's the loudest option and doesn't depend on reading the rings at all.</p></div>
+  </div>
+  <h3>Which failures get it</h3>
+  <table class="statetable">
+    <tr><th>Failure</th><th>Looks like</th><th>Why</th></tr>
+    <tr><td>Login expired, no Claude Code login, password missing or rejected</td><td>The animated "needs you" look you pick above</td><td>It won't fix itself until someone uses Claude Code in that account or saves a password.</td></tr>
+    <tr><td>Network error, HTTP 429 or 5xx, unexpected response</td><td>Today's static grey, last reading kept</td><td>Usually clears on the next check, so it shouldn't blink at you.</td></tr>
+  </table>
+  <p><strong>My pick: B.</strong> It never shows a number that could be misread, it's calm enough to sit on screen for hours (profile 2 can stay expired all day), and it keeps the ring shape so the hub's layout doesn't jump. Animation would follow the AI indicator's: a repaint timer that runs only while some pair is in that state.</p>
+</section>
+
+<!-- ============ states ============ -->
+<section>
+  <h2>How it changes as you use it</h2>
+  <p>Colors follow the API's own <code>severity</code> for each limit. The meter goes grey when the data is old (for example, the login token expired and no Claude Code session has renewed it).</p>
+  <div class="states">
+    <div class="state"><div class="uchip"><span class="meter"><b>5h</b><span class="bar"><span style="width:38%;background:var(--ok)"></span><i class="pace" style="left:60%"></i></span><span class="pct">38%</span><span class="rst">2h01m</span></span></div><p>Normal. Under pace, so you have room.</p></div>
+    <div class="state"><div class="uchip"><span class="meter"><b>5h</b><span class="bar"><span style="width:74%;background:var(--warn)"></span><i class="pace" style="left:45%"></i></span><span class="pct">74%</span><span class="rst">2h45m</span></span></div><p>Warning. Well ahead of pace.</p></div>
+    <div class="state"><div class="uchip"><span class="meter"><b>5h</b><span class="bar"><span style="width:96%;background:var(--crit)"></span><i class="pace" style="left:80%"></i></span><span class="pct">96%</span><span class="rst">0h58m</span></span></div><p>Critical. Optionally a tray balloon the first time it crosses 90%.</p></div>
+    <div class="state"><div class="uchip" style="opacity:.6"><span class="meter"><b>5h</b><span class="bar"><span style="width:38%;background:var(--stale)"></span></span><span class="pct">38%</span><span class="rst">?</span></span></div><p>Stale. Last good value, greyed, with the age in the tooltip.</p></div>
+  </div>
+</section>
+
+<!-- ============ source ============ -->
+<section>
+  <h2>Where the numbers come from</h2>
+  <div class="source">
+    <p>This is the same data Claude Code's <code>/usage</code> screen shows. I called it once from this machine and it answered:</p>
+<pre>GET https://api.anthropic.com/api/oauth/usage
+Authorization: Bearer &lt;claudeAiOauth.accessToken from ~/.claude/.credentials.json&gt;
+anthropic-beta: oauth-2025-04-20
+
+"five_hour":  { "utilization": 2.0,  "resets_at": "2026-10-20T21:19:59Z" }
+"seven_day":  { "utilization": 38.0, "resets_at": "2026-10-25T06:59:59Z" }
+"limits": [ { "kind": "session",    "percent": 2,  "severity": "normal" },
+            { "kind": "weekly_all", "percent": 38, "severity": "normal" } ]</pre>
+    <ul>
+      <li><strong>Undocumented endpoint.</strong> It isn't a public API, so the shape can change. The app should parse it defensively and show "stale" rather than wrong numbers.</li>
+      <li><strong>Read the token, never refresh it.</strong> Claude Code renews the token itself. If this app refreshed it, it could rotate the refresh token and log Claude Code out. When the token has expired, the meter shows stale until Claude Code renews it.</li>
+      <li><strong>Polling.</strong> Every 3 minutes over WinHTTP, plus once on the Claude hooks this app already installs (Stop and similar), so the meter moves right after a turn ends.</li>
+      <li><strong>One account.</strong> Limits belong to the account, so the Windows-side credentials are enough even when Claude Code also runs in WSL.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="rec">
+  <h2>My recommendation</h2>
+  <p>Build <strong>C, the twin rings</strong>, as you chose, with one ring pair per account and the account's badge in front (layout 1). Add the highlight for the focused window's account (layout 3), but never dim an account that is in warning or critical. Hovering any pair shows exact percentages and reset times. Put it all behind a <code>usage_meter_enabled</code> setting in <code>config.ini</code>.</p>
+</section>
+
+</div>
+<script>
+// Draws each .rg placeholder as twin rings: outer = weekly, inner = session.
+// data-grey: last-known arcs in grey. data-dash: dashed amber track, no arcs.
+// data-spin: a short amber arc chasing round the outer track, no arcs.
+// data-glyph: no arcs, an amber "!" in a grey outline.
+(function () {
+  var col = function (p) { return p >= 90 ? '#e0513b' : p >= 70 ? '#e0a526' : '#3fae6a'; };
+  function ring(r, w, p, o) {
+    var c = 2 * Math.PI * r, d = Math.max(p / 100 * c, 0.6);
+    var track = o.dash ? '#e0a526' : '#4a4f55';
+    var out = '<circle cx="10" cy="10" r="' + r + '" fill="none" stroke="' + track + '" stroke-width="' + w + '"' +
+      (o.dash ? ' stroke-dasharray="1.6 1.4"' : '') + '/>';
+    if (!o.dash && !o.spin) out += '<circle cx="10" cy="10" r="' + r + '" fill="none" stroke="' + (o.grey ? '#8a949c' : col(p)) +
+      '" stroke-width="' + w + '" stroke-dasharray="' + d.toFixed(2) + ' ' + c.toFixed(2) + '" transform="rotate(-90 10 10)"/>';
+    return out;
+  }
+  document.querySelectorAll('.rg').forEach(function (el) {
+    var s = +el.dataset.s, w = +el.dataset.w, mid = el.dataset.mid, hasMid = mid !== undefined;
+    var o = {grey: 'grey' in el.dataset, dash: 'dash' in el.dataset, spin: 'spin' in el.dataset};
+    var svg;
+    if ('glyph' in el.dataset) {
+      svg = '<circle cx="10" cy="10" r="8" fill="none" stroke="#4a4f55" stroke-width="2.6"/>' +
+        '<text x="10" y="13.8" text-anchor="middle" font-family="Segoe UI, sans-serif" font-size="11" font-weight="900" fill="#e0a526">!</text>';
+    } else if (hasMid) {
+      svg = ring(8.6, 1.8, w, o) + ring(6, 1.8, s, o) + (mid ? '<circle cx="10" cy="10" r="4.4" fill="#000"/><text x="10" y="12.6" text-anchor="middle" font-family="Segoe UI, sans-serif" font-size="7" font-weight="800" fill="#fff">' + mid + '</text>' : '');
+    } else {
+      svg = ring(8, 2.6, w, o) + ring(4.2, 2.6, s, o);
+      if (o.spin) svg += '<g class="spinarc"><circle cx="10" cy="10" r="8" fill="none" stroke="#e0a526" stroke-width="2.6" stroke-dasharray="9 41.3" transform="rotate(-90 10 10)"/></g>';
+    }
+    el.innerHTML = '<svg width="20" height="20" viewBox="0 0 20 20" role="img" aria-label="Session ' + s + ' percent, weekly ' + w + ' percent">' + svg + '</svg>';
+  });
+})();
+</script>
+
+</html>

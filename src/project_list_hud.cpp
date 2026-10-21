@@ -56,6 +56,7 @@ static const int kRingCells[8][2] = {
 // rings, outer weekly and inner session.
 static const int kUsageRingPad = 3, kUsageRingBadgeGap = 3, kUsageRingGap = 4;
 static const double kUsageWarnPercent = 70, kUsageCriticalPercent = 90;
+static const UINT kUsageNeedsYouPulseMs = 1600; // one fade out and back in of the "!" (see DrawUsageRings)
 static const COLORREF kUsageTrackColor = RGB(84, 89, 96),
                       kUsageOkColor = RGB(63, 174, 106), kUsageWarnColor = RGB(224, 165, 38),
                       kUsageCriticalColor = RGB(224, 81, 59), kUsageStaleColor = RGB(138, 148, 156);
@@ -1459,7 +1460,12 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             }
             return 0;
         case WM_TIMER:
-            if (wParam == kClaudePulseTimerId && state) RenderProjectListHud(hwnd, state);
+            if (wParam == kClaudePulseTimerId && state) {
+                RenderProjectListHud(hwnd, state);
+                bool ringPulsing = std::any_of(state->usageRings.begin(), state->usageRings.end(),
+                                               [](const ProjectListHudUsageRing& r) { return r.needsYou; });
+                if (ringPulsing) SyncUsageStrip(hwnd, state);
+            }
             return 0;
         case WM_MOUSELEAVE:
             SetHudClickActivates(hwnd, state, false);
@@ -2048,6 +2054,19 @@ static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight,
         {innerMid - stroke / 2, innerMid + stroke / 2, ring.sessionPercent / 100,
          UsageRingColor(ring.sessionPercent, ring.stale)},
     };
+    // Needs you: no numbers that could pass for a reading -- just the outer
+    // ring's track, and an amber "!" inside it fading out and back in.
+    int bandCount = 2;
+    double glyphStrength = 0;
+    if (ring.needsYou) {
+        bands[0].fraction = 0;
+        bandCount = 1;
+        double phase = (GetTickCount64() % kUsageNeedsYouPulseMs) / (double)kUsageNeedsYouPulseMs * 2 * kPi;
+        glyphStrength = 0.3 + 0.7 * (0.5 + 0.5 * cos(phase));
+    }
+    // The "!": a bar above a dot, sized to the ring.
+    double barHalfWidth = size * 0.06, barTop = cy - size * 0.24, barBottom = cy + size * 0.05;
+    double dotY = cy + size * 0.17, dotRadius = size * 0.065;
     const int kSamples = 4;
     int ringRight = std::min(colEnd, left + (int)size);
     for (int row = rowStart; row < rowEnd; row++) {
@@ -2064,11 +2083,31 @@ static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight,
                     if (turn < 0) turn += 1;
                     bool onBand = false;
                     COLORREF c = ring.chipColor;
-                    for (const Band& b : bands) {
+                    for (int k = 0; k < bandCount; k++) {
+                        const Band& b = bands[k];
                         if (dist >= b.inner && dist < b.outer) {
                             c = turn < b.fraction ? b.fill : kUsageTrackColor;
                             onBand = true;
                         }
+                    }
+                    double ddy = dy + cy - dotY;
+                    bool onGlyph = ring.needsYou &&
+                                   ((fabs(dx) <= barHalfWidth && dy + cy >= barTop && dy + cy <= barBottom) ||
+                                    dx * dx + ddy * ddy <= dotRadius * dotRadius);
+                    if (onGlyph) {
+                        // Fading: amber over whatever is behind it -- the chip,
+                        // or nothing on a transparent one.
+                        double t = glyphStrength;
+                        sumR += GetRValue(kUsageWarnColor) * t;
+                        sumG += GetGValue(kUsageWarnColor) * t;
+                        sumB += GetBValue(kUsageWarnColor) * t;
+                        if (ring.hasChipColor) {
+                            sumR += GetRValue(ring.chipColor) * (1 - t);
+                            sumG += GetGValue(ring.chipColor) * (1 - t);
+                            sumB += GetBValue(ring.chipColor) * (1 - t);
+                        }
+                        covered += ring.hasChipColor ? 1 : t;
+                        continue;
                     }
                     if (!onBand && !ring.hasChipColor) continue;
                     sumR += GetRValue(c);
@@ -2077,9 +2116,9 @@ static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight,
                     covered++;
                 }
             }
-            if (covered == 0) continue;
+            if (covered <= 0) continue;
             const int n = kSamples * kSamples;
-            pixels[row * width + col] = (UINT32(covered * 255 / n) << 24) | (UINT32(sumR / n) << 16) |
+            pixels[row * width + col] = (UINT32(std::min(255.0, covered * 255 / n)) << 24) | (UINT32(sumR / n) << 16) |
                                         (UINT32(sumG / n) << 8) | UINT32(sumB / n);
         }
     }
@@ -2547,7 +2586,8 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     // it, same on-demand pattern as tracking.cpp's foreground-poll timer.
     bool anyAnimating = std::any_of(sorted.begin(), sorted.end(), [](const ProjectListHudEntry& e) {
         return e.loading || e.claudeStatus == ClaudeStatus::Working || e.claudeStatus == ClaudeStatus::Attention;
-    });
+    }) || std::any_of(state->usageRings.begin(), state->usageRings.end(),
+                      [](const ProjectListHudUsageRing& r) { return r.needsYou; });
     if (anyAnimating && !state->pulseTimerActive) {
         SetTimer(hud, kClaudePulseTimerId, kClaudePulseIntervalMs, nullptr);
         state->pulseTimerActive = true;
