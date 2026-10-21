@@ -884,8 +884,8 @@ DWORD WINAPI RemoteWorkerThread(LPVOID param) {
                          L"status -- not trying it again until Reload Config",
                          r.account.c_str());
             } else {
-                swprintf(text, 400, L"claude_provider: couldn't start the status helper as [%ls] (error %lu)",
-                         r.account.c_str(), err);
+                swprintf(text, 400, L"claude_provider: couldn't start the status helper as [%ls]: %ls",
+                         r.account.c_str(), StartAsErrorText(err).c_str());
             }
             // Removing the hooks only matters to someone who uses the
             // feature on that account, so its failures aren't warnings.

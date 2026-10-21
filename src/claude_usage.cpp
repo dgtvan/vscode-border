@@ -440,7 +440,7 @@ void RunHelperOnce(Worker& w) {
                       L"hub's + button to save the right one";
             r.wrongPassword = true;
         } else {
-            r.error = FormatError(L"couldn't start the usage helper as this account (error %lu)", err);
+            r.error = L"couldn't start the usage helper as this account: " + StartAsErrorText(err);
         }
         CloseHandle(ourIn);
         CloseHandle(ourOut);

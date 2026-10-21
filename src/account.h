@@ -83,6 +83,14 @@ HANDLE StartHiddenProcessAsAccount(const std::wstring& account, const std::wstri
                                    std::wstring commandLine, const std::wstring& workingDir, HANDLE stdIn,
                                    HANDLE stdOut, DWORD& error);
 
+// Why starting a process as another account failed with Win32 error `err`
+// (from OpenNewVSCodeWindowAs or StartHiddenProcessAsAccount), in plain
+// words with what to do about it where that's known -- e.g. for
+// ERROR_PASSWORD_MUST_CHANGE -- else Windows' own message, ending with
+// "(error N)". A lower-case clause (bar a leading "Windows"), to follow a
+// colon. Doesn't log, so it's safe off the main thread.
+std::wstring StartAsErrorText(DWORD err);
+
 // Command-line switch that runs the exe as a one-shot search for VS Code,
 // run as another account by OpenNewVSCodeWindowAs (see RunFindVSCode).
 extern const wchar_t* const kFindVSCodeArg;

@@ -14,6 +14,7 @@
 #include <wincred.h>
 
 #include <algorithm>
+#include <cwctype>
 #include <map>
 #include <vector>
 
@@ -434,6 +435,57 @@ static HANDLE StartAs(const std::wstring& account, const std::wstring& password,
     return pi.hProcess;
 }
 
+std::wstring StartAsErrorText(DWORD err) {
+    const wchar_t* text = nullptr;
+    switch (err) {
+        case ERROR_PASSWORD_MUST_CHANGE:
+            text = L"Windows requires this account to change its password before it can sign in -- sign in to "
+                   L"Windows as it once and change it; reusing the same password is fine";
+            break;
+        case ERROR_PASSWORD_EXPIRED:
+            text = L"this account's password has expired -- sign in to Windows as it and set a new one";
+            break;
+        case ERROR_ACCOUNT_DISABLED:
+            text = L"this account is disabled -- an administrator can enable it in Computer Management > Local "
+                   L"Users and Groups";
+            break;
+        case ERROR_ACCOUNT_LOCKED_OUT:
+            text = L"this account is locked out after too many wrong passwords -- wait for the lockout to end, or "
+                   L"have an administrator unlock it";
+            break;
+        case ERROR_ACCOUNT_EXPIRED:
+            text = L"this account has expired -- an administrator has to extend it";
+            break;
+        case ERROR_ACCOUNT_RESTRICTION:
+            text = L"Windows doesn't let this account sign in this way, e.g. because its password is blank -- give "
+                   L"it a password";
+            break;
+        case ERROR_INVALID_LOGON_HOURS:
+            text = L"this account isn't allowed to sign in at this time of day";
+            break;
+        case ERROR_LOGON_TYPE_NOT_GRANTED:
+            text = L"this account isn't allowed to sign in on this computer";
+            break;
+        case ERROR_NO_LOGON_SERVERS:
+            text = L"no domain controller could be reached to check the password";
+            break;
+    }
+    wchar_t buf[600];
+    if (text) {
+        swprintf(buf, 600, L"%ls (error %lu)", text, err);
+        return buf;
+    }
+    wchar_t* sys = nullptr;
+    DWORD n = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                             nullptr, err, 0, (LPWSTR)&sys, 0, nullptr);
+    std::wstring message = n ? std::wstring(sys, n) : L"";
+    if (sys) LocalFree(sys);
+    while (!message.empty() && (iswspace(message.back()) || message.back() == L'.')) message.pop_back();
+    if (!message.empty() && message.compare(0, 7, L"Windows") != 0) message[0] = towlower(message[0]);
+    swprintf(buf, 600, message.empty() ? L"%lserror %lu" : L"%ls (error %lu)", message.c_str(), err);
+    return buf;
+}
+
 // Searches for VS Code as `account` -- its PATH, its own per-user install,
 // a machine-wide one (see vscode_cli.h's FindInstalledVSCodeCli) -- by
 // running this exe with kFindVSCodeArg as that account, since this account
@@ -541,7 +593,7 @@ void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::w
         }
 
         wchar_t text[1024];
-        if (exe.empty()) {
+        if (exe.empty() && err == 0) {
             LogWarn(L"account: couldn't find VS Code for [%ls] -- nothing remembered, none found as that account, "
                     L"and no other account's install it can share",
                     account.c_str());
@@ -560,10 +612,12 @@ void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::w
                      L"remembers where it is.",
                      account.c_str(), exe.c_str());
         } else {
-            LogWarn(L"account: couldn't start VS Code as [%ls] (%ls), error=%lu", account.c_str(), commandLine.c_str(),
-                    err);
-            swprintf(text, 1024, L"Couldn't start VS Code as \"%ls\" (error %lu).\n\nVS Code used: %ls",
-                     account.c_str(), err, exe.c_str());
+            // With no exe, the search as that account is what couldn't start.
+            std::wstring why = StartAsErrorText(err);
+            LogWarn(L"account: couldn't start %ls as [%ls]: %ls", exe.empty() ? L"the VS Code search" : commandLine.c_str(),
+                    account.c_str(), why.c_str());
+            swprintf(text, 1024, L"Couldn't start VS Code as \"%ls\": %ls.%ls%ls", account.c_str(), why.c_str(),
+                     exe.empty() ? L"" : L"\n\nVS Code used: ", exe.c_str());
         }
         MessageBoxW(owner, text, L"VS Code Border", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
         return;
