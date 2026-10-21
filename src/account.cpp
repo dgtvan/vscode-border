@@ -519,6 +519,20 @@ static std::wstring FindVSCodeAs(const std::wstring& account, const std::wstring
     return Utf8ToWide(output);
 }
 
+// Whether a VS Code update is waiting to install for `exe`'s product (stable
+// or Insiders). The installer holds "<mutex>-updating" in this session until
+// the VS Code that downloaded it closes, and until then a new VS Code instance
+// in *any* account waits 30s and quits without a window.
+static bool VSCodeUpdatePending(const std::wstring& exe) {
+    const wchar_t* name = PathFindFileNameW(exe.c_str());
+    HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE,
+                              _wcsicmp(name, L"Code - Insiders.exe") == 0 ? L"vscodeinsiders-updating"
+                                                                         : L"vscode-updating");
+    if (!mutex) return false;
+    CloseHandle(mutex);
+    return true;
+}
+
 int RunFindVSCode() {
     std::wstring shim;
     if (!FindInstalledVSCodeCli(shim)) return 1;
@@ -564,6 +578,20 @@ void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::w
                 source = L"another account's shared install";
                 exe = shared.front();
             }
+        }
+
+        if (!exe.empty() && VSCodeUpdatePending(exe)) {
+            WipeString(password);
+            LogWarn(L"account: not opening a window as [%ls] -- a VS Code update is waiting for VS Code to close, "
+                    L"and blocks it from starting until then",
+                    account.c_str());
+            wchar_t text[1024];
+            swprintf(text, 1024,
+                     L"VS Code can't start as \"%ls\" right now: a VS Code update is waiting to install.\n\nClose "
+                     L"(or restart) your VS Code windows to let the update finish, then try again.",
+                     account.c_str());
+            MessageBoxW(owner, text, L"VS Code Border", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+            return;
         }
 
         std::wstring shim, commandLine;
