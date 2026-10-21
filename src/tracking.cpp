@@ -223,6 +223,19 @@ static std::wstring LastPathSegment(const std::wstring& path) {
     return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
+// True if `cwd`, or any folder above it, is named `name` -- the name-only
+// stand-in for PathIsWithinFolder when there's no path to compare against.
+static bool PathHasSegmentNamed(std::wstring cwd, const std::wstring& name) {
+    while (!name.empty() && !cwd.empty()) {
+        while (!cwd.empty() && (cwd.back() == L'\\' || cwd.back() == L'/')) cwd.pop_back();
+        if (_wcsicmp(LastPathSegment(cwd).c_str(), name.c_str()) == 0) return true;
+        size_t slash = cwd.find_last_of(L"\\/");
+        if (slash == std::wstring::npos) break;
+        cwd.erase(slash);
+    }
+    return false;
+}
+
 // Aggregates every AI session (see ai_provider.h) that belongs to this
 // window's folder into one status, attention > working > waiting > none.
 // Prefers a real path match via worktree_resolver's ResolveFolderPath
@@ -239,37 +252,45 @@ static std::wstring LastPathSegment(const std::wstring& path) {
 // under the home directory and belong to their own windows. Every no-folder
 // window matches the same sessions -- nothing on the session side says
 // which of several bare windows it runs in.
+//
+// Only sessions of the window's own account count (see account.h), and the
+// home directory is that account's. Another account's folder paths are in
+// its own workspaceStorage, which this account can't read --
+// ResolveFolderPath would answer from this account's -- so its windows
+// match by name alone: a session whose cwd is in a folder named like the
+// window's.
 static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<AiSessionStatus>& sessions) {
     if (sessions.empty()) return ClaudeStatus::None;
 
     std::wstring folderPath;
     bool noFolderWindow = !tw.hasFolderOrRepoInTitle;
-    if (noFolderWindow) {
-        wchar_t buf[MAX_PATH];
-        DWORD n = GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
-        if (n == 0 || n >= MAX_PATH) return ClaudeStatus::None;
-        folderPath = buf;
-    } else {
+    if (!noFolderWindow) {
         if (tw.folderName.empty()) return ClaudeStatus::None;
-        folderPath = ResolveFolderPath(tw.folderName, tw.repoName, tw.wslDistro);
+        if (tw.account.empty()) folderPath = ResolveFolderPath(tw.folderName, tw.repoName, tw.wslDistro);
     }
     while (!folderPath.empty() && (folderPath.back() == L'\\' || folderPath.back() == L'/')) folderPath.pop_back();
-    LogDiag(L"ai_status: matching window folderName=[%ls] resolvedFolderPath=[%ls]%ls against %zu session(s)",
-            tw.folderName.c_str(), folderPath.c_str(), noFolderWindow ? L" (no folder: home dir)" : L"",
-            sessions.size());
+    LogDiag(L"ai_status: matching window folderName=[%ls] account=[%ls] resolvedFolderPath=[%ls]%ls against %zu "
+            L"session(s)",
+            tw.folderName.c_str(), tw.account.c_str(), folderPath.c_str(),
+            noFolderWindow ? L" (no folder: home dir)" : L"", sessions.size());
     bool anyAttention = false, anyWorking = false, anyWaiting = false;
     for (const AiSessionStatus& s : sessions) {
         bool matches;
-        if (noFolderWindow) {
-            std::wstring cwd = s.cwd;
+        if (CompareStringOrdinal(s.account.c_str(), -1, tw.account.c_str(), -1, TRUE) != CSTR_EQUAL) {
+            matches = false;
+        } else if (noFolderWindow) {
+            std::wstring cwd = s.cwd, home = s.home;
             while (!cwd.empty() && (cwd.back() == L'\\' || cwd.back() == L'/')) cwd.pop_back();
-            matches = !cwd.empty() && _wcsicmp(cwd.c_str(), folderPath.c_str()) == 0;
+            while (!home.empty() && (home.back() == L'\\' || home.back() == L'/')) home.pop_back();
+            matches = !cwd.empty() && _wcsicmp(cwd.c_str(), home.c_str()) == 0;
+        } else if (!tw.account.empty()) {
+            matches = PathHasSegmentNamed(s.cwd, tw.folderName);
         } else {
             matches = !folderPath.empty() ? PathIsWithinFolder(s.cwd, folderPath)
                                           : _wcsicmp(LastPathSegment(s.cwd).c_str(), tw.folderName.c_str()) == 0;
         }
-        LogDiag(L"ai_status:   session cwd=[%ls] status=[%ls] -> %ls", s.cwd.c_str(), s.status.c_str(),
-                matches ? L"MATCH" : L"no match");
+        LogDiag(L"ai_status:   session account=[%ls] cwd=[%ls] status=[%ls] -> %ls", s.account.c_str(),
+                s.cwd.c_str(), s.status.c_str(), matches ? L"MATCH" : L"no match");
         if (!matches) continue;
         if (s.status == L"attention") anyAttention = true;
         else if (s.status == L"working") anyWorking = true;

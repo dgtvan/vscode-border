@@ -42,6 +42,12 @@ void LogWarn(const wchar_t* fmt, ...);
 // badge in vscode_border.cpp; restarting the app is what clears it.
 bool HasWarnings();
 
+// Sends every line Log, LogWarn and LogDiag would write (without its
+// timestamp) to `sink` instead of the log file, for a helper process running
+// as another account: its log files would be the wrong ones, so it hands its
+// lines to the app to log (see claude_provider.h). LogFast is unaffected.
+void SetLogSink(void (*sink)(bool warning, const std::wstring& line));
+
 // Full path to the on-disk log file currently being written to. Wired to
 // the tray menu's "Open Log Folder".
 std::wstring GetLogFilePath();

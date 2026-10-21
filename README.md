@@ -422,6 +422,27 @@ they all show the same status, because nothing in a session says which of them
 it runs in. Stale/abandoned status files are cleaned
 up automatically -- see "Known limitations" below for exactly how.
 
+VS Code windows running as another Windows account (a user profile, see
+`config.ini`'s `user_profile_<N>_account`) get the indicator too. This
+account can't read or write that account's profile, so for each profile a
+hidden helper -- this exe, started as that account with the password saved
+in Credential Manager, the same way the usage rings read its usage -- does
+that account's side: it copies the hook script to the account's own
+`%LOCALAPPDATA%\vscode-border\`, registers it in the account's
+`%USERPROFILE%\.claude\settings.json`, and reads the status files the hooks
+write next to it (its hook log is in `logs\` there), with every correction
+described above, passing the result to the app. It needs that saved
+password: until one is saved (open a VS Code window as the account from the
+hub's "+" button and tick Remember) the account's windows show no
+indicator, and the log says why. A session only lights up a window of its
+own account. Another account's folder paths can't be looked up from here,
+so its windows match by name: a session counts for a window when its
+working folder, or a folder above it, has the window's folder name.
+Turning the indicator off removes the hooks from every profile's account
+too, and so does removing a profile from `config.ini` while the app runs
+(one removed while the app was closed keeps them, harmlessly: they only
+write files in that account's own folder).
+
 ### Claude usage rings
 
 At the right end of the hub's band, above the system tray, each account

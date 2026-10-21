@@ -1,5 +1,6 @@
 #include "claude_provider.h"
 
+#include "account.h"
 #include "config.h"
 #include "file_util.h"
 #include "json_scan.h"
@@ -11,7 +12,9 @@
 #include <algorithm>
 #include <cwctype>
 #include <map>
+#include <memory>
 #include <set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -29,12 +32,22 @@ std::wstring GetSettingsPath() {
     return std::wstring(buf) + L"\\.claude\\settings.json";
 }
 
+// Where the hook script runs from, and so where its status files, its log
+// and the install manifest live: next to the exe for this app's own
+// account; the account's own folder in a status helper (see
+// RunClaudeStatusHelper), which sets it.
+std::wstring g_hookDir;
+
+std::wstring HookDir() {
+    return g_hookDir.empty() ? GetExeDir() : g_hookDir;
+}
+
 std::wstring GetManifestPath() {
-    return GetExeDir() + L"\\ai_hooks_installed.ini";
+    return HookDir() + L"\\ai_hooks_installed.ini";
 }
 
 std::wstring GetStatusDir() {
-    return GetExeDir() + L"\\claude_status";
+    return HookDir() + L"\\claude_status";
 }
 
 // The exact command string this app registers for every event -- the
@@ -43,12 +56,13 @@ std::wstring GetStatusDir() {
 // cosmetic: Claude Code runs hook commands through Git Bash when it's
 // installed, which silently eats unquoted backslashes (see README.md), so
 // a backslash path here would "install" successfully but never actually
-// fire.
+// fire. Quoted only when it has a space (another account's folder can), so
+// an existing install's command stays the same string.
 std::string BuildExpectedCommand() {
-    std::wstring exeDir = GetExeDir();
-    std::replace(exeDir.begin(), exeDir.end(), L'\\', L'/');
-    std::wstring full = L"powershell -NoProfile -File " + exeDir + L"/claude_status_hook.ps1";
-    return WideToUtf8(full);
+    std::wstring script = HookDir() + L"/claude_status_hook.ps1";
+    std::replace(script.begin(), script.end(), L'\\', L'/');
+    if (script.find(L' ') != std::wstring::npos) script = L"\"" + script + L"\"";
+    return WideToUtf8(L"powershell -NoProfile -File " + script);
 }
 
 // Command strings this app has installed in the past, one escaped line
@@ -93,15 +107,26 @@ std::string ExtractElementCommand(const std::string& content, const JsonScan::Sp
     JsonScan::KeyEntry cmdKey = JsonScan::FindKeyInObject(content, firstObj.start, firstObj.end, "command");
     if (!cmdKey.found || cmdKey.valueStart >= content.size() || content[cmdKey.valueStart] != '"') return "";
     std::string raw = content.substr(cmdKey.valueStart, cmdKey.valueEnd - cmdKey.valueStart);
-    // Our own command strings are plain ASCII (a forward-slash path + fixed
-    // flags) with no characters that need JSON escaping, so a straight
-    // substring between the quotes is enough -- this never has to decode
-    // an arbitrary JSON string, only recognize its own previously-written one.
-    return raw.size() >= 2 ? raw.substr(1, raw.size() - 2) : "";
+    // Our own command strings are a forward-slash path + fixed flags, whose
+    // only character that needs JSON escaping is the quote around a path
+    // with a space, so undoing \" (and \\) is enough -- this never has to
+    // decode an arbitrary JSON string, only recognize its own
+    // previously-written one.
+    std::string cmd;
+    for (size_t i = 1; i + 1 < raw.size(); i++) {
+        if (raw[i] == '\\' && i + 2 < raw.size() && (raw[i + 1] == '"' || raw[i + 1] == '\\')) i++;
+        cmd += raw[i];
+    }
+    return cmd;
 }
 
 std::string BuildElementJson(const std::string& command) {
-    return "{\"matcher\": \"\", \"hooks\": [{\"type\": \"command\", \"command\": \"" + command + "\"}]}";
+    std::string escaped;
+    for (char c : command) {
+        if (c == '"' || c == '\\') escaped += '\\';
+        escaped += c;
+    }
+    return "{\"matcher\": \"\", \"hooks\": [{\"type\": \"command\", \"command\": \"" + escaped + "\"}]}";
 }
 
 // Confirms `pid` both exists right now and is currently a claude.exe
@@ -443,7 +468,7 @@ HooksLocation LocateHooks(std::string& content, const std::wstring& settingsPath
 
 } // namespace
 
-void ClaudeProvider::SyncInstallation(bool enabled) {
+static void SyncLocalInstallation(bool enabled) {
     std::wstring settingsPath = GetSettingsPath();
     if (settingsPath.empty()) {
         LogWarn(L"claude_provider: %%USERPROFILE%% not available, skipping hook sync");
@@ -554,7 +579,7 @@ void ClaudeProvider::SyncInstallation(bool enabled) {
     }
 }
 
-std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
+static std::vector<AiSessionStatus> LoadLocalStatuses() {
     std::vector<AiSessionStatus> result;
 
     std::wstring dir = GetStatusDir();
@@ -568,6 +593,8 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
     // rather than mutating the directory mid-enumeration.
     static std::set<std::wstring> warnedMissingPid;
     std::vector<std::wstring> toDelete;
+    wchar_t home[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
 
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
@@ -576,6 +603,7 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
 
         std::string content = ReadFileBytes(path);
         AiSessionStatus status;
+        status.home = home;
         DWORD pid = 0;
         std::wstring recordedTranscript, pendingTranscript;
         std::string pendingTool, backgroundTasks;
@@ -707,4 +735,364 @@ std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
     }
 
     return result;
+}
+
+const wchar_t* const kClaudeStatusHelperArg = L"--claude-status-helper";
+
+namespace {
+
+// How often a status helper re-reads its account's sessions. Every read
+// re-runs the same transcript checks the app runs for its own account on
+// each hub sync.
+const DWORD kHelperPollMs = 1000;
+
+// How long before a helper that couldn't start, or exited, is started again.
+const DWORD kHelperRetryMs = 30 * 1000;
+
+// Another account's sessions, reported by a status helper running as it
+// (see RunClaudeStatusHelper). Shared between its worker thread and the
+// main thread, under g_remoteLock.
+struct RemoteAccount {
+    std::wstring account;
+    bool install = true; // false: a one-shot helper that only removes the hooks
+    bool verbose = false;
+    HANDLE stopEvent = nullptr;
+    HANDLE child = nullptr; // the running helper, for StopRemote to end
+    bool finished = false;  // the worker has returned
+
+    std::vector<AiSessionStatus> sessions; // the helper's latest report
+    // Lines for the main thread to log (Log isn't safe off it): the helper's
+    // own, and the worker's. true = a warning.
+    std::vector<std::pair<bool, std::wstring>> logLines;
+};
+
+SRWLOCK g_remoteLock = SRWLOCK_INIT;
+std::vector<std::shared_ptr<RemoteAccount>> g_remotes; // main thread only
+
+void QueueRemoteLog(RemoteAccount& r, bool warning, const std::wstring& line) {
+    AcquireSRWLockExclusive(&g_remoteLock);
+    r.logLines.emplace_back(warning, line);
+    ReleaseSRWLockExclusive(&g_remoteLock);
+}
+
+// Runs one helper as r.account until it exits. Returns the Win32 error when
+// one couldn't be started, else 0.
+DWORD RunStatusHelperOnce(RemoteAccount& r) {
+    SECURITY_ATTRIBUTES inherit = {sizeof(inherit), nullptr, TRUE};
+    HANDLE childIn = nullptr, ourIn = nullptr, ourOut = nullptr, childOut = nullptr;
+    if (!CreatePipe(&childIn, &ourIn, &inherit, 0) || !CreatePipe(&ourOut, &childOut, &inherit, 0)) {
+        DWORD err = GetLastError();
+        if (childIn) CloseHandle(childIn);
+        if (ourIn) CloseHandle(ourIn);
+        return err;
+    }
+    // Only the child's ends may be inherited: a copy of ours in the child
+    // would keep its stdin from ever reaching end-of-file.
+    SetHandleInformation(ourIn, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(ourOut, HANDLE_FLAG_INHERIT, 0);
+
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring commandLine = L"\"" + std::wstring(exe) + L"\" " + kClaudeStatusHelperArg +
+                               (r.install ? L" install" : L" uninstall") + (r.verbose ? L" verbose" : L"");
+    DWORD err = 0;
+    HANDLE child = StartHiddenProcessAsAccount(r.account, exe, commandLine, GetExeDir(), childIn, childOut, err);
+    CloseHandle(childIn);
+    CloseHandle(childOut);
+    if (!child) {
+        CloseHandle(ourIn);
+        CloseHandle(ourOut);
+        return err ? err : ERROR_GEN_FAILURE;
+    }
+    AcquireSRWLockExclusive(&g_remoteLock);
+    r.child = child;
+    ReleaseSRWLockExclusive(&g_remoteLock);
+    if (WaitForSingleObject(r.stopEvent, 0) == WAIT_OBJECT_0) TerminateProcess(child, 0);
+
+    std::wstring home;
+    std::vector<AiSessionStatus> pending;
+    std::string buffered;
+    char buf[4096];
+    DWORD read = 0;
+    while (ReadFile(ourOut, buf, sizeof(buf), &read, nullptr) && read > 0) {
+        buffered.append(buf, read);
+        size_t eol;
+        while ((eol = buffered.find('\n')) != std::string::npos) {
+            std::wstring line = Utf8ToWide(buffered.substr(0, eol));
+            buffered.erase(0, eol + 1);
+            if (!line.empty() && line.back() == L'\r') line.pop_back();
+            if (line.rfind(L"log ", 0) == 0 && line.size() >= 6) {
+                QueueRemoteLog(r, line[4] == L'W', line.substr(6));
+            } else if (line.rfind(L"home ", 0) == 0) {
+                home = line.substr(5);
+            } else if (line == L"begin") {
+                pending.clear();
+            } else if (line.rfind(L"s ", 0) == 0) {
+                size_t tab = line.find(L'\t');
+                if (tab == std::wstring::npos) continue;
+                AiSessionStatus s;
+                s.status = line.substr(2, tab - 2);
+                s.cwd = line.substr(tab + 1);
+                s.account = r.account;
+                s.home = home;
+                pending.push_back(s);
+            } else if (line == L"end") {
+                AcquireSRWLockExclusive(&g_remoteLock);
+                r.sessions = pending;
+                ReleaseSRWLockExclusive(&g_remoteLock);
+            }
+        }
+    }
+
+    AcquireSRWLockExclusive(&g_remoteLock);
+    r.child = nullptr;
+    r.sessions.clear();
+    ReleaseSRWLockExclusive(&g_remoteLock);
+    WaitForSingleObject(child, 2000);
+    DWORD code = 0;
+    GetExitCodeProcess(child, &code);
+    if (WaitForSingleObject(r.stopEvent, 0) != WAIT_OBJECT_0 && (r.install || code != 0)) {
+        wchar_t text[200];
+        swprintf(text, 200, L"claude_provider: the status helper running as [%ls] exited (code %lu)",
+                 r.account.c_str(), code);
+        QueueRemoteLog(r, r.install, text);
+    }
+    CloseHandle(child);
+    CloseHandle(ourIn);
+    CloseHandle(ourOut);
+    return 0;
+}
+
+DWORD WINAPI RemoteWorkerThread(LPVOID param) {
+    std::shared_ptr<RemoteAccount> owned = *(std::shared_ptr<RemoteAccount>*)param;
+    delete (std::shared_ptr<RemoteAccount>*)param;
+    RemoteAccount& r = *owned;
+    DWORD lastErr = 0;
+    do {
+        DWORD err = RunStatusHelperOnce(r);
+        if (err != 0 && err != lastErr) {
+            wchar_t text[400];
+            if (err == ERROR_NOT_FOUND) {
+                swprintf(text, 400,
+                         L"claude_provider: no password saved for [%ls], so %ls -- open a VS Code window as it "
+                         L"from the hub's + button and tick Remember",
+                         r.account.c_str(),
+                         r.install ? L"its windows show no AI status" : L"its Claude Code hooks can't be removed");
+            } else if (err == ERROR_LOGON_FAILURE) {
+                swprintf(text, 400,
+                         L"claude_provider: the saved password for [%ls] was rejected, so its windows show no AI "
+                         L"status -- not trying it again until Reload Config",
+                         r.account.c_str());
+            } else {
+                swprintf(text, 400, L"claude_provider: couldn't start the status helper as [%ls] (error %lu)",
+                         r.account.c_str(), err);
+            }
+            // Removing the hooks only matters to someone who uses the
+            // feature on that account, so its failures aren't warnings.
+            QueueRemoteLog(r, r.install, text);
+        }
+        lastErr = err;
+        // Never retry a password that was rejected: that could lock the
+        // account out.
+        if (!r.install || err == ERROR_LOGON_FAILURE) break;
+    } while (WaitForSingleObject(r.stopEvent, kHelperRetryMs) != WAIT_OBJECT_0);
+    AcquireSRWLockExclusive(&g_remoteLock);
+    r.finished = true;
+    ReleaseSRWLockExclusive(&g_remoteLock);
+    return 0;
+}
+
+void StartRemote(const std::wstring& account, bool install) {
+    auto r = std::make_shared<RemoteAccount>();
+    r->account = account;
+    r->install = install;
+    r->verbose = g_config.verboseLogging;
+    r->stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE thread = CreateThread(nullptr, 0, RemoteWorkerThread, new std::shared_ptr<RemoteAccount>(r), 0, nullptr);
+    if (!thread) {
+        LogWarn(L"claude_provider: couldn't start the status worker for [%ls] (error %lu)", account.c_str(),
+                GetLastError());
+        return;
+    }
+    CloseHandle(thread); // it holds its own reference to r
+    g_remotes.push_back(r);
+}
+
+void StopRemote(RemoteAccount& r) {
+    SetEvent(r.stopEvent);
+    AcquireSRWLockExclusive(&g_remoteLock);
+    if (r.child) TerminateProcess(r.child, 0);
+    r.sessions.clear();
+    ReleaseSRWLockExclusive(&g_remoteLock);
+}
+
+void FlushRemoteLogs() {
+    std::vector<std::pair<bool, std::wstring>> lines;
+    AcquireSRWLockExclusive(&g_remoteLock);
+    for (const std::shared_ptr<RemoteAccount>& r : g_remotes) {
+        lines.insert(lines.end(), r->logLines.begin(), r->logLines.end());
+        r->logLines.clear();
+    }
+    ReleaseSRWLockExclusive(&g_remoteLock);
+    for (const auto& l : lines) (l.first ? LogWarn : Log)(L"%ls", l.second.c_str());
+}
+
+bool SameAccount(const std::wstring& a, const std::wstring& b) {
+    return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+
+// Matches the status helpers to `enabled` and the user profiles: one per
+// profile while enabled, which installs the hooks for its account and
+// reports its sessions; and a one-shot helper removing the hooks from every
+// profile while disabled, and from one dropped from the config.
+void SyncRemoteInstallations(bool enabled) {
+    FlushRemoteLogs();
+    std::vector<std::wstring> profiles = ConfiguredUserProfiles();
+    auto isProfile = [&](const std::wstring& account) {
+        return std::any_of(profiles.begin(), profiles.end(),
+                           [&](const std::wstring& p) { return SameAccount(p, account); });
+    };
+
+    std::vector<std::wstring> uninstall = enabled ? std::vector<std::wstring>() : profiles;
+    std::vector<std::shared_ptr<RemoteAccount>> kept;
+    for (const std::shared_ptr<RemoteAccount>& r : g_remotes) {
+        AcquireSRWLockShared(&g_remoteLock);
+        bool finished = r->finished;
+        ReleaseSRWLockShared(&g_remoteLock);
+        // A one-shot uninstall ends on its own, kept until then for its
+        // lines to be logged.
+        bool wanted = r->install ? enabled && isProfile(r->account) && r->verbose == g_config.verboseLogging
+                                 : !finished;
+        if (wanted) {
+            kept.push_back(r);
+            continue;
+        }
+        if (!r->install) continue;
+        StopRemote(*r);
+        if (!isProfile(r->account)) uninstall.push_back(r->account);
+    }
+    FlushRemoteLogs();
+    g_remotes = kept;
+
+    for (const std::wstring& account : uninstall) StartRemote(account, false);
+    if (!enabled) return;
+    for (const std::wstring& p : profiles) {
+        bool running = std::any_of(kept.begin(), kept.end(), [&](const std::shared_ptr<RemoteAccount>& r) {
+            return r->install && SameAccount(r->account, p);
+        });
+        if (!running) StartRemote(p, true);
+    }
+}
+
+// The status helper's stdout protocol, one UTF-8 line each:
+//   log W|I <text>    a line for the app's log (W: a warning)
+//   home <path>       the account's home directory, once, before any report
+//   begin             a report of every session follows...
+//   s <status>\t<cwd> ...one per session...
+//   end               ...and it's complete
+// A report is sent at start and whenever it changes.
+HANDLE g_helperOut = nullptr;
+
+bool WriteHelperLine(const std::wstring& line) {
+    std::string bytes = WideToUtf8(line);
+    for (char& c : bytes) {
+        if (c == '\r' || c == '\n') c = ' ';
+    }
+    bytes += '\n';
+    DWORD written = 0;
+    return WriteFile(g_helperOut, bytes.data(), (DWORD)bytes.size(), &written, nullptr) != 0;
+}
+
+void HelperLogSink(bool warning, const std::wstring& line) {
+    WriteHelperLine(std::wstring(warning ? L"log W " : L"log I ") + L"[" + CurrentAccountName() + L"] " + line);
+}
+
+struct StdinWatch {
+    HANDLE in, closed;
+};
+
+// Blocks reading stdin, which ends when the app closes its end or exits.
+DWORD WINAPI StdinWatchThread(LPVOID param) {
+    StdinWatch* watch = (StdinWatch*)param;
+    char buf[64];
+    DWORD read = 0;
+    while (ReadFile(watch->in, buf, sizeof(buf), &read, nullptr) && read > 0) {
+    }
+    SetEvent(watch->closed);
+    return 0;
+}
+
+// Points HookDir at a folder of the account this runs as, and copies the
+// hook script there: that account can't be trusted to write this app's
+// folder, and its sessions must not mix with this account's. The script's
+// status files and log go next to it, so they land there too.
+bool PrepareOwnHookDir() {
+    wchar_t localAppData[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        LogWarn(L"claude_provider: %%LOCALAPPDATA%% not available, so there's nowhere to put the hook script");
+        return false;
+    }
+    std::wstring dir = std::wstring(localAppData) + L"\\vscode-border";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    std::wstring source = GetExeDir() + L"\\claude_status_hook.ps1", target = dir + L"\\claude_status_hook.ps1";
+    std::string script = ReadFileBytes(source);
+    if (script.empty()) {
+        LogWarn(L"claude_provider: can't read %ls", source.c_str());
+        return false;
+    }
+    if (ReadFileBytes(target) != script && !WriteFileBytes(target, script)) {
+        LogWarn(L"claude_provider: can't copy the hook script to %ls", target.c_str());
+        return false;
+    }
+    g_hookDir = dir;
+    return true;
+}
+
+} // namespace
+
+void ClaudeProvider::SyncInstallation(bool enabled) {
+    SyncLocalInstallation(enabled);
+    SyncRemoteInstallations(enabled);
+}
+
+std::vector<AiSessionStatus> ClaudeProvider::LoadStatuses() {
+    FlushRemoteLogs();
+    std::vector<AiSessionStatus> result = LoadLocalStatuses();
+    AcquireSRWLockShared(&g_remoteLock);
+    for (const std::shared_ptr<RemoteAccount>& r : g_remotes) {
+        result.insert(result.end(), r->sessions.begin(), r->sessions.end());
+    }
+    ReleaseSRWLockShared(&g_remoteLock);
+    return result;
+}
+
+int RunClaudeStatusHelper(bool install, bool verbose) {
+    g_helperOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    g_config.verboseLogging = verbose;
+    SetLogSink(HelperLogSink);
+    if (!PrepareOwnHookDir()) return 1;
+    SyncLocalInstallation(install);
+    if (!install) return 0;
+
+    wchar_t home[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
+    if (!WriteHelperLine(std::wstring(L"home ") + home)) return 1;
+
+    HANDLE stdinClosed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    CreateThread(nullptr, 0, StdinWatchThread, new StdinWatch{GetStdHandle(STD_INPUT_HANDLE), stdinClosed}, 0,
+                 nullptr);
+    std::vector<std::wstring> lastReport;
+    bool first = true;
+    do {
+        std::vector<std::wstring> report;
+        for (const AiSessionStatus& s : LoadLocalStatuses()) report.push_back(L"s " + s.status + L"\t" + s.cwd);
+        if (!first && report == lastReport) continue;
+        first = false;
+        lastReport = report;
+        bool ok = WriteHelperLine(L"begin");
+        for (const std::wstring& line : report) ok = ok && WriteHelperLine(line);
+        if (!ok || !WriteHelperLine(L"end")) return 1;
+    } while (WaitForSingleObject(stdinClosed, kHelperPollMs) != WAIT_OBJECT_0);
+    return 0;
 }

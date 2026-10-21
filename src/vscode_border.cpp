@@ -43,6 +43,7 @@
 
 #include "account.h"
 #include "ai_provider.h"
+#include "claude_provider.h"
 #include "claude_usage.h"
 #include "config.h"
 #include "diagnostic_snapshot.h"
@@ -340,6 +341,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         int minutes = argc >= 3 ? _wtoi(argv[2]) : 5;
         LocalFree(argv);
         return RunClaudeUsageHelper(minutes);
+    }
+    if (argv && argc >= 2 && wcscmp(argv[1], kClaudeStatusHelperArg) == 0) {
+        bool install = argc >= 3 && wcscmp(argv[2], L"install") == 0;
+        bool verbose = argc >= 4 && wcscmp(argv[3], L"verbose") == 0;
+        LocalFree(argv);
+        return RunClaudeStatusHelper(install, verbose);
     }
     if (argv && argc >= 2 && wcscmp(argv[1], kFindVSCodeArg) == 0) {
         LocalFree(argv);

@@ -10,6 +10,9 @@
 struct AiSessionStatus {
     std::wstring status; // "working" | "attention" | "waiting"
     std::wstring cwd;
+    std::wstring account; // Windows account the session runs as, empty for this app's own (see account.h)
+    std::wstring home;    // that account's home directory, where a session started in a window with no
+                          // folder open runs (see tracking.cpp's ComputeAiStatus)
 };
 
 // One AI coding assistant integration (Claude Code today, Copilot planned
