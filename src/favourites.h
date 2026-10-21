@@ -6,7 +6,7 @@
 #include <vector>
 
 // One user-saved project/folder, offered from the project list HUD's "+"
-// new-window button's right-click menu -- clicking it opens `path` in a
+// new-window button's menu -- clicking it opens `path` in a
 // brand-new VS Code window (see vscode_cli.h's OpenNewVSCodeWindow).
 struct FavouriteProject {
     std::wstring label; // display text shown in the favourites menu -- the item's label (alias, if any)
@@ -45,7 +45,7 @@ void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label);
 bool IsFavouriteOpen(const std::wstring& path, const std::vector<std::wstring>& openFolderPaths);
 
 // Opens every saved favourite that isn't already open, each in its own new
-// VS Code window. Called from the hub "+" button's right-click Favourites >
+// VS Code window. Called from the hub "+" button's Favourites >
 // Open All (never automatically at startup). `runningWindow` (null if
 // no VS Code window is running) picks which VS Code install's CLI shim is used (see vscode_cli.h's
 // ResolveVSCodeCliShim); logs a warning and no-ops if no shim can be found.

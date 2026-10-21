@@ -244,9 +244,11 @@ window switches it over to the folder's own alias, if any.
 
 ### Project list HUD favourites
 
-The fixed "+" square at the end of the project list HUD opens a brand-new,
-empty VS Code window on a plain click. Right-clicking it instead opens a
-menu with a **Favourites** submenu: **Open All** first (opens every
+Clicking the fixed "+" square at the end of the project list HUD opens a
+menu. **Start VS Code** opens a brand-new, empty VS Code window -- with
+other accounts' user profiles configured it's a submenu of which account to
+open it as (see the `user_profile_*` settings in `config.ini`). Below it is a
+**Favourites** submenu: **Open All** first (opens every
 favourite not already open), then your saved favourite projects/folders,
 one submenu per favourite (a WSL folder's marked with the Tux icon) -- hover a
 favourite's name to expand it to **Open in New Window** (bolded as the

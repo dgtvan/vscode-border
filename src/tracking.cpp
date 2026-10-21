@@ -91,7 +91,7 @@ struct TrackedWindow {
                              // ApplyManualOrder). NOT a reliable "when was this actually opened" signal --
                              // e.g. multiple VS Code windows commonly share one OS process, so process
                              // creation time can't tell them apart either; see project_list_hud.cpp's
-                             // ShowNewWindowButtonContextMenu for how the favourites menu instead derives
+                             // ShowNewWindowButtonMenu for how the favourites menu instead derives
                              // open order from each entry's live position in the HUD.
     ULONGLONG loadingEpisodeStartTick = 0; // GetTickCount64() when the current loading episode began --
                                              // see kLoadingGraceMs / IsWindowLoading

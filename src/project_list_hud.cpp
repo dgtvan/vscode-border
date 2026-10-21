@@ -832,7 +832,7 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     // the alias group. Once a folder IS already a favourite, the favourites
     // item toggles to "Remove from Favourites" instead -- same removal is
     // also still offered from the "+" button's own menu (see
-    // ShowNewWindowButtonContextMenu), for a favourite that isn't currently
+    // ShowNewWindowButtonMenu), for a favourite that isn't currently
     // open as a hub item.
     // While loading (see ProjectListHudEntry::loading), this window's
     // path/alias may not be known yet, or may still change -- an alias set
@@ -915,7 +915,13 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     }
 }
 
-// Right-click on the fixed "+" new-window button: a "Favourites" submenu
+// Click on the fixed "+" new-window button. First "Start VS Code": with
+// other accounts' user profiles configured (see account.h) a submenu of
+// which account to open the new window as -- this app's own (the default,
+// bolded, with its icon if user_profile_1_icon is set), then the other
+// profiles in slot order, each with its icon; without any it's a plain item
+// opening the window as this account. (Forgetting a profile's saved
+// password is on the tray menu.) Then a "Favourites" submenu
 // holding "Open All" (every favourite not already open -- see
 // OpenAllFavourites for why open ones are skipped), then the saved favourite
 // projects (see favourites.h), each as its own submenu (a WSL folder's
@@ -930,8 +936,9 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // with this one. This is the only way to open (or remove) a favourite that
 // isn't currently open as a hub item -- ShowItemContextMenu's own "Remove
 // from Favourites" only reaches a favourite while it's a live entry.
-static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
+static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
     std::vector<FavouriteProject> favourites = LoadFavourites();
+    const std::vector<std::wstring> profiles = ConfiguredUserProfiles();
 
     // Reorder currently-open favourites to match their live position in the
     // HUD itself (state->entries -- already window-layout- or, in manual-
@@ -962,8 +969,34 @@ static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state,
     });
 
     // Command ids: Open All = 1; per favourite i, open = 2 + i*2, remove =
-    // 3 + i*2 -- decoded back on return below.
+    // 3 + i*2; this account = kThisAccountId, profile i = kThisAccountId +
+    // 1 + i, well above any favourite's -- decoded back on return below.
     const UINT kOpenAllId = 1;
+    const UINT kThisAccountId = 0x8000;
+    HMENU menu = CreatePopupMenu();
+    if (profiles.empty()) {
+        AppendMenuW(menu, MF_STRING, kThisAccountId, L"Start VS Code");
+    } else {
+        HMENU startMenu = CreatePopupMenu();
+        AppendMenuW(startMenu, MF_STRING, kThisAccountId, AccountMenuText(CurrentAccountName()).c_str());
+        SetMenuDefaultItem(startMenu, kThisAccountId, FALSE);
+        std::wstring ownIcon = IconAccountFor(L"");
+        if (!ownIcon.empty()) {
+            MENUITEMINFOW mii = {sizeof(mii)};
+            mii.fMask = MIIM_BITMAP;
+            mii.hbmpItem = GetAccountIconMenuBitmap(ownIcon);
+            if (mii.hbmpItem) SetMenuItemInfoW(startMenu, 0, TRUE, &mii);
+        }
+        for (size_t i = 0; i < profiles.size(); i++) {
+            AppendMenuW(startMenu, MF_STRING, kThisAccountId + 1 + (UINT)i, AccountMenuText(profiles[i]).c_str());
+            MENUITEMINFOW mii = {sizeof(mii)};
+            mii.fMask = MIIM_BITMAP;
+            mii.hbmpItem = GetAccountIconMenuBitmap(profiles[i]);
+            if (mii.hbmpItem) SetMenuItemInfoW(startMenu, GetMenuItemCount(startMenu) - 1, TRUE, &mii);
+        }
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)startMenu, L"Start VS Code");
+    }
+
     HMENU favMenu = CreatePopupMenu();
     if (favourites.empty()) {
         AppendMenuW(favMenu, MF_STRING | MF_GRAYED, 0, L"(No Favourites)");
@@ -988,16 +1021,24 @@ static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state,
             }
         }
     }
-    HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)favMenu, L"Favourites");
 
-    RequestForeground(hud, FocusTargetKind::OwnUi, L"favourites-context-menu");
+    RequestForeground(hud, FocusTargetKind::OwnUi, L"new-window-button-menu");
     state->contextMenuOpen = true; // see UpdateProjectListHud's guard
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
     state->contextMenuOpen = false;
-    DestroyMenu(menu); // recursively destroys the Favourites and per-favourite submenus too
+    DestroyMenu(menu); // recursively destroys the Start VS Code, Favourites and per-favourite submenus too
 
     if (cmd <= 0) return;
+    if (cmd == (int)kThisAccountId) {
+        OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button");
+        return;
+    }
+    if (cmd > (int)kThisAccountId) {
+        size_t p = (size_t)(cmd - (int)kThisAccountId - 1);
+        if (p < profiles.size()) OpenNewVSCodeWindowAs(hud, profiles[p], L"", L"hud-new-window-profile");
+        return;
+    }
     if (cmd == (int)kOpenAllId) {
         // Open-ness comes from the HUD's own entries (see
         // ProjectListHudEntry::path for which windows have no path).
@@ -1013,50 +1054,6 @@ static void ShowNewWindowButtonContextMenu(HWND hud, ProjectListHudState* state,
     if (i >= favourites.size()) return;
     if (isOpen) OpenNewVSCodeWindow(AnyTrackedWindow(state), favourites[i].path, L"hud-favourite-open");
     else RemoveFavourite(favourites[i].path);
-}
-
-// Plain click on the "+" new-window button with other accounts' user profiles
-// configured (see account.h): which account to open the new VS Code window
-// as -- this app's own (the default, bolded, with its icon if
-// user_profile_1_icon is set), then the other profiles in slot order, each
-// with its icon. Without any profiles the click just opens the
-// window, no menu. (Forgetting a profile's saved password is on the tray
-// menu.)
-static void ShowNewWindowProfileMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
-    const std::vector<std::wstring> profiles = ConfiguredUserProfiles();
-    // Command ids: this account = 1, profile i = 2 + i.
-    const UINT kThisAccountId = 1;
-    HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, kThisAccountId, AccountMenuText(CurrentAccountName()).c_str());
-    SetMenuDefaultItem(menu, kThisAccountId, FALSE);
-    std::wstring ownIcon = IconAccountFor(L"");
-    if (!ownIcon.empty()) {
-        MENUITEMINFOW mii = {sizeof(mii)};
-        mii.fMask = MIIM_BITMAP;
-        mii.hbmpItem = GetAccountIconMenuBitmap(ownIcon);
-        if (mii.hbmpItem) SetMenuItemInfoW(menu, 0, TRUE, &mii);
-    }
-    for (size_t i = 0; i < profiles.size(); i++) {
-        AppendMenuW(menu, MF_STRING, (UINT)(2 + i), AccountMenuText(profiles[i]).c_str());
-        MENUITEMINFOW mii = {sizeof(mii)};
-        mii.fMask = MIIM_BITMAP;
-        mii.hbmpItem = GetAccountIconMenuBitmap(profiles[i]);
-        if (mii.hbmpItem) SetMenuItemInfoW(menu, GetMenuItemCount(menu) - 1, TRUE, &mii);
-    }
-
-    RequestForeground(hud, FocusTargetKind::OwnUi, L"new-window-profile-menu");
-    state->contextMenuOpen = true; // see UpdateProjectListHud's guard
-    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
-    state->contextMenuOpen = false;
-    DestroyMenu(menu);
-
-    if (cmd <= 0) return;
-    if (cmd == (int)kThisAccountId) {
-        OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button");
-        return;
-    }
-    size_t i = (size_t)(cmd - 2);
-    if (i < profiles.size()) OpenNewVSCodeWindowAs(hud, profiles[i], L"", L"hud-new-window-profile");
 }
 
 // Shared cleanup for ending a DragReorder, called both from a real
@@ -1412,15 +1409,12 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                 EndProjectListHoverFocus(state, false);
             } else if (state) {
                 switch (ActionButtonForIndex(state, state->hoverIndex)) {
-                    case HudActionNewWindow:
-                        if (ConfiguredUserProfiles().empty()) {
-                            OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button");
-                        } else {
-                            POINT screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-                            ClientToScreen(hwnd, &screenPt);
-                            ShowNewWindowProfileMenu(hwnd, state, screenPt);
-                        }
+                    case HudActionNewWindow: {
+                        POINT screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                        ClientToScreen(hwnd, &screenPt);
+                        ShowNewWindowButtonMenu(hwnd, state, screenPt);
                         break;
+                    }
                     case HudActionMinimizeAll:
                         EndProjectListHoverFocus(state, false);
                         MinimizeAllVSCodeWindows(state);
@@ -1439,13 +1433,6 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
                     POINT screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
                     ClientToScreen(hwnd, &screenPt);
                     ShowItemContextMenu(hwnd, state, index, screenPt);
-                } else if (ActionButtonForIndex(state, index) == HudActionNewWindow) {
-                    // The new-window button (sentinel index entries.size(),
-                    // see ProjectListHitTest) has no alias to set -- its own
-                    // right-click menu is the favourites list instead.
-                    POINT screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-                    ClientToScreen(hwnd, &screenPt);
-                    ShowNewWindowButtonContextMenu(hwnd, state, screenPt);
                 }
             }
             return 0;
@@ -2518,7 +2505,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
 
     // Keep a favourite's stored label in sync with its live hub item
     // whenever that project is actually open -- otherwise the favourites
-    // menu (ShowNewWindowButtonContextMenu) would keep showing whatever
+    // menu (ShowNewWindowButtonMenu) would keep showing whatever
     // label happened to be captured back when "Add to Favourites" was
     // clicked, even after the hub item's own label later changes (e.g. the
     // window title reparses differently once VS Code picks up this app's
