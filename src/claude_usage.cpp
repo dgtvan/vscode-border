@@ -121,7 +121,6 @@ struct FetchResult {
     bool ok = false;
     ClaudeUsageLimit session, weekly;
     std::wstring error;
-    bool needsYou = false;      // see ClaudeUsageSnapshot::needsYou
     bool wrongPassword = false; // set by a user profile's worker -- the saved password is to be dropped
 };
 
@@ -211,8 +210,7 @@ std::wstring FormatError(const wchar_t* fmt, ...) {
 
 // GET https://api.anthropic.com/api/oauth/usage with `token`; true with
 // the body in `body` on HTTP 200.
-bool HttpGetUsage(const std::string& token, std::string& body, std::wstring& error, DWORD& status) {
-    status = 0;
+bool HttpGetUsage(const std::string& token, std::string& body, std::wstring& error) {
     HINTERNET session = WinHttpOpen(L"vscode-border", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                     WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) {
@@ -235,7 +233,7 @@ bool HttpGetUsage(const std::string& token, std::string& body, std::wstring& err
     if (!sent) {
         error = FormatError(L"couldn't reach api.anthropic.com (WinHTTP error %lu)", GetLastError());
     } else {
-        DWORD size = sizeof(status);
+        DWORD status = 0, size = sizeof(status);
         WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
                             &status, &size, WINHTTP_NO_HEADER_INDEX);
         body.clear();
@@ -279,8 +277,7 @@ FetchResult FetchClaudeUsage() {
     std::string content;
     DWORD err = 0;
     if (!ReadSharedFile(path, content, err)) {
-        r.needsYou = err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND;
-        r.error = r.needsYou
+        r.error = err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND
                       ? FormatError(L"no Claude Code login at %ls -- sign in with /login in Claude Code as this account",
                                     path.c_str())
                       : FormatError(L"can't read %ls (error %lu)", path.c_str(), err);
@@ -295,7 +292,6 @@ FetchResult FetchClaudeUsage() {
     std::string token = oauth.found ? Unquote(RawValue(content, oauth.start, oauth.end, "accessToken")) : "";
     if (token.empty()) {
         r.error = FormatError(L"%ls has no Claude.ai login token (claudeAiOauth.accessToken)", path.c_str());
-        r.needsYou = true;
         return r;
     }
     long long expiresAtMs = _atoi64(RawValue(content, oauth.start, oauth.end, "expiresAt").c_str());
@@ -304,19 +300,14 @@ FetchResult FetchClaudeUsage() {
         r.error = FormatError(L"the login token expired at %ls; Claude Code renews it the next time it runs in this "
                               L"account",
                               FormatLocalTime(expiresAtMs / 1000).c_str());
-        r.needsYou = true;
         SecureZeroMemory(&token[0], token.size());
         return r;
     }
 
     std::string body;
-    DWORD status = 0;
-    bool ok = HttpGetUsage(token, body, r.error, status);
+    bool ok = HttpGetUsage(token, body, r.error);
     SecureZeroMemory(&token[0], token.size());
-    if (!ok) {
-        r.needsYou = status == 401;
-        return r;
-    }
+    if (!ok) return r;
 
     if (JsonScan::FindRootObjectOpenBrace(body) == std::string::npos) {
         r.error = L"api.anthropic.com's answer isn't JSON";
@@ -336,8 +327,7 @@ FetchResult FetchClaudeUsage() {
 
 // The helper's stdout protocol, one UTF-8 line per result:
 //   ok <session %> <session resets_at> <weekly %> <weekly resets_at>
-//   err <message>    -- a failure that may pass on its own
-//   need <message>   -- one that lasts until someone acts (see ClaudeUsageSnapshot::needsYou)
+//   err <message>
 std::string FormatHelperLine(const FetchResult& r) {
     char buf[160];
     if (r.ok) {
@@ -349,7 +339,7 @@ std::string FormatHelperLine(const FetchResult& r) {
     for (char& c : text) {
         if (c == '\r' || c == '\n') c = ' ';
     }
-    return (r.needsYou ? "need " : "err ") + text + "\n";
+    return "err " + text + "\n";
 }
 
 FetchResult ParseHelperLine(const std::string& line) {
@@ -360,9 +350,6 @@ FetchResult ParseHelperLine(const std::string& line) {
         r.ok = true;
     } else if (line.rfind("err ", 0) == 0) {
         r.error = Utf8ToWide(line.substr(4));
-    } else if (line.rfind("need ", 0) == 0) {
-        r.error = Utf8ToWide(line.substr(5));
-        r.needsYou = true;
     } else {
         r.error = L"the usage helper wrote an unexpected line: " + Utf8ToWide(line.substr(0, 200));
     }
@@ -403,11 +390,9 @@ void Report(Worker& w, const FetchResult& r) {
         w.snapshot.weekly = r.weekly;
         w.snapshot.fetchedAt = now;
         w.snapshot.error.clear();
-        w.snapshot.needsYou = false;
     } else {
         w.snapshot.error = r.error;
         w.snapshot.errorAt = now;
-        w.snapshot.needsYou = r.needsYou;
     }
     if (r.wrongPassword) w.forgetPassword = true;
     w.seq++;
@@ -450,12 +435,10 @@ void RunHelperOnce(Worker& w) {
         if (err == ERROR_NOT_FOUND) {
             r.error = L"no password saved for this account -- open a VS Code window as it from the hub's + button "
                       L"and tick Remember";
-            r.needsYou = true;
         } else if (err == ERROR_LOGON_FAILURE) {
             r.error = L"its saved password was rejected, so it's been dropped -- open a VS Code window as it from the "
                       L"hub's + button to save the right one";
             r.wrongPassword = true;
-            r.needsYou = true;
         } else {
             r.error = FormatError(L"couldn't start the usage helper as this account (error %lu)", err);
         }
@@ -636,6 +619,10 @@ std::vector<ClaudeUsageSnapshot> GetClaudeUsageSnapshots() {
     for (const std::shared_ptr<Worker>& w : g_workers) out.push_back(w->snapshot);
     ReleaseSRWLockShared(&g_lock);
     return out;
+}
+
+bool IsClaudeUsageUnavailable(const ClaudeUsageSnapshot& s) {
+    return !s.error.empty() || (s.haveData && IsClaudeUsageStale(s));
 }
 
 bool IsClaudeUsageStale(const ClaudeUsageSnapshot& s) {

@@ -9,7 +9,7 @@ mockup the options were compared in is kept as
 [usage-rings-mockup.html](usage-rings-mockup.html); it is an archive of the
 exploration, not the current design.
 
-![This account's rings reading normally, next to another account's ring showing the pulsing amber "!" of an expired login](../assets/usage-rings.png)
+![This account's rings reading normally, next to another account's ring showing the pulsing amber "!" of unavailable usage](../assets/usage-rings.png)
 
 ## What the rings look like
 
@@ -74,17 +74,19 @@ fill in. Other accounts are profiles 2-5.
   this one. It passes results back over a pipe and exits with the app.
 - **Every failure is logged as a warning**, once per distinct error.
 
-## When an account can't be read
+## When an account's usage is unavailable
 
-Two kinds of failure look different, because only one of them needs you:
+The pulsing "!" means one thing: there are no current numbers for that
+account, whatever the reason -- an expired or missing login, a missing or
+rejected password, a network or API error, an unexpected answer, or no
+successful read for three refresh intervals. The rings are replaced by a
+grey ring around a pulsing amber "!" (one fade every 1.6 s); the tooltip
+says why. Only the first read after startup, still on its way, shows plain
+grey rings.
 
-| Failure | Looks like |
-|---|---|
-| Login expired or missing, the API rejects the token (HTTP 401), the profile's password is missing or rejected | The rings are replaced by a grey ring around a pulsing amber "!" (one fade every 1.6 s) |
-| Network error, rate limit, server error, unexpected answer | Static grey, last reading kept |
-
-The first kind won't clear until someone uses Claude Code in that account
-or saves a password, and grey rings looked like 0% usage. The "!" shows no
-numbers at all, so it can't be misread as a reading. Also tried: the last
-reading in grey fading in and out, a dashed amber ring, and an amber arc
-chasing round the ring.
+Grey rings with the last reading looked like 0% usage, and splitting
+failures into "needs you" and "passing" (static grey for network errors)
+was tried and dropped: either way the numbers on screen aren't current,
+and that's what matters. The "!" shows no numbers at all, so it can't be
+misread as a reading. Also tried: the last reading in grey fading in and
+out, a dashed amber ring, and an amber arc chasing round the ring.

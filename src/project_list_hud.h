@@ -53,8 +53,8 @@ struct ProjectListHudUsageRing {
     double sessionPercent = -1; // -1 when unknown
     double weeklyPercent = -1;
     bool stale = false; // drawn grey: the numbers aren't current (see IsClaudeUsageStale)
-    bool needsYou = false; // can't be read until someone acts (see ClaudeUsageSnapshot::needsYou): drawn as
-                           // a grey ring around a pulsing amber "!" instead of any numbers
+    bool unavailable = false; // no current numbers, whatever the reason (see IsClaudeUsageUnavailable): drawn
+                              // as a grey ring around a pulsing amber "!" instead of any numbers
     bool hasChipColor = false; // the account's own background (its profile's _color); none: transparent
     COLORREF chipColor = RGB(0, 0, 0);
     std::wstring tooltip;

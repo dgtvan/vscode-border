@@ -433,15 +433,15 @@ icon in front -- the same icon its windows' items carry, so this account's
 rings have one only when `user_profile_1_icon` is set.
 `user_profile_<N>_ring_badge=false` hides it on the rings alone.
 
-![This account's rings reading normally, next to another account's ring showing the pulsing amber "!" of an expired login](assets/usage-rings.png)
+![This account's rings reading normally, next to another account's ring showing the pulsing amber "!" of unavailable usage](assets/usage-rings.png)
 
-- **Colors:** green, amber from 70%, red from 90%. Grey means the numbers
-  aren't current: the last update failed, or none has worked yet.
-- **Needs you:** when an account can't be read until someone acts -- its
-  login expired or is missing, the API rejects its token, or its
-  password is missing or rejected -- its rings are replaced by a grey ring
-  around a pulsing amber "!", so an empty ring is never mistaken for 0%.
-  Passing failures (network, rate limit, server errors) stay plain grey.
+- **Colors:** green, amber from 70%, red from 90%. Grey while the first
+  read is still on its way.
+- **Unavailable:** whenever an account's usage can't be read -- any
+  failure: its login expired or is missing, its password is missing or
+  rejected, the network or the API failed, the answer was unexpected --
+  its rings are replaced by a grey ring around a pulsing amber "!", so an
+  empty ring is never mistaken for 0%. Hover to see why.
 - **Background:** an account's rings can sit on a chip of its own color,
   so the accounts are easy to tell apart: its profile's
   `user_profile_<N>_color` (hex `RRGGBB`). Without one there's no chip;

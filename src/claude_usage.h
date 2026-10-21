@@ -42,8 +42,6 @@ struct ClaudeUsageSnapshot {
     long long fetchedAt = 0;          // Unix seconds of that fetch
     std::wstring error;               // why the latest attempt failed, empty if it succeeded
     long long errorAt = 0;
-    bool needsYou = false; // the latest attempt failed in a way that lasts until someone acts: the login
-                           // expired or is missing, or the account's password is -- not a passing network error
 };
 
 // Starts, restarts or stops fetching to match g_config (usage_meter_enabled,
@@ -65,6 +63,12 @@ std::vector<ClaudeUsageSnapshot> GetClaudeUsageSnapshots();
 // Whether the snapshot's numbers can't be trusted as current: the latest
 // fetch failed, or none has succeeded for a while.
 bool IsClaudeUsageStale(const ClaudeUsageSnapshot& s);
+
+// Whether the account's usage is unavailable: a read has been tried and
+// there are no current numbers -- the latest one failed, whatever the
+// reason, or none has worked for a while. Unlike IsClaudeUsageStale, false
+// while the first read is still on its way.
+bool IsClaudeUsageUnavailable(const ClaudeUsageSnapshot& s);
 
 // A limit's percent as of now: 0 once its window has reset, even before the
 // next fetch says so; -1 when unknown.

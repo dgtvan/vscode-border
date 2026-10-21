@@ -56,7 +56,7 @@ static const int kRingCells[8][2] = {
 // rings, outer weekly and inner session.
 static const int kUsageRingPad = 3, kUsageRingBadgeGap = 3, kUsageRingGap = 4;
 static const double kUsageWarnPercent = 70, kUsageCriticalPercent = 90;
-static const UINT kUsageNeedsYouPulseMs = 1600; // one fade out and back in of the "!" (see DrawUsageRings)
+static const UINT kUsageUnavailablePulseMs = 1600; // one fade out and back in of the "!" (see DrawUsageRings)
 static const COLORREF kUsageTrackColor = RGB(84, 89, 96),
                       kUsageOkColor = RGB(63, 174, 106), kUsageWarnColor = RGB(224, 165, 38),
                       kUsageCriticalColor = RGB(224, 81, 59), kUsageStaleColor = RGB(138, 148, 156);
@@ -1463,7 +1463,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (wParam == kClaudePulseTimerId && state) {
                 RenderProjectListHud(hwnd, state);
                 bool ringPulsing = std::any_of(state->usageRings.begin(), state->usageRings.end(),
-                                               [](const ProjectListHudUsageRing& r) { return r.needsYou; });
+                                               [](const ProjectListHudUsageRing& r) { return r.unavailable; });
                 if (ringPulsing) SyncUsageStrip(hwnd, state);
             }
             return 0;
@@ -2054,14 +2054,14 @@ static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight,
         {innerMid - stroke / 2, innerMid + stroke / 2, ring.sessionPercent / 100,
          UsageRingColor(ring.sessionPercent, ring.stale)},
     };
-    // Needs you: no numbers that could pass for a reading -- just the outer
+    // Unavailable: no numbers that could pass for a reading -- just the outer
     // ring's track, and an amber "!" inside it fading out and back in.
     int bandCount = 2;
     double glyphStrength = 0;
-    if (ring.needsYou) {
+    if (ring.unavailable) {
         bands[0].fraction = 0;
         bandCount = 1;
-        double phase = (GetTickCount64() % kUsageNeedsYouPulseMs) / (double)kUsageNeedsYouPulseMs * 2 * kPi;
+        double phase = (GetTickCount64() % kUsageUnavailablePulseMs) / (double)kUsageUnavailablePulseMs * 2 * kPi;
         glyphStrength = 0.3 + 0.7 * (0.5 + 0.5 * cos(phase));
     }
     // The "!": a bar above a dot, sized to the ring.
@@ -2091,7 +2091,7 @@ static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight,
                         }
                     }
                     double ddy = dy + cy - dotY;
-                    bool onGlyph = ring.needsYou &&
+                    bool onGlyph = ring.unavailable &&
                                    ((fabs(dx) <= barHalfWidth && dy + cy >= barTop && dy + cy <= barBottom) ||
                                     dx * dx + ddy * ddy <= dotRadius * dotRadius);
                     if (onGlyph) {
@@ -2587,7 +2587,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     bool anyAnimating = std::any_of(sorted.begin(), sorted.end(), [](const ProjectListHudEntry& e) {
         return e.loading || e.claudeStatus == ClaudeStatus::Working || e.claudeStatus == ClaudeStatus::Attention;
     }) || std::any_of(state->usageRings.begin(), state->usageRings.end(),
-                      [](const ProjectListHudUsageRing& r) { return r.needsYou; });
+                      [](const ProjectListHudUsageRing& r) { return r.unavailable; });
     if (anyAnimating && !state->pulseTimerActive) {
         SetTimer(hud, kClaudePulseTimerId, kClaudePulseIntervalMs, nullptr);
         state->pulseTimerActive = true;
