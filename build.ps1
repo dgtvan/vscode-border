@@ -30,7 +30,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $gxx -O2 -municode -mwindows -std=c++17 -static -static-libgcc -static-libstdc++ `
-    @sources $resObj -o $outExe -ldwmapi -lshell32 -lpsapi -luser32 -lgdi32 -lgdiplus -ladvapi32 -lshlwapi -lwinhttp
+    @sources $resObj -o $outExe -ldwmapi -lshell32 -lpsapi -luser32 -lgdi32 -lgdiplus -ladvapi32 -lshlwapi -lwinhttp -luserenv
 if ($LASTEXITCODE -ne 0) {
     throw "Build failed."
 }

@@ -38,6 +38,9 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <userenv.h>
+#include <string>
+#include <vector>
 #include "resource.h"
 
 #include "account.h"
@@ -59,6 +62,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "userenv.lib")
 
 static HINSTANCE g_hInstance = nullptr;
 
@@ -331,6 +335,54 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 }
 
+// Replaces this process's environment with the user's default one, the one
+// a fresh logon (and so the Start menu) would give it. Every VS Code window
+// opened from here inherits this app's environment, and whatever started the
+// app may have left a very different one: started from Git Bash, PATH leads
+// with Git's mingw64\bin and usr\bin instead of Git's cmd, and Claude Code in
+// a window opened from here then reported Git Bash as not installed.
+static void ResetToDefaultEnvironment() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &token)) {
+        LogWarn(L"OpenProcessToken failed (error %lu), keeping the inherited environment", GetLastError());
+        return;
+    }
+    void* block = nullptr;
+    BOOL built = CreateEnvironmentBlock(&block, token, FALSE);
+    DWORD err = GetLastError();
+    CloseHandle(token);
+    if (!built) {
+        LogWarn(L"CreateEnvironmentBlock failed (error %lu), keeping the inherited environment", err);
+        return;
+    }
+
+    // Names starting with '=' are the per-drive current directories, not
+    // variables, and stay as they are.
+    std::vector<std::wstring> inherited;
+    if (LPWCH current = GetEnvironmentStringsW()) {
+        for (const wchar_t* p = current; *p; p += wcslen(p) + 1) {
+            const wchar_t* eq = wcschr(p + 1, L'=');
+            if (p[0] != L'=' && eq) inherited.emplace_back(p, eq);
+        }
+        FreeEnvironmentStringsW(current);
+    }
+    wchar_t inheritedPath[32767] = {};
+    GetEnvironmentVariableW(L"PATH", inheritedPath, 32767);
+    for (const std::wstring& name : inherited) SetEnvironmentVariableW(name.c_str(), nullptr);
+
+    for (const wchar_t* p = static_cast<const wchar_t*>(block); *p; p += wcslen(p) + 1) {
+        const wchar_t* eq = wcschr(p + 1, L'=');
+        if (p[0] == L'=' || !eq) continue;
+        SetEnvironmentVariableW(std::wstring(p, eq).c_str(), eq + 1);
+    }
+    DestroyEnvironmentBlock(block);
+
+    wchar_t defaultPath[32767] = {};
+    GetEnvironmentVariableW(L"PATH", defaultPath, 32767);
+    if (wcscmp(inheritedPath, defaultPath) != 0)
+        Log(L"environment: inherited PATH differed from the user's default, replaced it: %ls", defaultPath);
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     // Before the single-instance check: the helpers run alongside the app,
     // as another account in the same session.
@@ -363,6 +415,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         return 0;
     }
 
+    ResetToDefaultEnvironment();
     g_hInstance = hInstance;
     g_config = LoadConfig(GetConfigPath());
     SyncWindowTitleSetting(g_config.showLabel);
