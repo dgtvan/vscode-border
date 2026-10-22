@@ -621,6 +621,9 @@ static std::vector<AiSessionStatus> LoadLocalStatuses() {
     // are collected and applied after FindNextFileW is done iterating,
     // rather than mutating the directory mid-enumeration.
     static std::set<std::wstring> warnedMissingPid;
+    // Sessions already logged as interrupted, so that correction logs once
+    // per interrupt rather than on every sync for as long as it holds.
+    static std::set<std::wstring> loggedInterrupted;
     std::vector<std::wstring> toDelete;
     wchar_t home[MAX_PATH] = {};
     GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
@@ -745,10 +748,13 @@ static std::vector<AiSessionStatus> LoadLocalStatuses() {
             // after the user interrupted it, with no further hook ever
             // firing. The transcript's own interrupt marker is the only
             // signal that the turn actually ended.
-            Log(L"claude_provider: %ls's transcript shows the turn was interrupted by the user -- correcting to "
-                L"waiting",
-                fileName.c_str());
+            if (loggedInterrupted.insert(fileName).second)
+                Log(L"claude_provider: %ls's transcript shows the turn was interrupted by the user -- correcting to "
+                    L"waiting",
+                    fileName.c_str());
             status.status = L"waiting";
+        } else {
+            loggedInterrupted.erase(fileName);
         }
 
         result.push_back(status);
