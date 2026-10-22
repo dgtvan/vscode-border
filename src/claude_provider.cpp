@@ -321,26 +321,55 @@ bool HasNewerTranscriptActivity(const std::wstring& transcriptPath, const FILETI
 // us the turn actually ended.
 const char* kInterruptedMarker = "[Request interrupted by user]";
 
-// True if the transcript's last entry is that marker -- meaning nothing
+// Enough to reach back past the metadata lines that can follow an interrupt
+// (an api-request line alone runs to a couple of KB).
+const DWORD kInterruptScanBytes = 64 * 1024;
+
+// The top-level "type" of one transcript line, e.g. "user", "assistant",
+// "custom-title"; empty if the line isn't a JSON object.
+std::string GetTranscriptLineType(const std::string& line) {
+    size_t open = JsonScan::FindRootObjectOpenBrace(line);
+    if (open == std::string::npos) return "";
+    size_t close = JsonScan::FindValueEnd(line, open);
+    if (close <= open + 1) return "";
+    JsonScan::KeyEntry type = JsonScan::FindKeyInObject(line, open + 1, close - 1, "type");
+    if (!type.found || type.valueEnd - type.valueStart < 2 || line[type.valueStart] != '"') return "";
+    return line.substr(type.valueStart + 1, type.valueEnd - type.valueStart - 2);
+}
+
+// True if the transcript's last message is that marker -- meaning nothing
 // has happened in this session since the interrupt, i.e. the turn that was
-// reported "working" is actually over. Deliberately checks only the very
-// last line (not "does this marker appear anywhere"), since an old
-// interrupt earlier in a long session that Claude has since resumed work
-// past is not still-relevant information.
+// reported "working" is actually over. Deliberately checks only the last
+// message (not "does this marker appear anywhere"), since an old interrupt
+// earlier in a long session that Claude has since resumed work past is not
+// still-relevant information. Lines that aren't messages are skipped:
+// renaming the session after interrupting it appends custom-title and
+// agent-name lines after the marker, and checking only the very last line
+// left such a session on "working" for good.
 bool WasLastTranscriptEntryInterrupted(const std::wstring& transcriptPath) {
     if (transcriptPath.empty()) return false;
-    std::string tail = ReadFileTail(transcriptPath, 8192);
+    std::string tail = ReadFileTail(transcriptPath, kInterruptScanBytes);
     if (tail.empty()) return false;
 
-    // The read may start mid-line, and the file may end with a trailing
-    // newline -- walk back to the last non-blank line within the tail.
-    size_t end = tail.find_last_not_of("\r\n");
-    if (end == std::string::npos) return false;
-    size_t start = tail.find_last_of('\n', end);
-    start = (start == std::string::npos) ? 0 : start + 1;
-    std::string lastLine = tail.substr(start, end - start + 1);
+    // A full read may start mid-line; that partial line is never examined.
+    size_t floor = 0;
+    if (tail.size() >= kInterruptScanBytes) {
+        floor = tail.find('\n');
+        if (floor == std::string::npos) return false;
+        ++floor;
+    }
 
-    return lastLine.find(kInterruptedMarker) != std::string::npos;
+    size_t end = tail.size();
+    while (end > floor) {
+        size_t start = tail.find_last_of('\n', end - 1);
+        start = (start == std::string::npos || start < floor) ? floor : start + 1;
+        std::string line = tail.substr(start, end - start);
+        end = start > floor ? start - 1 : floor;
+
+        std::string type = GetTranscriptLineType(line);
+        if (type == "user" || type == "assistant") return line.find(kInterruptedMarker) != std::string::npos;
+    }
+    return false;
 }
 
 // Reads up to `maxBytes` starting at `offset` (clamped to the file's end).

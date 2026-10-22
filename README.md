@@ -374,9 +374,11 @@ being interrupted, with no hook ever firing again. Rather than another
 timeout, this uses an even more direct piece of evidence: Claude Code
 appends a literal `[Request interrupted by user]` marker to the transcript
 the moment an interrupt happens. If a session's status is "Working" and the
-transcript's very last entry is that exact marker (meaning nothing has
+transcript's last message is that exact marker (meaning nothing has
 happened since), it's corrected to "Waiting" -- an interrupted turn is over,
-same as a normal one.
+same as a normal one. Lines that aren't messages are skipped, since
+renaming the session after the interrupt appends title lines after the
+marker.
 
 The transcript directory name is derived from the project's absolute path:
 every non-alphanumeric character (`:`, `\`, `.`, a space, an already-literal
