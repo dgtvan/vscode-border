@@ -116,12 +116,6 @@ void SendWslgWindowRect(HWND hwnd, const std::wstring& distro, const RECT& windo
 std::wstring WslUncPath(const std::wstring& distro, const std::wstring& linuxPath);
 bool ParseWslUncPath(const std::wstring& path, std::wstring* distro, std::wstring* linuxPath);
 
-// The WSL icon as a 32bpp premultiplied-alpha bitmap at the system's small
-// icon size -- for a menu item's MENUITEMINFO::hbmpItem. Created once and
-// kept for the life of the process (a menu only borrows it); null if the
-// icon resource can't be loaded.
-HBITMAP GetWslIconMenuBitmap();
-
 // Composites the WSL icon (kWslIconSize square) onto an opaque 32bpp surface
 // with its top-left at (left, top), clipped to `clip` and to the surface.
 void BlendWslIcon(UINT32* pixels, int surfaceWidth, int surfaceHeight, int left, int top, const RECT& clip);

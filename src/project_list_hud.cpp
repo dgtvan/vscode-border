@@ -955,15 +955,12 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // password is on the tray menu.) Then, after a separator, a "Favourites" submenu
 // holding "Open All" (every favourite not already open -- see
 // OpenAllFavourites for why open ones are skipped), then the saved favourite
-// projects (see favourites.h), each as its own submenu (a WSL folder's
-// marked with the WSL icon, any other with its account's icon by the same
-// rule as the items, see IconAccountFor) -- hovering a favourite's name expands it to "Open in New
-// Window" (the default/bolded action, as the favourite's own account -- see
-// vscode_cli.h's OpenNewVSCodeWindow and account.h's OpenNewVSCodeWindowAs;
-// on an open one it just re-activates its window), "Open in New Window As"
-// (a submenu of every other account it could open as instead: this app's
-// own and the configured profiles, minus the favourite's own account -- left
-// off for a WSL folder, or when there's no other account) and "Remove from
+// projects (see favourites.h), each as its own submenu -- hovering a
+// favourite's name expands it to "Open in New Window As" (a submenu of every
+// account it could open as: this app's own and the configured profiles --
+// see vscode_cli.h's OpenNewVSCodeWindow
+// and account.h's OpenNewVSCodeWindowAs; on an open one it just re-activates
+// its window; a WSL folder lists only this app's own) and "Remove from
 // Favourites". A plain
 // Win32 popup menu item can't both carry its own click action and expand a
 // submenu on hover, so nesting "open" one level down (rather than a bare
@@ -1029,34 +1026,25 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
             UINT openId = (UINT)(2 + i * 2);
             UINT removeId = (UINT)(3 + i * 2);
             HMENU sub = CreatePopupMenu();
-            AppendMenuW(sub, MF_STRING, openId, L"Open in New Window");
-            if (!ParseWslUncPath(favourites[i].path, nullptr, nullptr)) {
-                HMENU asMenu = CreatePopupMenu();
+            // The favourite's own account gets openId; a WSL folder only opens
+            // as this app's own account.
+            HMENU asMenu = CreatePopupMenu();
+            if (ParseWslUncPath(favourites[i].path, nullptr, nullptr)) {
+                AppendAccountMenuItem(asMenu, openId, L"");
+            } else {
+                bool ownListed = false;
                 for (size_t slot = 0; slot <= profiles.size(); slot++) {
                     std::wstring account = slotAccount(slot);
-                    if (CompareStringOrdinal(account.c_str(), -1, favourites[i].account.c_str(), -1, TRUE) == CSTR_EQUAL) {
-                        continue;
-                    }
-                    AppendAccountMenuItem(asMenu, kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, account);
+                    bool own = CompareStringOrdinal(account.c_str(), -1, favourites[i].account.c_str(), -1, TRUE) == CSTR_EQUAL;
+                    ownListed = ownListed || own;
+                    AppendAccountMenuItem(asMenu, own ? openId : kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, account);
                 }
-                if (GetMenuItemCount(asMenu) > 0) AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
-                else DestroyMenu(asMenu);
+                if (!ownListed) AppendAccountMenuItem(asMenu, openId, favourites[i].account);
             }
+            AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(sub, MF_STRING, removeId, L"Remove from Favourites");
-            SetMenuDefaultItem(sub, openId, FALSE);
             AppendMenuW(favMenu, MF_POPUP, (UINT_PTR)sub, favourites[i].label.c_str());
-            // A WSL folder gets the WSL icon and any other its account's, as
-            // its hub item does.
-            MENUITEMINFOW mii = {sizeof(mii)};
-            mii.fMask = MIIM_BITMAP;
-            if (ParseWslUncPath(favourites[i].path, nullptr, nullptr)) {
-                mii.hbmpItem = GetWslIconMenuBitmap();
-            } else {
-                std::wstring iconAccount = IconAccountFor(favourites[i].account);
-                if (!iconAccount.empty()) mii.hbmpItem = GetAccountIconMenuBitmap(iconAccount);
-            }
-            if (mii.hbmpItem) SetMenuItemInfoW(favMenu, GetMenuItemCount(favMenu) - 1, TRUE, &mii);
         }
     }
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)favMenu, L"Favourites");

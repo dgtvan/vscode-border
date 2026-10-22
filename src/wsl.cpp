@@ -207,36 +207,6 @@ static const std::vector<UINT32>& WslIconPixels() {
     return out;
 }
 
-HBITMAP GetWslIconMenuBitmap() {
-    static HBITMAP bmp = nullptr;
-    static bool tried = false;
-    if (tried) return bmp;
-    tried = true;
-    int size = GetSystemMetrics(SM_CXSMICON);
-    HICON icon = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_WSL), IMAGE_ICON, size, size, 0);
-    if (!icon) return nullptr;
-    BITMAPINFO bmi = {};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = size;
-    bmi.bmiHeader.biHeight = -size; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    void* bits = nullptr;
-    HDC dc = CreateCompatibleDC(nullptr);
-    bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (bmp && bits) {
-        HGDIOBJ old = SelectObject(dc, bmp);
-        memset(bits, 0, size * size * 4);
-        DrawIconEx(dc, 0, 0, icon, size, size, 0, nullptr, DI_NORMAL); // keeps the icon's own alpha
-        GdiFlush();
-        SelectObject(dc, old);
-    }
-    DeleteDC(dc);
-    DestroyIcon(icon);
-    return bmp;
-}
-
 void BlendWslIcon(UINT32* pixels, int surfaceWidth, int surfaceHeight, int left, int top, const RECT& clip) {
     const std::vector<UINT32>& icon = WslIconPixels();
     if (icon.empty()) return;
