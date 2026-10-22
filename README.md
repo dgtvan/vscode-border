@@ -261,8 +261,10 @@ one submenu per favourite (a WSL folder's marked with the Tux icon, any other
 with its account's icon, as its hub item would be) -- hover a
 favourite's name to expand it to **Open in New Window** (bolded as the
 default action; it opens as the account the favourite was saved from, and on
-an open one it just brings its window forward) and
-**Remove from Favourites**.
+an open one it just brings its window forward), **Open in New Window As**
+(a submenu of the other accounts to open it as instead -- this account and
+the other user profiles, minus the one the favourite was saved from; not
+shown for a WSL folder) and **Remove from Favourites**.
 
 To add a favourite, right-click any regular item (or its border label
 chip) and choose **Add to Favourites** -- this saves the window's currently

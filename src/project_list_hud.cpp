@@ -905,7 +905,10 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // rule as the items, see IconAccountFor) -- hovering a favourite's name expands it to "Open in New
 // Window" (the default/bolded action, as the favourite's own account -- see
 // vscode_cli.h's OpenNewVSCodeWindow and account.h's OpenNewVSCodeWindowAs;
-// on an open one it just re-activates its window) and "Remove from
+// on an open one it just re-activates its window), "Open in New Window As"
+// (a submenu of every other account it could open as instead: this app's
+// own and the configured profiles, minus the favourite's own account -- left
+// off for a WSL folder, or when there's no other account) and "Remove from
 // Favourites". A plain
 // Win32 popup menu item can't both carry its own click action and expand a
 // submenu on hover, so nesting "open" one level down (rather than a bare
@@ -940,31 +943,32 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     });
 
     // Command ids: Open All = 1; per favourite i, open = 2 + i*2, remove =
-    // 3 + i*2; this account = kThisAccountId, profile i = kThisAccountId +
-    // 1 + i, well above any favourite's -- decoded back on return below.
+    // 3 + i*2, open as account slot j = kOpenAsBase + i*kOpenAsStride + j;
+    // this account = kThisAccountId, profile i = kThisAccountId + 1 + i, well
+    // above any favourite's -- decoded back on return below. An account slot
+    // is 0 for this app's own account, 1 + i for profiles[i].
     const UINT kOpenAllId = 1;
+    const UINT kOpenAsBase = 0x1000, kOpenAsStride = 8; // stride > the 5 profile slots
     const UINT kThisAccountId = 0x8000;
+    auto slotAccount = [&](size_t slot) { return slot == 0 ? std::wstring() : profiles[slot - 1]; };
+    // Appends `slot`'s account to `m`, with its icon (see IconAccountFor).
+    auto appendAccountItem = [&](HMENU m, UINT id, size_t slot) {
+        std::wstring account = slotAccount(slot);
+        AppendMenuW(m, MF_STRING, id, AccountMenuText(slot == 0 ? CurrentAccountName() : account).c_str());
+        std::wstring iconAccount = IconAccountFor(account);
+        if (iconAccount.empty()) return;
+        MENUITEMINFOW mii = {sizeof(mii)};
+        mii.fMask = MIIM_BITMAP;
+        mii.hbmpItem = GetAccountIconMenuBitmap(iconAccount);
+        if (mii.hbmpItem) SetMenuItemInfoW(m, GetMenuItemCount(m) - 1, TRUE, &mii);
+    };
     HMENU menu = CreatePopupMenu();
     if (profiles.empty()) {
         AppendMenuW(menu, MF_STRING, kThisAccountId, L"Start VS Code");
     } else {
         HMENU startMenu = CreatePopupMenu();
-        AppendMenuW(startMenu, MF_STRING, kThisAccountId, AccountMenuText(CurrentAccountName()).c_str());
+        for (size_t slot = 0; slot <= profiles.size(); slot++) appendAccountItem(startMenu, kThisAccountId + (UINT)slot, slot);
         SetMenuDefaultItem(startMenu, kThisAccountId, FALSE);
-        std::wstring ownIcon = IconAccountFor(L"");
-        if (!ownIcon.empty()) {
-            MENUITEMINFOW mii = {sizeof(mii)};
-            mii.fMask = MIIM_BITMAP;
-            mii.hbmpItem = GetAccountIconMenuBitmap(ownIcon);
-            if (mii.hbmpItem) SetMenuItemInfoW(startMenu, 0, TRUE, &mii);
-        }
-        for (size_t i = 0; i < profiles.size(); i++) {
-            AppendMenuW(startMenu, MF_STRING, kThisAccountId + 1 + (UINT)i, AccountMenuText(profiles[i]).c_str());
-            MENUITEMINFOW mii = {sizeof(mii)};
-            mii.fMask = MIIM_BITMAP;
-            mii.hbmpItem = GetAccountIconMenuBitmap(profiles[i]);
-            if (mii.hbmpItem) SetMenuItemInfoW(startMenu, GetMenuItemCount(startMenu) - 1, TRUE, &mii);
-        }
         AppendMenuW(menu, MF_POPUP, (UINT_PTR)startMenu, L"Start VS Code");
     }
 
@@ -979,6 +983,18 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
             UINT removeId = (UINT)(3 + i * 2);
             HMENU sub = CreatePopupMenu();
             AppendMenuW(sub, MF_STRING, openId, L"Open in New Window");
+            if (!ParseWslUncPath(favourites[i].path, nullptr, nullptr)) {
+                HMENU asMenu = CreatePopupMenu();
+                for (size_t slot = 0; slot <= profiles.size(); slot++) {
+                    std::wstring account = slotAccount(slot);
+                    if (CompareStringOrdinal(account.c_str(), -1, favourites[i].account.c_str(), -1, TRUE) == CSTR_EQUAL) {
+                        continue;
+                    }
+                    appendAccountItem(asMenu, kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, slot);
+                }
+                if (GetMenuItemCount(asMenu) > 0) AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
+                else DestroyMenu(asMenu);
+            }
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(sub, MF_STRING, removeId, L"Remove from Favourites");
             SetMenuDefaultItem(sub, openId, FALSE);
@@ -1002,7 +1018,7 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     state->contextMenuOpen = true; // see UpdateProjectListHud's guard
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
     state->contextMenuOpen = false;
-    DestroyMenu(menu); // recursively destroys the Start VS Code, Favourites and per-favourite submenus too
+    DestroyMenu(menu); // recursively destroys the Start VS Code, Favourites, per-favourite and open-as submenus too
 
     if (cmd <= 0) return;
     if (cmd == (int)kThisAccountId) {
@@ -1012,6 +1028,14 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     if (cmd > (int)kThisAccountId) {
         size_t p = (size_t)(cmd - (int)kThisAccountId - 1);
         if (p < profiles.size()) OpenNewVSCodeWindowAs(hud, profiles[p], L"", L"hud-new-window-profile");
+        return;
+    }
+    if (cmd >= (int)kOpenAsBase) {
+        size_t i = (size_t)(cmd - (int)kOpenAsBase) / kOpenAsStride;
+        size_t slot = (size_t)(cmd - (int)kOpenAsBase) % kOpenAsStride;
+        if (i >= favourites.size() || slot > profiles.size()) return;
+        if (slot == 0) OpenNewVSCodeWindow(AnyTrackedWindow(state), favourites[i].path, L"hud-favourite-open-as");
+        else OpenNewVSCodeWindowAs(hud, profiles[slot - 1], favourites[i].path, L"hud-favourite-open-as");
         return;
     }
     if (cmd == (int)kOpenAllId) {
