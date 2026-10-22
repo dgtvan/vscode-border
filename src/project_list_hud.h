@@ -112,10 +112,8 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTas
 
 // Sorts `entries` to the last order the user dragged them into during this
 // run (never saved), with any entries not in it appended at the end in
-// the order they were tracked -- then moves every favourite entry (see
-// favourites.h) ahead of the non-favourites, preserving each group's
-// relative order, so favourites always sit at the front of the list --
-// measures/sizes the HUD to fit them -- a single horizontal strip, every
+// the order they were tracked (favourites included -- being one doesn't
+// move an item) -- measures/sizes the HUD to fit them -- a single horizontal strip, every
 // item sharing one width -- and shows it at the right end of its band (see
 // SetProjectListHudDocked), unless the user has manually slid/resized it
 // (Ctrl+left-click-drag either edge to resize, the middle to slide it; plain
@@ -132,9 +130,7 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTas
 // shift live to open a gap at the candidate drop position as the dragged
 // item, shown floating, follows the cursor. The result applies from the
 // drop until the app exits -- it isn't saved, since no window is reopened
-// at startup for a saved order to apply to. A dragged item is confined to
-// its own favourite/non-favourite group -- it can be reordered within that
-// group, but can't be dropped across the boundary into the other one, so the favourites-
-// always-in-front rule above can't be dragged away.
+// at startup for a saved order to apply to. An item can be dropped
+// anywhere in the list.
 void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entries,
                           const ProjectListHudStyle& style);

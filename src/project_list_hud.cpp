@@ -241,31 +241,10 @@ static int ProjectListDragCandidate(const ProjectListHudState* state, int x) {
 }
 
 // True if `entry`'s folder is a saved favourite for the account its window
-// runs as (see favourites.h) -- entries always
-// end up favourites-first (see PinFavouritesToFront), so hover/drag logic
-// elsewhere locates the boundary via FavouriteZoneCount rather than calling
-// this per item.
+// runs as (see favourites.h) -- shown as the star marker only; it has no
+// effect on the item's position.
 static bool EntryIsFavourite(const ProjectListHudEntry& entry) {
     return !entry.path.empty() && IsFavourite(entry.path, entry.account);
-}
-
-// Moves every favourite entry ahead of every non-favourite one, preserving
-// relative order within each group (i.e. whatever ApplyManualOrder already
-// produced), so favourites stay pinned to the front of the hub item list.
-// Drag-and-drop reordering (see
-// FavouriteZoneCount) then confines a dragged item to its own group, so
-// this front-pinning can't be undone by a drag.
-static void PinFavouritesToFront(std::vector<ProjectListHudEntry>& entries) {
-    std::stable_partition(entries.begin(), entries.end(), EntryIsFavourite);
-}
-
-// Count of leading favourite entries in `entries` -- the boundary between
-// the favourites zone and the regular zone. Relies on entries already being
-// favourites-first (see PinFavouritesToFront); state->entries always is.
-static int FavouriteZoneCount(const std::vector<ProjectListHudEntry>& entries) {
-    int count = 0;
-    while (count < (int)entries.size() && EntryIsFavourite(entries[count])) count++;
-    return count;
 }
 
 static bool IsProjectListResizeEdge(const ProjectListHudState* state, int x) {
@@ -1247,15 +1226,6 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             if (state->dragMode == ProjectListHudState::DragReorder) {
                 state->reorderCursorClient = {mouseX, mouseY};
                 int candidate = ProjectListDragCandidate(state, mouseX);
-                // Confine the drop target to the dragged item's own zone
-                // (favourite vs. regular) so a drag can reorder within
-                // either group but can never cross the boundary -- that's
-                // what keeps favourites pinned to the front (see
-                // PinFavouritesToFront) even while drag-and-drop is live.
-                int favZone = FavouriteZoneCount(state->entries);
-                bool draggedIsFavourite = state->reorderIndex < favZone;
-                candidate = draggedIsFavourite ? std::min(candidate, favZone - 1)
-                                                : std::max(candidate, favZone);
                 if (candidate >= 0 && candidate < (int)state->entries.size() && candidate != state->reorderIndex) {
                     ProjectListHudEntry dragged = state->entries[state->reorderIndex];
                     state->entries.erase(state->entries.begin() + state->reorderIndex);
@@ -1735,11 +1705,8 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
                         COLORREF claudeColorWaiting, bool claudeBorderColorAuto, COLORREF claudeBorderColor) {
     const int paddingX = 12;
     // A loading item's star (if it's a favourite) is suppressed below --
-    // loading entries are deliberately kept out of the favourites-front
-    // sort (see UpdateProjectListHud) so their position doesn't jump
-    // around while still resolving, so showing the star here (implying
-    // "pinned to front") while it sits wherever the loading block landed
-    // would be misleading.
+    // its folder path may still change, so whether it's a favourite isn't
+    // settled yet.
     bool showFavouriteMarker = isFavourite && !entry.loading;
     int leftTextPad = showFavouriteMarker ? kFavouriteMarkerLeftPad : paddingX;
     int itemWidth = item.right - item.left;
@@ -2474,18 +2441,15 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
         return;
     }
 
-    std::vector<ProjectListHudEntry> sorted = entries;
-
     // Pull loading entries (see ProjectListHudEntry::loading) out before
-    // drag-order matching and favourites-pinning below: both key off
-    // rawLabel/path, which can still be changing moment to moment while
-    // loading, and would otherwise make the whole list visibly reshuffle
-    // for no action the user actually took. Keep them in their own fixed,
+    // drag-order matching below: it keys off rawLabel, which can still be
+    // changing moment to moment while loading, and would otherwise make the
+    // whole list visibly reshuffle for no action the user actually took. Keep them in their own fixed,
     // trackSeq-ordered block at the very end instead -- each one moves to
     // its proper place exactly once, when it finishes loading, not before.
     std::vector<ProjectListHudEntry> loadingEntries;
     std::vector<ProjectListHudEntry> settled;
-    for (const ProjectListHudEntry& e : sorted) {
+    for (const ProjectListHudEntry& e : entries) {
         if (e.loading) loadingEntries.push_back(e);
         else settled.push_back(e);
     }
@@ -2505,8 +2469,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
         if (!e.path.empty()) RefreshFavouriteLabel(e.path, e.account, e.label);
     }
 
-    PinFavouritesToFront(settled);
-    sorted = settled;
+    std::vector<ProjectListHudEntry> sorted = settled;
     sorted.insert(sorted.end(), loadingEntries.begin(), loadingEntries.end());
 
     int rowHeight = std::max(kProjectListMinRowHeight, style.rowHeight);
