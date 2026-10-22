@@ -40,8 +40,6 @@ struct Config {
                                                             // <Alias>/<Branch> tokens (see tracking.cpp's BorderLabel)
     bool showProjectList = true;
     bool projectListFixedMatchTaskbar = true; // paint the hub's reserved band to look like the taskbar
-    bool projectListManualOrder = false; // true = user can drag items to reorder, remembered across
-                                          // restarts; false = always sorted by window left edge
     int projectListOpacityNormal = 255;
     int projectListOpacityHover = 255;
     bool projectListActivateOnHover = false;

@@ -61,7 +61,7 @@ struct TrackedWindow {
     DWORD pid = 0;
     std::wstring label;     // display text: rawLabel with any user-set alias applied (see label_alias.h)
     std::wstring rawLabel;  // folder name derived from the target's title
-    std::wstring aliasKey;  // key for this window's alias and manual-order slot: rawLabel, or a
+    std::wstring aliasKey;  // key for this window's alias and drag-order slot: rawLabel, or a
                             // session-only per-window key when no folder/repo is open (see label_alias.h)
     std::wstring branch;    // ${activeRepositoryBranchName} from the title, empty outside a git repo --
                             // fills label_alias_format's <Branch> on the border's label chip (see BorderLabel)
@@ -81,13 +81,11 @@ struct TrackedWindow {
                               // (see account.h), else empty
     std::wstring lastTitle; // window title as of the last NAMECHANGE acted on (or tracking) -- see WinEventProc
     std::wstring lastLabel; // label last painted, to detect changes
-    RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized -- lets a minimized
-                              // window's project-list HUD entry keep sorting where it normally sits
-                              // instead of jumping around (see SyncProjectListHud)
-    long long trackSeq = 0; // this window's position in track order (see g_nextTrackSeq) -- lets manual
-                             // mode append a project the user hasn't dragged (so it has no position
-                             // yet) after the ones that do, instead of falling back to sorting it
-                             // by on-screen position among other not-yet-ordered entries (see
+    RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized (see SyncProjectListHud) --
+                              // reported in diagnostic snapshots
+    long long trackSeq = 0; // this window's position in track order (see g_nextTrackSeq) -- lets the
+                             // hub append a project the user hasn't dragged (so it has no position
+                             // yet) after the ones that do (see project_list_hud.cpp's
                              // ApplyManualOrder). NOT a reliable "when was this actually opened" signal --
                              // e.g. multiple VS Code windows commonly share one OS process, so process
                              // creation time can't tell them apart either.
@@ -338,17 +336,11 @@ static void SyncProjectListHud() {
         // Minimized windows are still WS_VISIBLE (that's a separate style
         // bit from iconic/minimized state) -- keep showing them in the HUD
         // rather than dropping them, since restoring a minimized window is
-        // exactly the kind of thing this list is for. There's no meaningful
-        // *current* on-screen rect to sort by while minimized, so fall back
-        // to wherever it was last seen (zero-rect if never seen, e.g.
-        // tracked while already minimized).
-        RECT rect;
-        if (IsIconic(kv.first)) {
-            rect = kv.second.lastKnownRect;
-        } else if (GetVisibleWindowRect(kv.first, rect)) {
+        // exactly the kind of thing this list is for.
+        if (!IsIconic(kv.first)) {
+            RECT rect;
+            if (!GetVisibleWindowRect(kv.first, rect)) continue;
             kv.second.lastKnownRect = rect;
-        } else {
-            continue;
         }
 
         // Re-resolve on every sync (cheap: an in-memory map lookup) rather
@@ -362,7 +354,6 @@ static void SyncProjectListHud() {
 
         ProjectListHudEntry entry;
         entry.target = kv.first;
-        entry.windowRect = rect;
         entry.trackSeq = kv.second.trackSeq;
         entry.label = kv.second.label;
         entry.rawLabel = kv.second.rawLabel;
@@ -386,7 +377,6 @@ static void SyncProjectListHud() {
     }
 
     ProjectListHudStyle style;
-    style.manualOrder = g_config.projectListManualOrder;
     style.rowHeight = g_config.labelHeight;
     style.fontSize = g_config.labelFontSize;
     style.labelTextColorAuto = g_config.labelTextColorAuto;

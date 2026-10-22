@@ -119,8 +119,6 @@ struct ProjectListHudState {
     enum DragMode { DragNone, DragMove, DragResizeLeft, DragResizeRight, DragReorder } dragMode = DragNone;
     POINT dragStart = {0, 0};
     RECT dragStartRect = {0, 0, 0, 0};
-    bool manualOrderMode = false; // mirrors style.manualOrder, cached here since WM_LBUTTONDOWN needs it
-                                  // without going through UpdateProjectListHud
     std::vector<std::wstring> manualOrder; // aliasKeys in last-dragged display order, this run only
     int pendingDragIndex = -1;   // item index under the cursor at WM_LBUTTONDOWN, before a plain-left-drag
                                   // has moved far enough to commit to DragReorder (vs. a plain click)
@@ -252,10 +250,9 @@ static bool EntryIsFavourite(const ProjectListHudEntry& entry) {
 }
 
 // Moves every favourite entry ahead of every non-favourite one, preserving
-// relative order within each group (i.e. whatever ApplyManualOrder/the
-// window-position sort already produced) -- applied unconditionally,
-// regardless of style.manualOrder, so favourites stay pinned to the front
-// of the hub item list either way. Drag-and-drop reordering (see
+// relative order within each group (i.e. whatever ApplyManualOrder already
+// produced), so favourites stay pinned to the front of the hub item list.
+// Drag-and-drop reordering (see
 // FavouriteZoneCount) then confines a dragged item to its own group, so
 // this front-pinning can't be undone by a drag.
 static void PinFavouritesToFront(std::vector<ProjectListHudEntry>& entries) {
@@ -1230,7 +1227,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             // reorder-drag once the cursor has moved far enough to
             // disambiguate it from a plain click (which activates the
             // window on release instead -- see WM_LBUTTONUP).
-            if (state->manualOrderMode && state->dragMode == ProjectListHudState::DragNone &&
+            if (state->dragMode == ProjectListHudState::DragNone &&
                 state->pendingDragIndex >= 0) {
                 POINT pt;
                 GetCursorPos(&pt);
@@ -2478,14 +2475,9 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     }
 
     std::vector<ProjectListHudEntry> sorted = entries;
-    std::sort(sorted.begin(), sorted.end(), [](const ProjectListHudEntry& a, const ProjectListHudEntry& b) {
-        if (a.windowRect.left != b.windowRect.left) return a.windowRect.left < b.windowRect.left;
-        if (a.windowRect.top != b.windowRect.top) return a.windowRect.top < b.windowRect.top;
-        return a.target < b.target;
-    });
 
     // Pull loading entries (see ProjectListHudEntry::loading) out before
-    // manual-order matching and favourites-pinning below: both key off
+    // drag-order matching and favourites-pinning below: both key off
     // rawLabel/path, which can still be changing moment to moment while
     // loading, and would otherwise make the whole list visibly reshuffle
     // for no action the user actually took. Keep them in their own fixed,
@@ -2500,8 +2492,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     std::sort(loadingEntries.begin(), loadingEntries.end(),
              [](const ProjectListHudEntry& a, const ProjectListHudEntry& b) { return a.trackSeq < b.trackSeq; });
 
-    state->manualOrderMode = style.manualOrder;
-    if (style.manualOrder) ApplyManualOrder(settled, state->manualOrder);
+    ApplyManualOrder(settled, state->manualOrder);
 
     // Keep a favourite's stored label in sync with its live hub item
     // whenever that project is actually open -- otherwise the favourites

@@ -102,7 +102,6 @@ first build):
 | `show_label` | Show the folder/repo name as a label chip inside the border's top-left corner (`true`/`false`). |
 | `show_project_list` | Show an interactive project list HUD in a band reserved directly above the taskbar, using the same labels/colors as the border chips; includes minimized windows so it doubles as a restore list (`true`/`false` -- see below). |
 | `project_list_fixed_match_taskbar` | Paint the hub's whole reserved band to look like the taskbar (`true`), or leave its empty part showing the desktop (`false`). Default `true`. |
-| `project_list_order` | Item order: `auto` (sorted by window left edge) or `manual` (drag items with a plain left-click to arrange them yourself -- see below). Default `auto`. |
 | `project_list_opacity_normal` | Project list HUD opacity when no item is hovered: 0 (invisible) - 255 (fully opaque). |
 | `project_list_opacity_hover` | Project list HUD opacity for the currently hovered item: 0 (invisible) - 255 (fully opaque). |
 | `project_list_activate_on_hover` | Temporarily activate the matching VS Code window when hovering a project-list item (`true`/`false`, default `false`). |
@@ -170,9 +169,9 @@ the taskbar, so a hover highlight isn't copied). With an auto-hide taskbar
 there's nothing to copy, so it falls back to plain dark or light, per the
 Windows theme.
 
-### Project list HUD manual ordering
+### Project list HUD ordering
 
-With `project_list_order=manual`, plain left-click-and-hold on an item (as
+Plain left-click-and-hold on an item (as
 opposed to a plain click, which activates its window) drags it to a new
 position: as you move it, the other items shift live to open a gap at the
 candidate drop spot, and the item you're dragging floats above them,
@@ -183,9 +182,7 @@ caveat as aliases: two windows sharing an identical label are kept
 adjacent to each other, not independently ordered, and a `(no folder)`
 window keeps its place only while it stays open). The order lasts until
 the app exits and isn't saved -- no project is reopened at startup, so there
-would be nothing for a saved order to apply to. Switching
-`project_list_order` back to `auto` falls back to window-left-edge sorting;
-switching back to `manual` restores the last dragged arrangement.
+would be nothing for a saved order to apply to.
 
 ### Project list HUD item context menu
 

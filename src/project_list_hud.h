@@ -16,13 +16,12 @@ enum class ClaudeStatus { None, Attention, Working, Waiting };
 
 struct ProjectListHudEntry {
     HWND target = nullptr;
-    RECT windowRect = {}; // target's on-screen bounds -- used to order entries to match window layout
-    long long trackSeq = 0; // this window's track order, oldest first -- the append order for a manual-mode
+    long long trackSeq = 0; // this window's track order, oldest first -- the append order for an
                              // entry that has no dragged position yet (see ApplyManualOrder in
                              // project_list_hud.cpp)
     std::wstring label;    // display text (an alias, if the user set one for aliasKey -- see label_alias.h)
     std::wstring rawLabel; // the un-aliased label
-    std::wstring aliasKey; // key for this window's alias and manual-order slot -- rawLabel, or a
+    std::wstring aliasKey; // key for this window's alias and drag-order slot -- rawLabel, or a
                             // session-only per-window key when no folder is open (see label_alias.h)
     std::wstring path;     // absolute folder path this window has open, resolved via worktree_resolver's
                             // ResolveFolderPath -- empty if VS Code hasn't recorded it (e.g. a plain
@@ -61,8 +60,6 @@ struct ProjectListHudUsageRing {
 };
 
 struct ProjectListHudStyle {
-    bool manualOrder = false; // true = user can drag items to reorder (kept for this run only);
-                              // false = always sorted by window left edge
     int rowHeight = 18;
     int fontSize = 13;
     bool labelTextColorAuto = false;
@@ -113,13 +110,11 @@ void HideProjectListHud(HWND hud);
 // band shows the desktop.
 void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTaskbar);
 
-// Sorts `entries` to match window layout (left-to-right, top-to-bottom) --
-// or, if `style.manualOrder` is set, to the last order the user dragged
-// them into during this run (never saved), with any entries not in it
-// appended at the end in their window-layout order -- then moves every
-// favourite entry (see favourites.h) ahead of the non-favourites,
-// preserving each group's relative order, so favourites always sit at the
-// front of the list regardless of window layout or manual order --
+// Sorts `entries` to the last order the user dragged them into during this
+// run (never saved), with any entries not in it appended at the end in
+// the order they were tracked -- then moves every favourite entry (see
+// favourites.h) ahead of the non-favourites, preserving each group's
+// relative order, so favourites always sit at the front of the list --
 // measures/sizes the HUD to fit them -- a single horizontal strip, every
 // item sharing one width -- and shows it at the right end of its band (see
 // SetProjectListHudDocked), unless the user has manually slid/resized it
@@ -132,14 +127,14 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTas
 // the button off too there's nothing to show and this does nothing, so call
 // HideProjectListHud in that case instead.
 //
-// When style.manualOrder is set, plain left-click-and-drag on an item (as
+// Plain left-click-and-drag on an item (as
 // opposed to a plain click, which activates it) reorders it: other items
 // shift live to open a gap at the candidate drop position as the dragged
 // item, shown floating, follows the cursor. The result applies from the
 // drop until the app exits -- it isn't saved, since no window is reopened
 // at startup for a saved order to apply to. A dragged item is confined to
-// its own favourite/non-favourite group -- it can be reordered within that group, but can't
-// be dropped across the boundary into the other one, so the favourites-
+// its own favourite/non-favourite group -- it can be reordered within that
+// group, but can't be dropped across the boundary into the other one, so the favourites-
 // always-in-front rule above can't be dragged away.
 void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entries,
                           const ProjectListHudStyle& style);

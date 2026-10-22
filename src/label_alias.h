@@ -2,7 +2,7 @@
 
 #include <string>
 
-// Aliases (and the project list HUD's manual order) are keyed by a
+// Aliases (and the project list HUD's drag order) are keyed by a
 // window's *alias key*: normally its
 // raw label text, so an alias follows the folder/repo across window
 // restarts and app restarts. If two tracked windows ever produce the
