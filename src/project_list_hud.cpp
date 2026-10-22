@@ -7,7 +7,6 @@
 #include "layered_rendering.h"
 #include "logger.h"
 #include "monitor_scenario.h"
-#include "project_list_order.h"
 #include "taskbar_backdrop.h"
 #include "vscode_cli.h"
 #include "window_discovery.h"
@@ -122,7 +121,7 @@ struct ProjectListHudState {
     RECT dragStartRect = {0, 0, 0, 0};
     bool manualOrderMode = false; // mirrors style.manualOrder, cached here since WM_LBUTTONDOWN needs it
                                   // without going through UpdateProjectListHud
-    std::vector<std::wstring> manualOrder; // aliasKeys in last-dragged display order (see project_list_order.h)
+    std::vector<std::wstring> manualOrder; // aliasKeys in last-dragged display order, this run only
     int pendingDragIndex = -1;   // item index under the cursor at WM_LBUTTONDOWN, before a plain-left-drag
                                   // has moved far enough to commit to DragReorder (vs. a plain click)
     int reorderIndex = -1;       // during DragReorder: dragged entry's current position in state->entries
@@ -1071,7 +1070,6 @@ static void EndReorderDrag(HWND hwnd, ProjectListHudState* state, int mouseX, in
     order.reserve(state->entries.size());
     for (const ProjectListHudEntry& e : state->entries) order.push_back(e.aliasKey);
     state->manualOrder = order;
-    SaveItemOrder(order);
     if (state->dragGhost) ShowWindow(state->dragGhost, SW_HIDE);
     RenderProjectListHud(hwnd, state);
     SetCursor(LoadCursorW(nullptr, ProjectListCursorForPoint(state, mouseX, mouseY)));
@@ -1481,8 +1479,8 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
         case WM_CAPTURECHANGED:
             // If this interrupts an in-progress reorder-drag (e.g. another
             // app steals capture), state->entries is left in whatever
-            // mid-drag arrangement it had reached -- unpersisted, so the
-            // next regular sync reapplies the last *saved* manualOrder and
+            // mid-drag arrangement it had reached -- not yet in manualOrder,
+            // so the next regular sync reapplies the last dropped order and
             // self-corrects the visual back to it.
             if (state) {
                 state->dragMode = ProjectListHudState::DragNone;
@@ -1597,7 +1595,6 @@ HWND CreateProjectListHud(HINSTANCE hInstance) {
         0, 0, 1, 1, nullptr, nullptr, hInstance, nullptr);
     if (!hwnd) return nullptr;
     ProjectListHudState* state = new ProjectListHudState();
-    state->manualOrder = LoadItemOrder();
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
     // Establishes the initial scenarioKey and, if this monitor scenario has
     // a remembered placement, pre-sets manualPosition/manualWidth from it
@@ -2434,8 +2431,8 @@ static int MeasureRequiredWidth(const std::vector<ProjectListHudEntry>& entries,
 
 // Rearranges `entries` to match `order` (a list of aliasKeys in the user's
 // last-dragged order): entries whose aliasKey appears in `order` come
-// first, in that relative order; any not found (e.g. a project the user
-// has never dragged, so it has no saved position) are appended afterward,
+// first, in that relative order; any not found (e.g. a project opened since
+// the last drag, so it has no position yet) are appended afterward,
 // oldest-tracked first (trackSeq) -- i.e. plain append order, not wherever
 // Windows happened to put that window on screen.
 static void ApplyManualOrder(std::vector<ProjectListHudEntry>& entries, const std::vector<std::wstring>& order) {

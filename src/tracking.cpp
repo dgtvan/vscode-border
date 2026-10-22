@@ -85,8 +85,8 @@ struct TrackedWindow {
                               // window's project-list HUD entry keep sorting where it normally sits
                               // instead of jumping around (see SyncProjectListHud)
     long long trackSeq = 0; // this window's position in track order (see g_nextTrackSeq) -- lets manual
-                             // mode append a project the user has never dragged (so it has no saved
-                             // position) after the ones that do, instead of falling back to sorting it
+                             // mode append a project the user hasn't dragged (so it has no position
+                             // yet) after the ones that do, instead of falling back to sorting it
                              // by on-screen position among other not-yet-ordered entries (see
                              // ApplyManualOrder). NOT a reliable "when was this actually opened" signal --
                              // e.g. multiple VS Code windows commonly share one OS process, so process

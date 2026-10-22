@@ -18,7 +18,7 @@ struct ProjectListHudEntry {
     HWND target = nullptr;
     RECT windowRect = {}; // target's on-screen bounds -- used to order entries to match window layout
     long long trackSeq = 0; // this window's track order, oldest first -- the append order for a manual-mode
-                             // entry that has no saved position yet (see ApplyManualOrder in
+                             // entry that has no dragged position yet (see ApplyManualOrder in
                              // project_list_hud.cpp)
     std::wstring label;    // display text (an alias, if the user set one for aliasKey -- see label_alias.h)
     std::wstring rawLabel; // the un-aliased label
@@ -61,7 +61,7 @@ struct ProjectListHudUsageRing {
 };
 
 struct ProjectListHudStyle {
-    bool manualOrder = false; // true = user can drag items to reorder (see project_list_order.h);
+    bool manualOrder = false; // true = user can drag items to reorder (kept for this run only);
                               // false = always sorted by window left edge
     int rowHeight = 18;
     int fontSize = 13;
@@ -115,7 +115,7 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTas
 
 // Sorts `entries` to match window layout (left-to-right, top-to-bottom) --
 // or, if `style.manualOrder` is set, to the last order the user dragged
-// them into (see project_list_order.h), with any entries never seen before
+// them into during this run (never saved), with any entries not in it
 // appended at the end in their window-layout order -- then moves every
 // favourite entry (see favourites.h) ahead of the non-favourites,
 // preserving each group's relative order, so favourites always sit at the
@@ -135,9 +135,10 @@ void SetProjectListHudDocked(HWND hud, bool docked, int rowHeight, bool matchTas
 // When style.manualOrder is set, plain left-click-and-drag on an item (as
 // opposed to a plain click, which activates it) reorders it: other items
 // shift live to open a gap at the candidate drop position as the dragged
-// item, shown floating, follows the cursor. The result is persisted
-// immediately on drop. A dragged item is confined to its own favourite/
-// non-favourite group -- it can be reordered within that group, but can't
+// item, shown floating, follows the cursor. The result applies from the
+// drop until the app exits -- it isn't saved, since no window is reopened
+// at startup for a saved order to apply to. A dragged item is confined to
+// its own favourite/non-favourite group -- it can be reordered within that group, but can't
 // be dropped across the boundary into the other one, so the favourites-
 // always-in-front rule above can't be dragged away.
 void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entries,

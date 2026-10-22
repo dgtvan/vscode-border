@@ -181,10 +181,11 @@ before you let go. Windows that appear for the first time are appended at
 the end until you place them. The order is matched by label text (same
 caveat as aliases: two windows sharing an identical label are kept
 adjacent to each other, not independently ordered, and a `(no folder)`
-window keeps its place only while it stays open) and is remembered
-across restarts, stored in `project_list_order.ini` next to `config.ini`.
-Switching `project_list_order` back to `auto` falls back to window-left-edge
-sorting; switching back to `manual` restores the last saved arrangement.
+window keeps its place only while it stays open). The order lasts until
+the app exits and isn't saved -- no project is reopened at startup, so there
+would be nothing for a saved order to apply to. Switching
+`project_list_order` back to `auto` falls back to window-left-edge sorting;
+switching back to `manual` restores the last dragged arrangement.
 
 ### Project list HUD item context menu
 
@@ -678,8 +679,6 @@ Not yet: the AI status indicator for Claude Code running inside the distro.
 - `src/monitor_scenario.*` -- identifies the current active-monitor set and persists/recalls the
   project list HUD's placement per scenario (see "Project list HUD position/size memory" above).
 - `src/label_alias.*` -- persists/recalls user-set label aliases (see "Project list HUD aliases" above).
-- `src/project_list_order.*` -- persists/recalls the manually-dragged item order (see "Project list HUD
-  manual ordering" above).
 - `src/favourites.*` -- persists/recalls the "+" button's favourite projects list (see "Project list HUD
   favourites" above).
 - `src/ai_provider.h` -- abstract interface an AI coding assistant integration implements (install/remove its
