@@ -254,10 +254,13 @@ menu. **Start VS Code** opens a brand-new, empty VS Code window -- with
 other accounts' user profiles configured it's a submenu of which account to
 open it as (see the `user_profile_*` settings in `config.ini`). Below it is a
 **Favourites** submenu: **Open All** first (opens every
-favourite not already open), then your saved favourite projects/folders,
-one submenu per favourite (a WSL folder's marked with the Tux icon) -- hover a
+favourite not already open), then your saved favourite projects/folders
+sorted by name (the same folder saved for several accounts sits together),
+one submenu per favourite (a WSL folder's marked with the Tux icon, any other
+with its account's icon, as its hub item would be) -- hover a
 favourite's name to expand it to **Open in New Window** (bolded as the
-default action; on an open one it just brings its window forward) and
+default action; it opens as the account the favourite was saved from, and on
+an open one it just brings its window forward) and
 **Remove from Favourites**.
 
 To add a favourite, right-click any regular item (or its border label
@@ -267,7 +270,10 @@ rest of the [item context menu](#project-list-hud-item-context-menu) above).
 Once that folder is a favourite, the same item's menu offers **Remove from
 Favourites** in its place. That only reaches a favourite while its window is
 open, though -- the "+" button's own menu is the way to remove one that
-isn't. Favourites are matched by folder path, not label text, and stored in
+isn't. Favourites are matched by folder path and account, not label text --
+the same folder can be a favourite once for each account it's opened as, so
+adding it from a window of one account doesn't mark it in another account's
+window -- and stored in
 `favourites.ini` next to `config.ini`. Favourites are never opened
 automatically when the app starts -- use the "+" button's **Favourites >
 Open All** to open them all at once.

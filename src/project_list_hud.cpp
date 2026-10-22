@@ -243,12 +243,13 @@ static int ProjectListDragCandidate(const ProjectListHudState* state, int x) {
     return (int)state->itemRects.size() - 1;
 }
 
-// True if `entry` is a saved favourite (see favourites.h) -- entries always
+// True if `entry`'s folder is a saved favourite for the account its window
+// runs as (see favourites.h) -- entries always
 // end up favourites-first (see PinFavouritesToFront), so hover/drag logic
 // elsewhere locates the boundary via FavouriteZoneCount rather than calling
 // this per item.
 static bool EntryIsFavourite(const ProjectListHudEntry& entry) {
-    return !entry.path.empty() && IsFavourite(entry.path);
+    return !entry.path.empty() && IsFavourite(entry.path, entry.account);
 }
 
 // Moves every favourite entry ahead of every non-favourite one, preserving
@@ -843,7 +844,7 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     // nothing here is usable yet.
     bool loading = index >= 0 && index < (int)state->entries.size() && state->entries[index].loading;
     bool hasPath = !loading && index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
-    bool alreadyFav = hasPath && IsFavourite(state->entries[index].path);
+    bool alreadyFav = hasPath && EntryIsFavourite(state->entries[index]);
     bool hasAlias = !loading && index >= 0 && index < (int)state->entries.size() &&
                     state->entries[index].label != state->entries[index].rawLabel;
     // A WSL window's folder (its \\wsl.localhost path, see wsl.h) can only be
@@ -896,9 +897,9 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     else if (cmd == 2) ClearAlias(hud, state, index);
     else if (cmd == 3) {
         const ProjectListHudEntry& entry = state->entries[index];
-        AddFavourite(entry.label, entry.path);
+        AddFavourite(entry.label, entry.path, entry.account);
     } else if (cmd == 4) {
-        RemoveFavourite(state->entries[index].path);
+        RemoveFavourite(state->entries[index].path, state->entries[index].account);
     } else if (cmd == 5) {
         // A WSL folder as the Linux path it is inside the distro.
         std::wstring linuxPath;
@@ -925,8 +926,10 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // holding "Open All" (every favourite not already open -- see
 // OpenAllFavourites for why open ones are skipped), then the saved favourite
 // projects (see favourites.h), each as its own submenu (a WSL folder's
-// marked with the WSL icon) -- hovering a favourite's name expands it to "Open in New
-// Window" (the default/bolded action, see vscode_cli.h's OpenNewVSCodeWindow;
+// marked with the WSL icon, any other with its account's icon by the same
+// rule as the items, see IconAccountFor) -- hovering a favourite's name expands it to "Open in New
+// Window" (the default/bolded action, as the favourite's own account -- see
+// vscode_cli.h's OpenNewVSCodeWindow and account.h's OpenNewVSCodeWindowAs;
 // on an open one it just re-activates its window) and "Remove from
 // Favourites". A plain
 // Win32 popup menu item can't both carry its own click action and expand a
@@ -940,32 +943,25 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     std::vector<FavouriteProject> favourites = LoadFavourites();
     const std::vector<std::wstring> profiles = ConfiguredUserProfiles();
 
-    // Reorder currently-open favourites to match their live position in the
-    // HUD itself (state->entries -- already window-layout- or, in manual-
-    // order mode, drag-order-sorted, see UpdateProjectListHud), while
-    // leaving closed favourites exactly where they already sit. A
-    // stable_sort whose comparator only orders a pair when *both* sides are
-    // open achieves that in one pass: a closed favourite compares equal to
-    // everything (open or closed) and so keeps its existing position via
-    // stable_sort's tie-breaking, while two open favourites get reordered
-    // against each other by HUD index. E.g. saved order A,B,C with only C
-    // and B currently open, in that HUD order, becomes A,C,B -- A never
-    // moves, C/B swap into their own two slots. This is deliberately tied
-    // to the HUD's own live order (not some independent "when was this
-    // opened" timestamp) so dragging an entry in manual-order mode is
-    // immediately reflected here too.
-    auto findOpenHudIndex = [&](const std::wstring& path) -> int {
-        for (size_t i = 0; i < state->entries.size(); i++) {
-            const ProjectListHudEntry& e = state->entries[i];
-            if (!e.path.empty() && _wcsicmp(e.path.c_str(), path.c_str()) == 0) return (int)i;
+    // Sorted by label, so one folder saved for several accounts sits
+    // together; those then follow the "Start VS Code" submenu's account
+    // order (this account, then the profiles in slot order, then any
+    // account no longer configured, by name).
+    auto accountRank = [&](const std::wstring& account) -> size_t {
+        if (account.empty()) return 0;
+        for (size_t i = 0; i < profiles.size(); i++) {
+            if (CompareStringOrdinal(profiles[i].c_str(), -1, account.c_str(), -1, TRUE) == CSTR_EQUAL) return 1 + i;
         }
-        return -1;
+        return 1 + profiles.size();
     };
     std::stable_sort(favourites.begin(), favourites.end(),
                      [&](const FavouriteProject& a, const FavouriteProject& b) {
-        int ia = findOpenHudIndex(a.path), ib = findOpenHudIndex(b.path);
-        if (ia < 0 || ib < 0) return false;
-        return ia < ib;
+        int byLabel = CompareStringEx(LOCALE_NAME_USER_DEFAULT, NORM_IGNORECASE | SORT_DIGITSASNUMBERS, a.label.c_str(),
+                                      -1, b.label.c_str(), -1, nullptr, nullptr, 0);
+        if (byLabel != CSTR_EQUAL) return byLabel == CSTR_LESS_THAN;
+        size_t ra = accountRank(a.account), rb = accountRank(b.account);
+        if (ra != rb) return ra < rb;
+        return CompareStringOrdinal(a.account.c_str(), -1, b.account.c_str(), -1, TRUE) == CSTR_LESS_THAN;
     });
 
     // Command ids: Open All = 1; per favourite i, open = 2 + i*2, remove =
@@ -1012,13 +1008,17 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
             AppendMenuW(sub, MF_STRING, removeId, L"Remove from Favourites");
             SetMenuDefaultItem(sub, openId, FALSE);
             AppendMenuW(favMenu, MF_POPUP, (UINT_PTR)sub, favourites[i].label.c_str());
-            // A WSL folder gets the WSL icon, as its hub item does.
+            // A WSL folder gets the WSL icon and any other its account's, as
+            // its hub item does.
+            MENUITEMINFOW mii = {sizeof(mii)};
+            mii.fMask = MIIM_BITMAP;
             if (ParseWslUncPath(favourites[i].path, nullptr, nullptr)) {
-                MENUITEMINFOW mii = {sizeof(mii)};
-                mii.fMask = MIIM_BITMAP;
                 mii.hbmpItem = GetWslIconMenuBitmap();
-                if (mii.hbmpItem) SetMenuItemInfoW(favMenu, GetMenuItemCount(favMenu) - 1, TRUE, &mii);
+            } else {
+                std::wstring iconAccount = IconAccountFor(favourites[i].account);
+                if (!iconAccount.empty()) mii.hbmpItem = GetAccountIconMenuBitmap(iconAccount);
             }
+            if (mii.hbmpItem) SetMenuItemInfoW(favMenu, GetMenuItemCount(favMenu) - 1, TRUE, &mii);
         }
     }
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)favMenu, L"Favourites");
@@ -1042,18 +1042,21 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     if (cmd == (int)kOpenAllId) {
         // Open-ness comes from the HUD's own entries (see
         // ProjectListHudEntry::path for which windows have no path).
-        std::vector<std::wstring> openPaths;
+        std::vector<OpenFolder> openFolders;
         for (const ProjectListHudEntry& e : state->entries) {
-            if (!e.path.empty()) openPaths.push_back(e.path);
+            if (!e.path.empty()) openFolders.push_back({e.path, e.account});
         }
-        OpenAllFavourites(AnyTrackedWindow(state), openPaths, L"hud-favourites-open-all");
+        OpenAllFavourites(AnyTrackedWindow(state), hud, openFolders, L"hud-favourites-open-all");
         return;
     }
     size_t i = (size_t)(cmd - 2) / 2;
     bool isOpen = (cmd - 2) % 2 == 0;
     if (i >= favourites.size()) return;
-    if (isOpen) OpenNewVSCodeWindow(AnyTrackedWindow(state), favourites[i].path, L"hud-favourite-open");
-    else RemoveFavourite(favourites[i].path);
+    const FavouriteProject& f = favourites[i];
+    if (!isOpen) RemoveFavourite(f.path, f.account);
+    else if (f.account.empty() || ParseWslUncPath(f.path, nullptr, nullptr))
+        OpenNewVSCodeWindow(AnyTrackedWindow(state), f.path, L"hud-favourite-open");
+    else OpenNewVSCodeWindowAs(hud, f.account, f.path, L"hud-favourite-open");
 }
 
 // Shared cleanup for ending a DragReorder, called both from a real
@@ -2511,7 +2514,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     // window title reparses differently once VS Code picks up this app's
     // window.title setting, or the user sets/changes an alias).
     for (const ProjectListHudEntry& e : settled) {
-        if (!e.path.empty()) RefreshFavouriteLabel(e.path, e.label);
+        if (!e.path.empty()) RefreshFavouriteLabel(e.path, e.account, e.label);
     }
 
     PinFavouritesToFront(settled);
