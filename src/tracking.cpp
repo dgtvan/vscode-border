@@ -254,11 +254,10 @@ static bool PathHasSegmentNamed(std::wstring cwd, const std::wstring& name) {
 // which of several bare windows it runs in.
 //
 // Only sessions of the window's own account count (see account.h), and the
-// home directory is that account's. Another account's folder paths are in
-// its own workspaceStorage, which this account can't read --
-// ResolveFolderPath would answer from this account's -- so its windows
-// match by name alone: a session whose cwd is in a folder named like the
-// window's.
+// home directory is that account's. Another account's window's path may
+// not be its own -- ResolveFolderPath falls back to this account's records
+// when that account's can't be read -- so its windows match by name alone:
+// a session whose cwd is in a folder named like the window's.
 static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<AiSessionStatus>& sessions) {
     if (sessions.empty()) return ClaudeStatus::None;
 
@@ -372,7 +371,8 @@ static void SyncProjectListHud() {
         entry.aliasKey = kv.second.aliasKey;
         entry.path = kv.second.folderName.empty()
                          ? L""
-                         : ResolveFolderPath(kv.second.folderName, kv.second.repoName, kv.second.wslDistro);
+                         : ResolveFolderPath(kv.second.folderName, kv.second.repoName, kv.second.wslDistro,
+                                             kv.second.account);
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
         entry.wslDistro = kv.second.wslDistro;

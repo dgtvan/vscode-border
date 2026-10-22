@@ -352,6 +352,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         LocalFree(argv);
         return RunFindVSCode();
     }
+    if (argv && argc >= 2 && wcscmp(argv[1], kListVSCodeFoldersArg) == 0) {
+        LocalFree(argv);
+        return RunListVSCodeFolders();
+    }
     if (argv) LocalFree(argv);
 
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\VSCodeBorderApp_SingleInstance");

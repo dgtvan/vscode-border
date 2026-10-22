@@ -212,7 +212,12 @@ which is resolved to a real absolute path via the same workspaceStorage
 lookup the AI status indicator and worktree name substitution use. When
 several folders VS Code has opened share that folder's name (every repo's
 `src`, say), the one inside the window's repo wins, then the one VS Code
-used most recently. When VS Code
+used most recently. A window running as another Windows account (a user
+profile) is looked up in that account's own VS Code records: read straight
+from its profile folder where this account is allowed to, else by a hidden
+helper started as that account with its password saved in Credential
+Manager (until that has answered, or with no password saved, this
+account's records stand in). When VS Code
 hasn't recorded a folder for that window (a multi-root workspace, for
 instance), there's nothing for those items to act on, so both groups are
 left off entirely rather than shown greyed out, leaving just the alias

@@ -1,11 +1,14 @@
 #include "worktree_resolver.h"
 
+#include "account.h"
 #include "config.h"
 #include "file_util.h"
 #include "logger.h"
+#include "text_util.h"
 #include "wsl.h"
 
 #include <windows.h>
+#include <sddl.h>
 
 #include <algorithm>
 #include <cctype>
@@ -25,7 +28,10 @@ struct FolderCandidate {
     std::wstring storageDir; // Windows only -- see LastUsedTime
     std::wstring distro;     // the WSL distro Linux VS Code recorded it in (path is then its
                              // \\wsl.localhost form, see wsl.h), empty for Windows VS Code
-    ULONGLONG wslLastUsed = 0; // WSL only: storage's mtime as of the scan, in seconds
+    ULONGLONG lastUsed = 0;    // when storageDir is empty (read in WSL, or by an account helper): its
+                               // LastUsedTime as of the scan -- seconds in WSL, a FILETIME from a helper
+    std::wstring account;      // Windows only: the other account (see account.h) whose VS Code recorded
+                               // it, empty for this app's own
 };
 static std::unordered_map<std::wstring, std::vector<FolderCandidate>>
     g_pathCache; // lowercased leaf name -> every recorded folder with that leaf (every entry, not just worktrees)
@@ -46,6 +52,36 @@ struct WslRecords {
 };
 static std::map<std::wstring, WslRecords> g_wsl;
 static const ULONGLONG kWslRescanCooldownMs = 60000;
+// Other Windows accounts (see account.h) ResolveFolderPath has been asked
+// about. A window running as another account is that account's VS Code,
+// which records its folders in that account's own workspaceStorage. That's
+// inside its profile folder, which this account normally can't read; where
+// it can (an administrator granted it), every rebuild scans it like this
+// account's. Otherwise a helper reads it -- this exe run with
+// kListVSCodeFoldersArg as that account, with its password saved in
+// Credential Manager -- on a worker thread, since starting a process as
+// another account takes a while; the next lookup picks its answer up. That
+// is re-read like a WSL distro's records: on a miss (no more often than
+// kWslRescanCooldownMs), after InvalidateWorktreeCache, or on
+// RefreshWorktreeCache.
+struct AccountRecords {
+    std::wstring appData; // its Roaming AppData folder, empty if not found
+    bool direct = false;  // its workspaceStorage is readable from here
+    std::vector<FolderCandidate> folders; // the helper's last answer
+    bool stale = true;
+    bool fetching = false; // a helper is running
+    ULONGLONG lastScanTick = 0;
+    DWORD lastError = 0; // of the last helper start, to log a failure once rather than on every retry
+};
+static std::map<std::wstring, AccountRecords> g_accounts;
+// A helper's answer, handed from its worker thread to the next lookup.
+struct AccountFetch {
+    bool ok = false;
+    DWORD error = 0; // when !ok: StartHiddenProcessAsAccount's, or 0 if the helper itself failed
+    std::vector<FolderCandidate> folders;
+};
+static SRWLOCK g_fetchLock = SRWLOCK_INIT;
+static std::map<std::wstring, AccountFetch> g_fetched; // guarded by g_fetchLock
 
 static std::wstring ToLowerCopy(const std::wstring& s) {
     std::wstring out = s;
@@ -147,20 +183,45 @@ static void AddRecordedFolder(const FolderCandidate& candidate) {
     g_cache[ToLowerCopy(leaf)] = mainRepoName;
 }
 
-static void ProcessWorkspaceJson(const std::wstring& storageDir) {
-    std::wstring jsonPath = storageDir + L"\\workspace.json";
-    std::string uri;
-    if (!ReadFolderUri(jsonPath, uri)) return;
-
-    std::wstring path = FileUriToPath(uri);
+// The folder workspaceStorage entry `storageDir` records, any trailing
+// separator trimmed, into `path`. False if it records none (see
+// ReadFolderUri); true with `path` empty if its `uri` doesn't parse.
+static bool ReadRecordedFolder(const std::wstring& storageDir, std::wstring& path, std::string& uri) {
+    if (!ReadFolderUri(storageDir + L"\\workspace.json", uri)) return false;
+    path = FileUriToPath(uri);
     while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
+    return true;
+}
+
+// Calls `f` with each workspaceStorage entry's directory under VS Code user
+// data folder `userDir`. False (with GetLastError set) if there's no
+// workspaceStorage there, or it can't be read.
+template <typename F>
+static bool ForEachStorageDir(const std::wstring& userDir, F f) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((userDir + L"\\workspaceStorage\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        f(userDir + L"\\workspaceStorage\\" + fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return true;
+}
+
+static void ProcessWorkspaceJson(const std::wstring& storageDir, const std::wstring& account) {
+    std::wstring path;
+    std::string uri;
+    if (!ReadRecordedFolder(storageDir, path, uri)) return;
     if (path.empty()) {
-        Log(L"worktree resolver: %ls -> unparseable uri [%hs]", jsonPath.c_str(), uri.c_str());
+        Log(L"worktree resolver: %ls\\workspace.json -> unparseable uri [%hs]", storageDir.c_str(), uri.c_str());
         return;
     }
     FolderCandidate c;
     c.path = path;
     c.storageDir = storageDir;
+    c.account = account;
     AddRecordedFolder(c);
 }
 
@@ -202,28 +263,22 @@ static void ScanWslDistro(const std::wstring& distro) {
         FolderCandidate c;
         c.path = WslUncPath(distro, linuxPath);
         c.distro = distro;
-        c.wslLastUsed = strtoull(line.substr(0, tab).c_str(), nullptr, 10);
+        c.lastUsed = strtoull(line.substr(0, tab).c_str(), nullptr, 10);
         rec.folders.push_back(c);
     }
     LogDiag(L"worktree resolver: %zu folder(s) recorded in WSL distro [%ls]", rec.folders.size(), distro.c_str());
 }
 
-static void ScanUserDataDir(const std::wstring& userDir) {
-    std::wstring pattern = userDir + L"\\workspaceStorage\\*";
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) {
+static void ScanUserDataDir(const std::wstring& userDir, const std::wstring& account = L"") {
+    int entryCount = 0;
+    bool found = ForEachStorageDir(userDir, [&](const std::wstring& storageDir) {
+        entryCount++;
+        ProcessWorkspaceJson(storageDir, account);
+    });
+    if (!found) {
         LogDiag(L"worktree resolver: no workspaceStorage under [%ls] (lastError=%lu)", userDir.c_str(), GetLastError());
         return;
     }
-    int entryCount = 0;
-    do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-        entryCount++;
-        ProcessWorkspaceJson(userDir + L"\\workspaceStorage\\" + fd.cFileName);
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
     LogDiag(L"worktree resolver: scanned %d workspaceStorage entries under [%ls]", entryCount, userDir.c_str());
 }
 
@@ -241,6 +296,14 @@ static void BuildCache() {
     std::wstring base(appData);
     ScanUserDataDir(base + L"\\Code\\User");
     ScanUserDataDir(base + L"\\Code - Insiders\\User");
+    for (const auto& kv : g_accounts) {
+        if (kv.second.direct) {
+            ScanUserDataDir(kv.second.appData + L"\\Code\\User", kv.first);
+            ScanUserDataDir(kv.second.appData + L"\\Code - Insiders\\User", kv.first);
+        } else {
+            for (const FolderCandidate& c : kv.second.folders) AddRecordedFolder(c);
+        }
+    }
     for (const auto& kv : g_wsl) {
         for (const FolderCandidate& c : kv.second.folders) AddRecordedFolder(c);
     }
@@ -249,7 +312,171 @@ static void BuildCache() {
         g_cache.size());
 }
 
+// `account`'s Roaming AppData folder: its profile folder, from the
+// registry's profile list, + AppData\Roaming. Empty if the account or its
+// profile (made on its first sign-in) can't be found.
+static std::wstring AccountRoamingAppData(const std::wstring& account) {
+    BYTE sid[SECURITY_MAX_SID_SIZE];
+    DWORD sidSize = sizeof(sid), domainLen = 256;
+    wchar_t domain[256];
+    SID_NAME_USE use;
+    if (!LookupAccountNameW(nullptr, account.c_str(), sid, &sidSize, domain, &domainLen, &use)) return L"";
+    LPWSTR sidText = nullptr;
+    if (!ConvertSidToStringSidW(sid, &sidText)) return L"";
+    std::wstring key = L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\" + std::wstring(sidText);
+    LocalFree(sidText);
+    wchar_t raw[MAX_PATH] = {}, expanded[MAX_PATH] = {};
+    DWORD size = sizeof(raw);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, key.c_str(), L"ProfileImagePath",
+                     RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND, nullptr, raw, &size) != ERROR_SUCCESS) {
+        return L"";
+    }
+    DWORD n = ExpandEnvironmentStringsW(raw, expanded, MAX_PATH);
+    if (n == 0 || n > MAX_PATH) return L"";
+    return std::wstring(expanded) + L"\\AppData\\Roaming";
+}
+
+// The first time a window of `account` asks: whether this account can read
+// that one's VS Code records itself, which a rebuild then does.
+static void NoteAccount(const std::wstring& account) {
+    if (g_accounts.count(account)) return;
+    AccountRecords& rec = g_accounts[account];
+    rec.appData = AccountRoamingAppData(account);
+    auto noop = [](const std::wstring&) {};
+    rec.direct = !rec.appData.empty() && (ForEachStorageDir(rec.appData + L"\\Code\\User", noop) ||
+                                          ForEachStorageDir(rec.appData + L"\\Code - Insiders\\User", noop));
+    if (rec.direct) {
+        Log(L"worktree resolver: reading [%ls]'s VS Code records under [%ls]", account.c_str(), rec.appData.c_str());
+        g_cacheBuilt = false;
+    } else {
+        Log(L"worktree resolver: [%ls]'s VS Code records aren't readable from this account (profile folder [%ls]) "
+            L"-- reading them as that account",
+            account.c_str(), rec.appData.c_str());
+    }
+}
+
+// Worker thread: runs the folder-list helper as the account `param` (a
+// heap std::wstring, freed here) and leaves its answer in g_fetched.
+// Doesn't log -- Log isn't safe off the main thread -- so the lookup that
+// picks the answer up does.
+static DWORD WINAPI FetchAccountFoldersThread(LPVOID param) {
+    std::wstring account = *(std::wstring*)param;
+    delete (std::wstring*)param;
+    AccountFetch fetch;
+    SECURITY_ATTRIBUTES inherit = {sizeof(inherit), nullptr, TRUE};
+    HANDLE ourOut = nullptr, childOut = nullptr;
+    if (!CreatePipe(&ourOut, &childOut, &inherit, 0)) {
+        fetch.error = GetLastError();
+    } else {
+        SetHandleInformation(ourOut, HANDLE_FLAG_INHERIT, 0);
+        wchar_t exe[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring commandLine = L"\"" + std::wstring(exe) + L"\" " + kListVSCodeFoldersArg;
+        HANDLE child =
+            StartHiddenProcessAsAccount(account, exe, commandLine, GetExeDir(), nullptr, childOut, fetch.error);
+        CloseHandle(childOut);
+        std::string out;
+        if (child) {
+            char buf[4096];
+            DWORD read = 0;
+            while (ReadFile(ourOut, buf, sizeof(buf), &read, nullptr) && read > 0) out.append(buf, read);
+            DWORD exitCode = 1;
+            if (WaitForSingleObject(child, 5000) == WAIT_OBJECT_0) GetExitCodeProcess(child, &exitCode);
+            CloseHandle(child);
+            fetch.ok = exitCode == 0;
+        }
+        CloseHandle(ourOut);
+        // "<last used>\t<path>" lines -- see RunListVSCodeFolders.
+        size_t pos = 0;
+        while (fetch.ok && pos < out.size()) {
+            size_t eol = out.find('\n', pos);
+            std::string line = out.substr(pos, (eol == std::string::npos ? out.size() : eol) - pos);
+            pos = eol == std::string::npos ? out.size() : eol + 1;
+            size_t tab = line.find('\t');
+            if (tab == std::string::npos) continue;
+            FolderCandidate c;
+            c.path = Utf8ToWide(line.substr(tab + 1));
+            if (c.path.empty()) continue;
+            c.account = account;
+            c.lastUsed = strtoull(line.substr(0, tab).c_str(), nullptr, 10);
+            fetch.folders.push_back(c);
+        }
+    }
+    AcquireSRWLockExclusive(&g_fetchLock);
+    g_fetched[account] = std::move(fetch);
+    ReleaseSRWLockExclusive(&g_fetchLock);
+    return 0;
+}
+
+// Starts a helper for `account` if its records are stale (first ask, or
+// InvalidateWorktreeCache) -- or, with `missed`, if the last one started
+// over kWslRescanCooldownMs ago -- and none is running already.
+static void FetchAccountFoldersIfDue(const std::wstring& account, bool missed) {
+    AccountRecords& rec = g_accounts[account];
+    if (rec.direct || rec.fetching) return;
+    bool due = rec.stale || (missed && GetTickCount64() - rec.lastScanTick >= kWslRescanCooldownMs);
+    if (!due) return;
+    rec.stale = false;
+    rec.lastScanTick = GetTickCount64();
+    std::wstring* param = new std::wstring(account);
+    HANDLE thread = CreateThread(nullptr, 0, FetchAccountFoldersThread, param, 0, nullptr);
+    if (!thread) {
+        delete param;
+        Log(L"worktree resolver: couldn't start a thread to read [%ls]'s VS Code records, lastError=%lu",
+            account.c_str(), GetLastError());
+        return;
+    }
+    CloseHandle(thread);
+    rec.fetching = true;
+}
+
 static ULONGLONG g_lastRebuildTick = 0;
+
+// Takes in the helpers' answers that came in since the last lookup, and
+// rebuilds the caches with them.
+static void PickUpAccountFolders() {
+    std::map<std::wstring, AccountFetch> fetched;
+    AcquireSRWLockExclusive(&g_fetchLock);
+    fetched.swap(g_fetched);
+    ReleaseSRWLockExclusive(&g_fetchLock);
+    if (fetched.empty()) return;
+    for (auto& kv : fetched) {
+        AccountRecords& rec = g_accounts[kv.first];
+        rec.fetching = false;
+        AccountFetch& f = kv.second;
+        if (f.ok) {
+            rec.folders = std::move(f.folders);
+            rec.lastError = 0;
+            LogDiag(L"worktree resolver: %zu folder(s) recorded by [%ls]'s VS Code", rec.folders.size(),
+                    kv.first.c_str());
+            continue;
+        }
+        DWORD err = f.error ? f.error : ERROR_GEN_FAILURE;
+        if (err == rec.lastError) continue;
+        rec.lastError = err;
+        if (f.error == ERROR_NOT_FOUND) {
+            LogWarn(L"worktree resolver: can't read [%ls]'s VS Code records -- no password saved for it (open a VS "
+                    L"Code window as it from the hub's + button and tick Remember); its windows' folders are looked "
+                    L"up in this account's records meanwhile",
+                    kv.first.c_str());
+        } else if (f.error) {
+            LogWarn(L"worktree resolver: can't read [%ls]'s VS Code records -- couldn't start the helper as it: %ls",
+                    kv.first.c_str(), StartAsErrorText(f.error).c_str());
+        } else {
+            LogWarn(L"worktree resolver: can't read [%ls]'s VS Code records -- the helper run as it failed",
+                    kv.first.c_str());
+        }
+    }
+    BuildCache();
+    g_cacheBuilt = true;
+    g_lastRebuildTick = GetTickCount64();
+}
+
+// Windows account names are case-insensitive, non-ASCII letters included.
+static bool SameAccountName(const std::wstring& a, const std::wstring& b) {
+    return CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
+}
+
 static const ULONGLONG kRebuildCooldownMs = 15000;
 
 std::wstring ResolveMainRepoName(const std::wstring& repoName) {
@@ -297,7 +524,7 @@ static bool IsExistingDirectory(const std::wstring& path) {
 // window). Read live rather than cached, since it keeps moving for as long
 // as a window has the folder open.
 static ULONGLONG LastUsedTime(const FolderCandidate& c) {
-    if (!c.distro.empty()) return c.wslLastUsed; // only ever compared against others from the same distro
+    if (c.storageDir.empty()) return c.lastUsed; // only ever compared against others read the same way
     ULONGLONG newest = 0;
     for (const std::wstring& p : {c.storageDir, c.storageDir + L"\\state.vscdb"}) {
         WIN32_FILE_ATTRIBUTE_DATA data;
@@ -340,8 +567,15 @@ static bool RefreshWslIfDue(const std::wstring& distro, bool missed) {
     return true;
 }
 
-std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& repoName, const std::wstring& wslDistro) {
+std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& repoName, const std::wstring& wslDistro,
+                              const std::wstring& account) {
+    PickUpAccountFolders();
     if (!wslDistro.empty()) RefreshWslIfDue(wslDistro, false);
+    bool otherAccount = !account.empty() && wslDistro.empty();
+    if (otherAccount) {
+        NoteAccount(account);
+        FetchAccountFoldersIfDue(account, false);
+    }
 
     // Up front, not where the ranking below uses it: on a miss it can
     // rebuild the cache, which would free the candidate list being ranked.
@@ -357,17 +591,28 @@ std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& rep
     auto it = g_pathCache.find(key);
 
     // Only folders recorded by the same VS Code count: Windows for a Windows
-    // window, that distro's Linux VS Code for a WSL one. On a miss, the same
+    // window, that distro's Linux VS Code for a WSL one -- and for another
+    // account's window, that account's, else this account's (its records
+    // unreadable, or not written yet: on one machine a folder of the same
+    // name is most likely the same folder). On a miss, the same
     // self-correcting rebuild as ResolveMainRepoName, sharing its cooldown
     // timer -- a miss from either function within the same window shouldn't
     // trigger two rescans back to back -- or for a WSL window, a re-read of
-    // just that distro (see RefreshWslIfDue).
-    auto hasCandidate = [&]() {
-        return it != g_pathCache.end() && std::any_of(it->second.begin(), it->second.end(), [&](const FolderCandidate& c) {
-                   return c.distro == wslDistro;
-               });
+    // just that distro (see RefreshWslIfDue), and for another account's
+    // window whose records only its helper can read, another helper run
+    // (see FetchAccountFoldersIfDue), even while this account's records
+    // stand in for them.
+    auto recordedBy = [&](const FolderCandidate& c, const std::wstring& acct) {
+        return c.distro == wslDistro && SameAccountName(c.account, acct);
     };
-    if (!hasCandidate()) {
+    auto hasCandidateOf = [&](const std::wstring& acct) {
+        return it != g_pathCache.end() && std::any_of(it->second.begin(), it->second.end(),
+                                                      [&](const FolderCandidate& c) { return recordedBy(c, acct); });
+    };
+    auto hasCandidate = [&]() { return hasCandidateOf(account) || hasCandidateOf(L""); };
+    if (otherAccount && !hasCandidateOf(account)) FetchAccountFoldersIfDue(account, true);
+    bool missed = otherAccount && g_accounts[account].direct ? !hasCandidateOf(account) : !hasCandidate();
+    if (missed) {
         if (!wslDistro.empty()) {
             if (RefreshWslIfDue(wslDistro, true)) it = g_pathCache.find(key);
         } else {
@@ -380,9 +625,10 @@ std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& rep
         }
     }
     if (!hasCandidate()) return L"";
+    std::wstring recorder = hasCandidateOf(account) ? account : L"";
     std::vector<const FolderCandidate*> candidates;
     for (const FolderCandidate& c : it->second) {
-        if (c.distro == wslDistro) candidates.push_back(&c);
+        if (recordedBy(c, recorder)) candidates.push_back(&c);
     }
     if (candidates.size() == 1) return candidates[0]->path;
 
@@ -419,6 +665,12 @@ std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& rep
 
 void RefreshWorktreeCache() {
     for (auto& kv : g_wsl) ScanWslDistro(kv.first);
+    // An account whose profile folder wasn't found is looked for again on
+    // its next ask; the others' helpers rerun on theirs.
+    for (auto it = g_accounts.begin(); it != g_accounts.end();) {
+        it->second.stale = true;
+        it = it->second.appData.empty() && !it->second.fetching ? g_accounts.erase(it) : std::next(it);
+    }
     BuildCache();
     g_cacheBuilt = true;
     g_lastRebuildTick = GetTickCount64();
@@ -427,4 +679,26 @@ void RefreshWorktreeCache() {
 void InvalidateWorktreeCache() {
     g_cacheBuilt = false;
     for (auto& kv : g_wsl) kv.second.stale = true;
+    for (auto& kv : g_accounts) kv.second.stale = true;
+}
+
+const wchar_t* const kListVSCodeFoldersArg = L"--list-vscode-folders";
+
+int RunListVSCodeFolders() {
+    wchar_t appData[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return 1;
+    std::string out;
+    for (const wchar_t* product : {L"\\Code\\User", L"\\Code - Insiders\\User"}) {
+        ForEachStorageDir(std::wstring(appData) + product, [&](const std::wstring& storageDir) {
+            FolderCandidate c;
+            std::string uri;
+            if (!ReadRecordedFolder(storageDir, c.path, uri) || c.path.empty()) return;
+            c.storageDir = storageDir;
+            out += std::to_string(LastUsedTime(c)) + "\t" + WideToUtf8(c.path) + "\n";
+        });
+    }
+    DWORD written = 0;
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), out.data(), (DWORD)out.size(), &written, nullptr);
+    return 0;
 }
