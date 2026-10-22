@@ -122,6 +122,8 @@ struct FetchResult {
     ClaudeUsageLimit session, weekly;
     std::wstring error;
     bool wrongPassword = false; // set by a user profile's worker -- the saved password is to be dropped
+    std::wstring note;          // something worth logging that isn't a failure (a renewed login)
+    bool noteOnly = false;      // a helper's note line: carries no result
 };
 
 ClaudeUsageLimit ParseLimit(const std::string& content, const JsonScan::Span& root, const char* key) {
@@ -264,9 +266,162 @@ bool HttpGetUsage(const std::string& token, std::string& body, std::wstring& err
     return ok;
 }
 
-// One fetch for the account this runs as. Doesn't log (see
-// RunClaudeUsageHelper).
+// The Claude Code executable the account this runs as has: on PATH (the
+// native installer's ~/.local/bin), its native install, else the newest
+// one bundled with its VS Code extension. Empty if none.
+std::wstring FindClaudeExe() {
+    wchar_t found[MAX_PATH] = {};
+    if (SearchPathW(nullptr, L"claude.exe", nullptr, MAX_PATH, found, nullptr) > 0) return found;
+    wchar_t home[MAX_PATH] = {};
+    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return L"";
+    std::wstring native = std::wstring(home) + L"\\.local\\bin\\claude.exe";
+    if (GetFileAttributesW(native.c_str()) != INVALID_FILE_ATTRIBUTES) return native;
+
+    std::wstring best;
+    ULONGLONG bestTime = 0;
+    for (const wchar_t* vscodeDir : {L"\\.vscode\\extensions\\", L"\\.vscode-insiders\\extensions\\"}) {
+        std::wstring extensions = std::wstring(home) + vscodeDir;
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((extensions + L"anthropic.claude-code-*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            std::wstring exe = extensions + fd.cFileName + L"\\resources\\native-binary\\claude.exe";
+            WIN32_FILE_ATTRIBUTE_DATA data;
+            if (!GetFileAttributesExW(exe.c_str(), GetFileExInfoStandard, &data)) continue;
+            ULONGLONG t = ((ULONGLONG)data.ftLastWriteTime.dwHighDateTime << 32) | data.ftLastWriteTime.dwLowDateTime;
+            if (t > bestTime) {
+                bestTime = t;
+                best = exe;
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    return best;
+}
+
+const DWORD kRenewTimeoutMs = 60000;
+
+// Has Claude Code renew the account's expired login: `claude -p` with
+// nothing on stdin renews the token as it starts, then stops with "Input
+// must be provided" before calling the model -- so it costs no usage. (Seen
+// with Claude Code 2.1.304: `claude auth status` doesn't renew.) Claude Code
+// does the renewing itself, so its own login is never at risk the way it
+// would be if this app refreshed the token. True once it has run; false with
+// `error` set if it couldn't be. Doesn't log (see RunClaudeUsageHelper).
+bool RunClaudeCodeToRenewLogin(std::wstring& exeOut, std::wstring& error) {
+    exeOut = FindClaudeExe();
+    if (exeOut.empty()) {
+        error = L"no Claude Code found for this account to renew it with (not on PATH, in ~\\.local\\bin, or in "
+                L"its VS Code extensions)";
+        return false;
+    }
+    wchar_t tempDir[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tempDir);
+    SECURITY_ATTRIBUTES inherit = {sizeof(inherit), nullptr, TRUE};
+    HANDLE stdinRead = nullptr, stdinWrite = nullptr;
+    if (!CreatePipe(&stdinRead, &stdinWrite, &inherit, 0)) {
+        error = FormatError(L"couldn't create a pipe for Claude Code (error %lu)", GetLastError());
+        return false;
+    }
+    SetHandleInformation(stdinWrite, HANDLE_FLAG_INHERIT, 0);
+    // Output goes to a file rather than a pipe, so a hung Claude Code can't
+    // block the read past the timeout.
+    wchar_t outPath[MAX_PATH] = {};
+    GetTempFileNameW(tempDir, L"vbr", 0, outPath);
+    HANDLE outFile = CreateFileW(outPath, GENERIC_WRITE, FILE_SHARE_READ, &inherit, CREATE_ALWAYS,
+                                 FILE_ATTRIBUTE_TEMPORARY, nullptr);
+
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = stdinRead;
+    si.hStdOutput = outFile;
+    si.hStdError = outFile;
+    PROCESS_INFORMATION pi = {};
+    // Hooks off: it isn't a real session, and the app's own status hook
+    // would otherwise report one starting and ending.
+    std::wstring commandLine = L"\"" + exeOut + L"\" -p --settings \"{\\\"disableAllHooks\\\":true}\"";
+    bool started = outFile != INVALID_HANDLE_VALUE &&
+                   CreateProcessW(exeOut.c_str(), &commandLine[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                                  tempDir, &si, &pi);
+    DWORD startError = GetLastError();
+    CloseHandle(stdinRead);
+    CloseHandle(stdinWrite); // nothing on stdin
+    if (outFile != INVALID_HANDLE_VALUE) CloseHandle(outFile);
+    if (!started) {
+        DeleteFileW(outPath);
+        error = FormatError(L"couldn't run Claude Code (%ls) to renew it (error %lu)", exeOut.c_str(), startError);
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    bool finished = WaitForSingleObject(pi.hProcess, kRenewTimeoutMs) == WAIT_OBJECT_0;
+    if (!finished) TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hProcess);
+    std::string output;
+    DWORD readErr = 0;
+    ReadSharedFile(outPath, output, readErr);
+    DeleteFileW(outPath);
+    if (!finished) {
+        error = FormatError(L"Claude Code (%ls), run to renew it, didn't finish within %lus", exeOut.c_str(),
+                            kRenewTimeoutMs / 1000);
+        return false;
+    }
+    // For the caller's message if the token still isn't renewed.
+    std::wstring said = Utf8ToWide(output.substr(0, 200));
+    for (wchar_t& c : said) {
+        if (c == L'\r' || c == L'\n') c = L' ';
+    }
+    error = said;
+    return true;
+}
+
+// The login file's expiresAt (Unix ms), 0 if it can't be read.
+long long ReadLoginExpiry() {
+    std::wstring dir = ClaudeConfigDir();
+    std::string content;
+    DWORD err = 0;
+    if (dir.empty() || !ReadSharedFile(dir + L"\\.credentials.json", content, err) ||
+        JsonScan::FindRootObjectOpenBrace(content) == std::string::npos) {
+        return 0;
+    }
+    JsonScan::Span root = JsonScan::EnsureRootObject(content);
+    JsonScan::Span oauth = ObjectValue(content, root.start, root.end, "claudeAiOauth");
+    long long expiresAtMs = oauth.found ? _atoi64(RawValue(content, oauth.start, oauth.end, "expiresAt").c_str()) : 0;
+    SecureZeroMemory(&content[0], content.size());
+    return expiresAtMs;
+}
+
+FetchResult FetchClaudeUsageOnce();
+
+// One fetch for the account this runs as. When the login has expired, has
+// Claude Code renew it (see RunClaudeCodeToRenewLogin) and fetches again --
+// once per expired token, so a renewal that doesn't work isn't retried every
+// fetch. Doesn't log (see RunClaudeUsageHelper).
 FetchResult FetchClaudeUsage() {
+    static long long renewTriedFor = 0; // the expiresAt last tried
+    FetchResult r = FetchClaudeUsageOnce();
+    long long expiredAt = r.ok ? 0 : ReadLoginExpiry();
+    if (r.ok || expiredAt <= 0 || expiredAt / 1000 > UnixNow() || expiredAt == renewTriedFor) return r;
+    renewTriedFor = expiredAt;
+
+    std::wstring exe, said;
+    if (!RunClaudeCodeToRenewLogin(exe, said)) {
+        r.error += L" -- and the app couldn't renew it: " + said;
+        return r;
+    }
+    long long now = ReadLoginExpiry();
+    if (now <= expiredAt || now / 1000 <= UnixNow()) {
+        r.error += L" -- running Claude Code (" + exe + L") to renew it didn't" + (said.empty() ? L"" : L"; it said: " + said);
+        return r;
+    }
+    FetchResult renewed = FetchClaudeUsageOnce();
+    renewed.note = L"renewed the expired login (it had expired at " + FormatLocalTime(expiredAt / 1000) +
+                   L") by running Claude Code: " + exe;
+    return renewed;
+}
+
+FetchResult FetchClaudeUsageOnce() {
     FetchResult r;
     std::wstring dir = ClaudeConfigDir();
     if (dir.empty()) {
@@ -297,9 +452,7 @@ FetchResult FetchClaudeUsage() {
     long long expiresAtMs = _atoi64(RawValue(content, oauth.start, oauth.end, "expiresAt").c_str());
     SecureZeroMemory(&content[0], content.size());
     if (expiresAtMs > 0 && expiresAtMs / 1000 <= UnixNow()) {
-        r.error = FormatError(L"the login token expired at %ls; Claude Code renews it the next time it runs in this "
-                              L"account",
-                              FormatLocalTime(expiresAtMs / 1000).c_str());
+        r.error = FormatError(L"the login token expired at %ls", FormatLocalTime(expiresAtMs / 1000).c_str());
         SecureZeroMemory(&token[0], token.size());
         return r;
     }
@@ -325,21 +478,29 @@ FetchResult FetchClaudeUsage() {
     return r;
 }
 
-// The helper's stdout protocol, one UTF-8 line per result:
+// One line of text for the helper's protocol.
+std::string OneLine(const std::wstring& text) {
+    std::string out = WideToUtf8(text);
+    for (char& c : out) {
+        if (c == '\r' || c == '\n') c = ' ';
+    }
+    return out;
+}
+
+// The helper's stdout protocol, one UTF-8 line per result, after a note
+// line if it has one:
+//   note <message>
 //   ok <session %> <session resets_at> <weekly %> <weekly resets_at>
 //   err <message>
 std::string FormatHelperLine(const FetchResult& r) {
+    std::string note = r.note.empty() ? "" : "note " + OneLine(r.note) + "\n";
     char buf[160];
     if (r.ok) {
         snprintf(buf, sizeof(buf), "ok %.4f %lld %.4f %lld\n", r.session.percent, r.session.resetsAt,
                  r.weekly.percent, r.weekly.resetsAt);
-        return buf;
+        return note + buf;
     }
-    std::string text = WideToUtf8(r.error);
-    for (char& c : text) {
-        if (c == '\r' || c == '\n') c = ' ';
-    }
-    return "err " + text + "\n";
+    return note + "err " + OneLine(r.error) + "\n";
 }
 
 FetchResult ParseHelperLine(const std::string& line) {
@@ -350,6 +511,9 @@ FetchResult ParseHelperLine(const std::string& line) {
         r.ok = true;
     } else if (line.rfind("err ", 0) == 0) {
         r.error = Utf8ToWide(line.substr(4));
+    } else if (line.rfind("note ", 0) == 0) {
+        r.note = Utf8ToWide(line.substr(5));
+        r.noteOnly = true;
     } else {
         r.error = L"the usage helper wrote an unexpected line: " + Utf8ToWide(line.substr(0, 200));
     }
@@ -370,6 +534,7 @@ struct Worker {
     ClaudeUsageSnapshot snapshot;
     unsigned seq = 0; // bumped per result
     bool forgetPassword = false;
+    std::vector<std::wstring> notes; // not yet logged
 
     // Main thread only: what ProcessClaudeUsageResults last logged.
     unsigned loggedSeq = 0;
@@ -384,7 +549,10 @@ int g_intervalMinutes = 5;
 void Report(Worker& w, const FetchResult& r) {
     AcquireSRWLockExclusive(&g_lock);
     long long now = UnixNow();
-    if (r.ok) {
+    if (!r.note.empty()) w.notes.push_back(r.note);
+    if (r.noteOnly) {
+        // Its result follows on the next line.
+    } else if (r.ok) {
         w.snapshot.haveData = true;
         w.snapshot.session = r.session;
         w.snapshot.weekly = r.weekly;
@@ -587,9 +755,14 @@ void ProcessClaudeUsageResults() {
         unsigned seq = w->seq;
         bool forget = w->forgetPassword;
         w->forgetPassword = false;
+        std::vector<std::wstring> notes;
+        notes.swap(w->notes);
         ReleaseSRWLockExclusive(&g_lock);
 
         if (forget) ForgetSavedAccountPassword(w->account);
+        for (const std::wstring& note : notes) {
+            Log(L"claude_usage: %ls: %ls", AccountForLog(w->account).c_str(), note.c_str());
+        }
         if (seq == w->loggedSeq) continue;
         w->loggedSeq = seq;
         std::wstring who = AccountForLog(w->account);

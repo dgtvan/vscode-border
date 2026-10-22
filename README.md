@@ -477,11 +477,15 @@ with the account's own Claude Code login token (`.credentials.json` in its
 `%USERPROFILE%\.claude`, or `CLAUDE_CONFIG_DIR`), every
 `usage_meter_refresh_minutes`. That endpoint isn't a documented API, so
 its format can change; when it does, the rings go grey and the log says
-why. The token is only read, never refreshed: refreshing it would rotate
-the refresh token Claude Code holds and sign Claude Code out. When it has
-expired (no Claude Code session has run in that account for a while), the
-rings show the "!" until Claude Code next runs there and renews it; the app
-watches the login file and reads usage again within seconds of that.
+why. The app never refreshes the token itself: that would rotate the
+refresh token Claude Code holds and sign Claude Code out. When it has
+expired (no Claude Code session has run in that account for about 8
+hours), the app has Claude Code renew it: it runs that account's Claude
+Code as `claude -p` with no input, which renews the login and stops before
+calling the model, so it costs no usage. It tries once per expired token
+and logs the result; if it can't (no Claude Code found for that account),
+the rings show the "!" until Claude Code next runs there, and the app reads
+usage again within seconds of that.
 
 Another account's token is inside that account's profile, which this
 account can't read. So for each user profile the app runs a hidden copy of

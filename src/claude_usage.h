@@ -12,10 +12,11 @@
 // They come from https://api.anthropic.com/api/oauth/usage, called with the
 // account's own Claude Code login token (.credentials.json in its Claude
 // config folder). That endpoint isn't a documented API, so every way it can
-// fail is reported back as an error instead of a number. The token is only
-// read, never refreshed: refreshing would rotate the refresh token Claude
-// Code itself holds and sign it out. An expired token is reported as such
-// until Claude Code next runs in that account and renews it.
+// fail is reported back as an error instead of a number. The token is never
+// refreshed here: that would rotate the refresh token Claude Code itself
+// holds and sign it out. When it has expired, the app instead runs that
+// account's Claude Code briefly, in a way that renews the login without
+// using any of its quota, and fetches again.
 //
 // This app's own account is fetched in-process. Another account's token
 // file is inside that account's profile, which this account can't read, so

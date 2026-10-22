@@ -63,8 +63,16 @@ fill in. Other accounts are profiles 2-5.
   refresh token and invalidates the old one, which Claude Code still holds
   in memory: its next renewal would fail and sign it out. Writing new
   tokens back into Claude Code's login file would mean editing another
-  program's sign-in, with that race still open. An expired token waits for
-  Claude Code to renew it.
+  program's sign-in, with that race still open.
+- **An expired token is renewed by Claude Code itself.** The app runs that
+  account's Claude Code (on PATH, in `~/.local/bin`, or the newest one in
+  its VS Code extensions) as `claude -p` with nothing on stdin: it renews the
+  login as it starts, then stops with "Input must be provided" before any
+  model call, so it uses no quota. Tested 2026-10-22 with Claude Code
+  2.1.304 on an account expired for 7 hours; `claude auth status` and
+  `claude mcp list` didn't renew. It's tried once per expired token, so a
+  renewal that doesn't work isn't repeated every check; the log says what
+  happened either way.
 - **The app reads again within seconds of a renewal.** After a failed read
   it checks the login file every 3 seconds and fetches again once Claude
   Code rewrites it, instead of waiting for the next scheduled check.
