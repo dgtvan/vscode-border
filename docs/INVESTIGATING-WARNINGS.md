@@ -112,7 +112,7 @@ and compare a bad one against a good one:
 
 - session status: `bin\claude_status\<session-id>.ini`
 - config: `bin\config.ini`
-- favourites / aliases / ordering: `bin\*.ini`
+- favourites / aliases: `bin\favourites.ini`, `bin\label_aliases.ini`
 - hook history for one session:
   `grep "<session-id-prefix>" bin/logs/claude_hook_events.log`
 

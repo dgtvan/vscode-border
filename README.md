@@ -180,9 +180,12 @@ before you let go. Windows that appear for the first time are appended at
 the end until you place them. The order is matched by label text (same
 caveat as aliases: two windows sharing an identical label are kept
 adjacent to each other, not independently ordered, and a `(no folder)`
-window keeps its place only while it stays open). The order lasts until
-the app exits and isn't saved -- no project is reopened at startup, so there
-would be nothing for a saved order to apply to.
+window keeps its place only while it stays open). An item can be dropped
+anywhere in the list, and a [favourite](#project-list-hud-favourites) is
+ordered like any other item -- being one only adds its star, it doesn't
+move it. The order lasts until the app exits and isn't saved -- no project
+is reopened at startup, so there would be nothing for a saved order to
+apply to.
 
 ### Project list HUD item context menu
 
@@ -446,9 +449,11 @@ described above, passing the result to the app. It needs that saved
 password: until one is saved (open a VS Code window as the account from the
 hub's "+" button and tick Remember) the account's windows show no
 indicator, and the log says why. A session only lights up a window of its
-own account. Another account's folder paths can't be looked up from here,
-so its windows match by name: a session counts for a window when its
-working folder, or a folder above it, has the window's folder name.
+own account. Another account's window's folder path can come from this
+account's records when that account's can't be read (see the [item context
+menu](#project-list-hud-item-context-menu)), so its windows match by name: a
+session counts for a window when its working folder, or a folder above it,
+has the window's folder name.
 Turning the indicator off removes the hooks from every profile's account
 too, and so does removing a profile from `config.ini` while the app runs
 (one removed while the app was closed keeps them, harmlessly: they only
