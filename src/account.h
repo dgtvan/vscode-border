@@ -68,8 +68,10 @@ std::wstring AccountMenuText(const std::wstring& account);
 // saved in Windows Credential Manager by an earlier launch, or else asked
 // for in a dialog owned by `owner` (which offers to save it). A saved
 // password that no longer works is dropped and asked for again. `reason`
-// tags the focus-trace launch record.
-void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::wstring& folder,
+// tags the focus-trace launch record. Returns whether the window was
+// started (false if the password prompt was cancelled, or it couldn't be --
+// the reason already shown).
+bool OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::wstring& folder,
                            const wchar_t* reason);
 
 // Starts `application` with `commandLine` as `account`, hidden, with its

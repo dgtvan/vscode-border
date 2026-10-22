@@ -114,20 +114,20 @@ bool RunVSCodeCli(const std::wstring& cmdPath, const std::wstring& args) {
     return true;
 }
 
-void OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const wchar_t* reason) {
+bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const wchar_t* reason) {
     // A WSL folder (\\wsl.localhost\<distro>\... -- see wsl.h) opens in that
     // distro's own Linux VS Code.
     std::wstring distro, linuxPath;
     if (ParseWslUncPath(folder, &distro, &linuxPath)) {
         NoteWindowLaunchRequest(reason, 1);
         LaunchInWsl(distro, LinuxVSCodeOpenCommand(distro, linuxPath));
-        return;
+        return true;
     }
     std::wstring cmdPath;
-    if (!ResolveVSCodeCliShim(runningWindow, cmdPath)) return;
+    if (!ResolveVSCodeCliShim(runningWindow, cmdPath)) return false;
     std::wstring args = folder.empty() ? L"-n" : L"-n \"" + folder + L"\"";
     NoteWindowLaunchRequest(reason, 1);
-    RunVSCodeCli(cmdPath, args);
+    return RunVSCodeCli(cmdPath, args);
 }
 
 void CloseVSCodeWindow(HWND target, const wchar_t* reason) {

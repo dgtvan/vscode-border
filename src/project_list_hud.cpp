@@ -799,8 +799,20 @@ static void OpenPathInExplorer(const std::wstring& path) {
     }
 }
 
+// Appends `account` (empty for this app's own) to `m` as item `id`, with its
+// icon (see IconAccountFor).
+static void AppendAccountMenuItem(HMENU m, UINT id, const std::wstring& account) {
+    AppendMenuW(m, MF_STRING, id, AccountMenuText(account.empty() ? CurrentAccountName() : account).c_str());
+    std::wstring iconAccount = IconAccountFor(account);
+    if (iconAccount.empty()) return;
+    MENUITEMINFOW mii = {sizeof(mii)};
+    mii.fMask = MIIM_BITMAP;
+    mii.hbmpItem = GetAccountIconMenuBitmap(iconAccount);
+    if (mii.hbmpItem) SetMenuItemInfoW(m, GetMenuItemCount(m) - 1, TRUE, &mii);
+}
+
 static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
-    // Groups top to bottom: directory, alias, favourites, close. No path means VS
+    // Groups top to bottom: directory, reopen, alias, favourites, close. No path means VS
     // Code hasn't recorded this window's folder in its own workspaceStorage
     // (e.g. a multi-root workspace) -- nothing to copy/open in Explorer or
     // for a favourite to reopen later, so the directory and favourites
@@ -817,7 +829,12 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     // than a menu whose shape/enabled-state shifts as that data trickles
     // in, show every possible item, all disabled, so it's unambiguous:
     // nothing here is usable yet.
-    bool loading = index >= 0 && index < (int)state->entries.size() && state->entries[index].loading;
+    // "Reopen As" opens the window's folder as another account (this app's
+    // own or a configured profile, minus the window's own) and then closes
+    // this window -- only once the new one has been started, so a cancelled
+    // password prompt leaves it open. Left off with no path, for a WSL
+    // window, or when there's no other account.
+    bool loading =index >= 0 && index < (int)state->entries.size() && state->entries[index].loading;
     bool hasPath = !loading && index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
     bool alreadyFav = hasPath && EntryIsFavourite(state->entries[index]);
     bool hasAlias = !loading && index >= 0 && index < (int)state->entries.size() &&
@@ -838,6 +855,31 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         AppendMenuW(menu, itemFlags, 5, L"Copy Directory Path");
         AppendMenuW(menu, itemFlags | (explorerReachable ? 0 : MF_GRAYED), 6, L"Open Directory in File Explorer");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+    // Reopen As ids: kReopenAsBase + account slot (0 for this app's own,
+    // 1 + i for profiles[i]).
+    const UINT kReopenAsBase = 0x100;
+    const std::vector<std::wstring> profiles = ConfiguredUserProfiles();
+    bool wslEntry = index >= 0 && index < (int)state->entries.size() &&
+                    (!state->entries[index].wslDistro.empty() || ParseWslUncPath(state->entries[index].path, nullptr, nullptr));
+    if (loading && !profiles.empty()) {
+        AppendMenuW(menu, itemFlags, 0, L"Reopen As");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    } else if (hasPath && !wslEntry) {
+        HMENU reopenMenu = CreatePopupMenu();
+        for (size_t slot = 0; slot <= profiles.size(); slot++) {
+            std::wstring account = slot == 0 ? std::wstring() : profiles[slot - 1];
+            if (CompareStringOrdinal(account.c_str(), -1, state->entries[index].account.c_str(), -1, TRUE) == CSTR_EQUAL) {
+                continue;
+            }
+            AppendAccountMenuItem(reopenMenu, kReopenAsBase + (UINT)slot, account);
+        }
+        if (GetMenuItemCount(reopenMenu) > 0) {
+            AppendMenuW(menu, MF_POPUP, (UINT_PTR)reopenMenu, L"Reopen As");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        } else {
+            DestroyMenu(reopenMenu);
+        }
     }
     AppendMenuW(menu, itemFlags, 1, L"Set Alias...");
     if (hasAlias || loading) AppendMenuW(menu, itemFlags, 2, L"Clear Alias");
@@ -860,7 +902,20 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     state->contextMenuOpen = true; // see UpdateProjectListHud's guard
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
     state->contextMenuOpen = false;
-    DestroyMenu(menu);
+    DestroyMenu(menu); // recursively destroys the Reopen As submenu too
+    if (cmd >= (int)kReopenAsBase) {
+        size_t slot = (size_t)(cmd - (int)kReopenAsBase);
+        if (index < 0 || index >= (int)state->entries.size() || slot > profiles.size()) return;
+        // Copied: the entries can change while a password prompt is up.
+        ProjectListHudEntry entry = state->entries[index];
+        std::wstring account = slot == 0 ? std::wstring() : profiles[slot - 1];
+        Log(L"hud item menu: [%ls] -> Reopen As [%ls]", entry.label.c_str(),
+            account.empty() ? CurrentAccountName().c_str() : account.c_str());
+        bool opened = account.empty() ? OpenNewVSCodeWindow(AnyTrackedWindow(state), entry.path, L"hud-item-reopen-as")
+                                      : OpenNewVSCodeWindowAs(hud, account, entry.path, L"hud-item-reopen-as");
+        if (opened) CloseVSCodeWindow(entry.target, L"hud-item-reopen-as");
+        return;
+    }
     if (cmd > 0 && index >= 0 && index < (int)state->entries.size()) {
         static const wchar_t* const kActions[] = {L"", L"Set Alias", L"Clear Alias", L"Add to Favourites",
                                                   L"Remove from Favourites", L"Copy Directory Path",
@@ -897,7 +952,7 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // bolded, with its icon if user_profile_1_icon is set), then the other
 // profiles in slot order, each with its icon; without any it's a plain item
 // opening the window as this account. (Forgetting a profile's saved
-// password is on the tray menu.) Then a "Favourites" submenu
+// password is on the tray menu.) Then, after a separator, a "Favourites" submenu
 // holding "Open All" (every favourite not already open -- see
 // OpenAllFavourites for why open ones are skipped), then the saved favourite
 // projects (see favourites.h), each as its own submenu (a WSL folder's
@@ -951,26 +1006,18 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     const UINT kOpenAsBase = 0x1000, kOpenAsStride = 8; // stride > the 5 profile slots
     const UINT kThisAccountId = 0x8000;
     auto slotAccount = [&](size_t slot) { return slot == 0 ? std::wstring() : profiles[slot - 1]; };
-    // Appends `slot`'s account to `m`, with its icon (see IconAccountFor).
-    auto appendAccountItem = [&](HMENU m, UINT id, size_t slot) {
-        std::wstring account = slotAccount(slot);
-        AppendMenuW(m, MF_STRING, id, AccountMenuText(slot == 0 ? CurrentAccountName() : account).c_str());
-        std::wstring iconAccount = IconAccountFor(account);
-        if (iconAccount.empty()) return;
-        MENUITEMINFOW mii = {sizeof(mii)};
-        mii.fMask = MIIM_BITMAP;
-        mii.hbmpItem = GetAccountIconMenuBitmap(iconAccount);
-        if (mii.hbmpItem) SetMenuItemInfoW(m, GetMenuItemCount(m) - 1, TRUE, &mii);
-    };
     HMENU menu = CreatePopupMenu();
     if (profiles.empty()) {
         AppendMenuW(menu, MF_STRING, kThisAccountId, L"Start VS Code");
     } else {
         HMENU startMenu = CreatePopupMenu();
-        for (size_t slot = 0; slot <= profiles.size(); slot++) appendAccountItem(startMenu, kThisAccountId + (UINT)slot, slot);
+        for (size_t slot = 0; slot <= profiles.size(); slot++) {
+            AppendAccountMenuItem(startMenu, kThisAccountId + (UINT)slot, slotAccount(slot));
+        }
         SetMenuDefaultItem(startMenu, kThisAccountId, FALSE);
         AppendMenuW(menu, MF_POPUP, (UINT_PTR)startMenu, L"Start VS Code");
     }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     HMENU favMenu = CreatePopupMenu();
     if (favourites.empty()) {
@@ -990,7 +1037,7 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
                     if (CompareStringOrdinal(account.c_str(), -1, favourites[i].account.c_str(), -1, TRUE) == CSTR_EQUAL) {
                         continue;
                     }
-                    appendAccountItem(asMenu, kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, slot);
+                    AppendAccountMenuItem(asMenu, kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, account);
                 }
                 if (GetMenuItemCount(asMenu) > 0) AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
                 else DestroyMenu(asMenu);

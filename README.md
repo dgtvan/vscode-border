@@ -129,7 +129,7 @@ can find and switch between windows at a glance. It includes minimized
 windows, so it doubles as a restore list. Enable it with
 `show_project_list=true`. A plain right-click on an item opens a context
 menu (**Copy Directory Path** / **Open Directory in File Explorer** for the
-window's folder, **Set Alias**, **Add to Favourites** and **Close Window**
+window's folder, **Reopen As**, **Set Alias**, **Add to Favourites** and **Close Window**
 -- see below).
 
 ![Project list HUD showing three open windows and a "+" button to open a new one](assets/hub.png)
@@ -191,7 +191,8 @@ apply to.
 
 Right-clicking a HUD item (or its border label chip -- both act on the same
 window) opens a menu of everything you can do with that window's project,
-grouped top to bottom: directory actions, alias actions, favourites.
+grouped top to bottom: directory actions, reopen, alias actions,
+favourites, close.
 
 ![Context menu on a HUD item, showing the directory, alias and favourites groups](assets/item-menu.png)
 
@@ -201,6 +202,12 @@ grouped top to bottom: directory actions, alias actions, favourites.
   window. If the folder no longer exists (a worktree deleted while its
   window stayed open, say) nothing opens -- Explorer would otherwise
   silently show its Home view instead.
+- **Reopen As** is a submenu of the other accounts (this account and the
+  other user profiles, minus the one the window runs as): picking one opens
+  the window's folder in a new VS Code window as that account, then closes
+  this one (VS Code still asks about unsaved changes). If the new window
+  can't be started -- the password prompt cancelled, say -- this one stays
+  open. Not shown for a WSL window, or with no other account configured.
 - **Set Alias...** / **Clear Alias** rename how the window displays -- see
   [aliases](#project-list-hud-aliases) below.
 - **Add to Favourites** / **Remove from Favourites** save or drop that
@@ -253,7 +260,7 @@ window switches it over to the folder's own alias, if any.
 Clicking the fixed "+" square at the end of the project list HUD opens a
 menu. **Start VS Code** opens a brand-new, empty VS Code window -- with
 other accounts' user profiles configured it's a submenu of which account to
-open it as (see the `user_profile_*` settings in `config.ini`). Below it is a
+open it as (see the `user_profile_*` settings in `config.ini`). Below it, past a divider, is a
 **Favourites** submenu: **Open All** first (opens every
 favourite not already open), then your saved favourite projects/folders
 sorted by name (the same folder saved for several accounts sits together),

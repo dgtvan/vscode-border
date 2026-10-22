@@ -542,7 +542,7 @@ int RunFindVSCode() {
     return 0;
 }
 
-void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::wstring& folder,
+bool OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::wstring& folder,
                            const wchar_t* reason) {
     wchar_t system32[MAX_PATH] = {};
     GetSystemDirectoryW(system32, MAX_PATH);
@@ -557,7 +557,7 @@ void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::w
             if (DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_PASSWORD), owner, PasswordDialogProc,
                                 (LPARAM)&prompt) != IDOK) {
                 Log(L"account: new window as [%ls] cancelled at the password prompt", account.c_str());
-                return;
+                return false;
             }
             password = prompt.password;
             WipeString(prompt.password);
@@ -591,7 +591,7 @@ void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::w
                      L"(or restart) your VS Code windows to let the update finish, then try again.",
                      account.c_str());
             MessageBoxW(owner, text, L"VS Code Border", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
-            return;
+            return false;
         }
 
         std::wstring shim, commandLine;
@@ -609,7 +609,7 @@ void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::w
                     shim.c_str(), source, folder.empty() ? L"" : L" folder=", folder.c_str());
                 if (!saved && prompt.remember) SavePassword(account, password);
                 WipeString(password);
-                return;
+                return true;
             }
         }
         WipeString(password);
@@ -648,8 +648,9 @@ void OpenNewVSCodeWindowAs(HWND owner, const std::wstring& account, const std::w
                      exe.empty() ? L"" : L"\n\nVS Code used: ", exe.c_str());
         }
         MessageBoxW(owner, text, L"VS Code Border", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
-        return;
+        return false;
     }
+    return false;
 }
 
 HANDLE StartHiddenProcessAsAccount(const std::wstring& account, const std::wstring& application,

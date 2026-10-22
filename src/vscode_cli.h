@@ -42,8 +42,9 @@ bool RunVSCodeCli(const std::wstring& cmdPath, const std::wstring& args);
 // `folder` open (note `code -n` on a folder VS Code already has open just
 // re-activates that window). A WSL folder (its \\wsl.localhost path, see
 // wsl.h) opens in that distro's Linux VS Code instead. `reason` tags the
-// focus-trace launch record.
-void OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const wchar_t* reason);
+// focus-trace launch record. Returns whether the launch was handed off
+// (false, logged, if no CLI shim was found or it couldn't be run).
+bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const wchar_t* reason);
 
 // Asks one VS Code window to close -- the same request as its own X button,
 // so VS Code still gets to prompt about unsaved changes. A WSLg window (see
