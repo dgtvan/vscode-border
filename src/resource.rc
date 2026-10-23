@@ -2,4 +2,3 @@
 #include "resource.h"
 
 IDI_TRAYICON ICON "..\\assets\\app.ico"
-IDI_WSL ICON "..\\assets\\wsl.ico"

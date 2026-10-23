@@ -1,25 +1,18 @@
 #include "vscode_settings.h"
 #include "file_util.h"
 #include "logger.h"
-#include "wsl.h"
 
 #include <windows.h>
 
 #include <map>
-#include <set>
 #include <string>
 #include <vector>
 
 namespace {
 
-// The exact value this app sets/looks for, on Windows and in WSL distros
-// alike. If this ever changes, README.md and window_title.cpp's
-// ParseVSCodeTitle (which is tuned to this exact format) need matching
-// updates. The trailing ${appName} is what marks a WSLg window as VS Code
-// rather than some other Linux app (see wsl.h; ParseVSCodeTitle strips it)
-// -- and it's the same value everywhere because VS Code's Settings Sync
-// copies window.title between Windows and WSL VS Code, so any difference
-// would just be overwritten by whichever synced last.
+// The exact value this app sets/looks for. If this ever changes, README.md
+// and window_title.cpp's ParseVSCodeTitle (which is tuned to this exact
+// format, and strips the trailing ${appName}) need matching updates.
 const char* kDesiredValueJson =
     "\"${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName} - ${appName}\"";
 // What this app used to set, before ${appName} was added: still treated as
@@ -399,53 +392,6 @@ void ApplyToWindowsDir(std::map<std::string, TargetState>& states, const std::ws
     if (ApplyToContent(states, section, enable, content)) WriteFileBytes(settingsPath, content);
 }
 
-std::string NarrowAscii(const std::wstring& s) {
-    std::string out;
-    for (wchar_t c : s) out.push_back(c > 0 && c <= 0x7F ? (char)c : '_');
-    return out;
-}
-
-void ApplyToWslDistro(std::map<std::string, TargetState>& states, const std::wstring& distro, bool enable) {
-    // Whichever of VS Code's two variants has a settings folder in the
-    // default user's home -- one path per line.
-    std::string listing;
-    if (!RunInWsl(distro,
-                  {L"sh", L"-c",
-                   L"for d in \"$HOME/.config/Code/User\" \"$HOME/.config/Code - Insiders/User\"; do "
-                   L"[ -d \"$d\" ] && echo \"$d\"; done; true"},
-                  "", &listing)) {
-        Log(L"vscode_settings: couldn't look for VS Code settings in WSL distro [%ls] -- window.title left as-is "
-            L"(wsl.exe said: %hs)",
-            distro.c_str(), listing.c_str());
-        return;
-    }
-    size_t pos = 0;
-    while (pos < listing.size()) {
-        size_t eol = listing.find('\n', pos);
-        std::string dir = listing.substr(pos, (eol == std::string::npos ? listing.size() : eol) - pos);
-        pos = eol == std::string::npos ? listing.size() : eol + 1;
-        if (dir.empty()) continue;
-        bool insiders = dir.find("Code - Insiders") != std::string::npos;
-        std::string section = "WSL:" + NarrowAscii(distro) + ":" + (insiders ? "CodeInsiders" : "Code");
-        std::wstring path = std::wstring(dir.begin(), dir.end()) + L"/settings.json"; // $HOME paths are ASCII in practice
-
-        std::string content;
-        if (!RunInWsl(distro, {L"sh", L"-c", L"cat -- \"$1\" 2>/dev/null; true", L"sh", path}, "", &content)) {
-            Log(L"vscode_settings: [%hs] couldn't read settings.json", section.c_str());
-            continue;
-        }
-        if (!ApplyToContent(states, section, enable, content)) continue;
-        if (!RunInWsl(distro, {L"sh", L"-c", L"cat > \"$1\"", L"sh", path}, content, nullptr)) {
-            Log(L"vscode_settings: [%hs] couldn't write settings.json", section.c_str());
-        }
-    }
-}
-
-// Distros a Linux VS Code window has been seen in this session (see
-// NoteWslVSCodeDistro) -- the only ones SyncWindowTitleSetting touches, so
-// it never wakes a stopped distro just by reading its files.
-std::set<std::wstring> g_seenWslDistros;
-
 } // namespace
 
 void SyncWindowTitleSetting(bool enableLabel) {
@@ -459,28 +405,5 @@ void SyncWindowTitleSetting(bool enableLabel) {
         ApplyToWindowsDir(states, appData + L"\\Code\\User", "Code", enableLabel);
         ApplyToWindowsDir(states, appData + L"\\Code - Insiders\\User", "CodeInsiders", enableLabel);
     }
-    // Also distros this app manages from an earlier session that are running
-    // right now -- e.g. with a VS Code window open whose title has lost the
-    // "Visual Studio Code" marker (see kDesiredValueJson), so it can't be
-    // recognised, and so seen, until this puts it back.
-    bool anyWslManaged = false;
-    for (const auto& kv : states) anyWslManaged |= kv.first.compare(0, 4, "WSL:") == 0 && kv.second.managed;
-    if (anyWslManaged) {
-        std::set<std::wstring> running = RunningWslDistros();
-        for (const auto& kv : states) {
-            if (kv.first.compare(0, 4, "WSL:") != 0 || !kv.second.managed) continue;
-            size_t end = kv.first.find(':', 4);
-            std::wstring distro(kv.first.begin() + 4, end == std::string::npos ? kv.first.end() : kv.first.begin() + end);
-            if (running.count(distro)) g_seenWslDistros.insert(distro);
-        }
-    }
-    for (const std::wstring& distro : g_seenWslDistros) ApplyToWslDistro(states, distro, enableLabel);
-    SaveState(states);
-}
-
-void NoteWslVSCodeDistro(const std::wstring& distro, bool enableLabel) {
-    if (distro.empty() || !g_seenWslDistros.insert(distro).second) return;
-    std::map<std::string, TargetState> states = LoadState();
-    ApplyToWslDistro(states, distro, enableLabel);
     SaveState(states);
 }

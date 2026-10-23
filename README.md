@@ -215,8 +215,8 @@ favourites, close.
   opens its folder again in a new window as that profile -- not before,
   since VS Code keeps one window per folder and would just bring the old
   one forward. If the window is still open a minute later (the close was
-  cancelled), nothing is reopened. Not shown for a WSL window, or with no
-  other profile configured.
+  cancelled), nothing is reopened. Not shown with no other profile
+  configured.
 - **Set Alias...** / **Clear Alias** rename how the window displays -- see
   [aliases](#project-list-hud-aliases) below.
 - **Add to Favourites** / **Remove from Favourites** save or drop that
@@ -269,7 +269,7 @@ submenu of which profile to open it as. Below it, past a divider, is a
 sorted by name, one submenu per favourite -- hover a favourite's name to expand it to
 **Open in New Window As** (a submenu of the Claude profiles to open it as;
 on an open folder it just brings its window forward, whatever profile that
-runs; a WSL folder lists only the default) and **Remove from Favourites**.
+runs) and **Remove from Favourites**.
 
 To add a favourite, right-click any regular item (or its border label
 chip) and choose **Add to Favourites** -- this saves the window's currently
@@ -488,7 +488,7 @@ claude_profile_2_profile_path=%USERPROFILE%\.claude-work
   app, or `code` from a terminal. A window the app opened counts as the
   profile it was opened as until a newer lock says otherwise.
   A window with no folder open is told apart only when every such window
-  runs the same profile; a WSL window's Linux VS Code runs none of them.
+  runs the same profile.
 - **Icon:** every window shows its profile's icon in front of its label,
   on the border's label chip and its hub item -- `_icon`, or a round badge
   with the name's first letter. The default profile's windows show one only
@@ -596,9 +596,7 @@ repo + branch instead, VS Code's `window.title` setting needs to be:
 needed.** Whenever `show_label=true` (the default), this app writes that
 `window.title` value into VS Code's global `settings.json` for you (both
 stable and Insiders, whichever are installed), the moment it starts or
-Reload Config runs -- and into Linux VS Code's own `settings.json` inside a
-WSL distro once one of its windows shows up. The trailing `${appName}` is
-what tells a WSL VS Code window apart from other Linux apps. If `window.title` already had some other value, the
+Reload Config runs. If `window.title` already had some other value, the
 original is remembered (in `window_title_state.ini` next to `config.ini`)
 and restored automatically the next time you set `show_label=false` and
 reload. If `window.title` wasn't set at all, it's removed again on
@@ -622,54 +620,10 @@ reading VS Code's own recently-opened-folder records. That mapping is
 built once and cached in memory; use **Reload Config** from the tray icon
 to pick up worktrees created after the app started.
 
-## VS Code inside WSL
-
-Linux VS Code installed in a WSL distro, shown on the desktop through WSLg,
-is tracked too -- its window belongs to WSL's `msrdc.exe`, not `Code.exe`, and
-is recognised by `Visual Studio Code (<distro>)` at the end of its title. It
-gets the same border and hub item as a Windows VS Code window, with a Tux icon
-in front of its label (on the border's label chip, the hub item and its
-favourites menu entry). Also handled:
-
-- **Repo/branch label.** Linux VS Code reads its own `settings.json` inside
-  the distro, so the `window.title` setting (see
-  [Getting the repo/branch label](#getting-the-repobranch-label-instead-of-just-the-folder-name))
-  is applied there too, through `wsl.exe` -- only once a window from that
-  distro has been seen, since reaching a stopped distro would start it.
-- **Folder path, favourites.** A WSL window's folder comes from Linux VS
-  Code's own records in the distro and is kept as its `\\wsl.localhost\<distro>\...`
-  path: **Copy Directory Path** copies the Linux path, **Open Directory in File
-  Explorer** is greyed out when the distro doesn't share its files with
-  Windows, and a WSL favourite opens in the distro's Linux VS Code.
-- **Extra launch arguments.** `wsl_vscode_extra_args.<distro>=<args>` in
-  `config.ini` adds arguments to every Linux VS Code this app opens in that
-  distro, e.g. `--use-angle=swiftshader --enable-unsafe-swiftshader` for
-  WebGL on the CPU. None by default.
-- **Border fit.** The window rect WSLg reports includes Linux VS Code's own
-  transparent shadow margin (32px a side), which is measured from the
-  window's pixels and left out of the border.
-- **Maximize** works with the fixed hub reserving its band.
-- **Close Window / Close All** work (WSLg only closes the active window, so
-  each is activated first).
-- **Resizing from the left/right edges** doesn't work on stock WSLg -- a WSLg
-  bug, not this app. With optional patched WSLg modules it does; see
-  [docs/WSLG-RESIZE.md](docs/WSLG-RESIZE.md), and
-  [docs/WSLG-PATCHES.md](docs/WSLG-PATCHES.md) for building and installing
-  them.
-
-Unrelated to this app, but a useful extra setup: pasting a screenshot copied
-on Windows into Linux VS Code (e.g. into the Claude Code extension) doesn't
-work on stock WSLg either. The same patched modules fix it; see
-[docs/WSLG-CLIPBOARD-IMAGES.md](docs/WSLG-CLIPBOARD-IMAGES.md).
-
-Not yet: the AI status indicator for Claude Code running inside the distro.
-
 ## Known limitations
 
 - Only tracks VS Code's own top-level windows (`Code.exe` / `Code -
-  Insiders.exe`, and Linux VS Code through WSLg -- see
-  [VS Code inside WSL](#vs-code-inside-wsl) -- main editor windows, not
-  floating panels/dialogs).
+  Insiders.exe` main editor windows, not floating panels/dialogs).
 - If you have more open windows than colors in the palette, colors repeat.
 - Border thickness/color is drawn by this app, not by Windows -- closing the
   app removes all borders immediately (nothing persists in the registry or
@@ -750,10 +704,6 @@ Not yet: the AI status indicator for Claude Code running inside the distro.
   folder's real absolute path (used for the AI status indicator's window matching).
 - `src/vscode_settings.*` -- auto-manages VS Code's `window.title` setting to match `show_label` (see [Getting the repo/branch label](#getting-the-repobranch-label-instead-of-just-the-folder-name)).
 - `src/window_discovery.*` -- finding/filtering VS Code top-level windows.
-- `src/wsl.*` -- WSLg windows: recognising Linux VS Code, its shadow margin, the maximize fix, `wsl.exe`
-  helpers, the Tux icon, and the WSLg window control FIFO (see [VS Code inside WSL](#vs-code-inside-wsl)).
-- `tools/wslg-patches/` -- build script, patches and shims for the optional patched WSLg modules
-  (resize and clipboard images), see [docs/WSLG-PATCHES.md](docs/WSLG-PATCHES.md).
 - `src/overlay.*` -- passive per-window border overlay creation/painting.
 - `src/project_list_hud.*` -- interactive desktop project-list HUD: sorts/sizes/positions itself from the entries it's given, plus hover focus, click, move, and resize behavior.
 - `src/layered_rendering.*` -- shared alpha-blended text helpers for layered windows.
@@ -764,7 +714,6 @@ Not yet: the AI status indicator for Claude Code running inside the distro.
   window can be opened once none is open, without configuration.
 - `src/tracking.*` -- tracked-window bookkeeping, WinEvent hooks, border sync, and feeding the HUD its entries.
 - `src/resource.rc`, `assets/app.ico`, `assets/square-dashed.png` -- tray icon resource (`app.ico` is generated from the PNG; see [Credits](#credits)).
-- `assets/wsl.ico` -- the Tux icon shown on WSL windows (see [Credits](#credits)).
 - `config.ini` -- default config template (copied to `bin\` on first build).
 - `claude_status_hook.ps1` -- Claude Code hook script (copied to `bin\` on every build; see "Claude Code
   status dots" above).
@@ -779,8 +728,3 @@ Not yet: the AI status indicator for Claude Code running inside the distro.
 ## Credits
 
 Tray icon: ["Square dashed" icon](https://www.flaticon.com/free-icon/square-dashed_17295663) from Flaticon.
-
-WSL icon: Tux image from [relief-melone/wsl-initial-setup](https://gitlab.com/relief-melone/wsl-initial-setup) on GitLab.
-
-WSLg resize fix (`tools/wslg-patches/`): patches 0001/0002, shim and build script from
-[Mihir-Null/wslg-resize-fix](https://github.com/Mihir-Null/wslg-resize-fix) (MIT).

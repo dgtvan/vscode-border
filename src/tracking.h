@@ -82,7 +82,6 @@ struct TrackedWindowDiag {
     int lastPaintedHeight = -1;
     RECT lastKnownRect = {};
     bool loading = false;
-    int resizeMargin = 0; // the overlay's invisible resize strip outside the border (WSLg windows)
     std::wstring label;
     std::wstring rawLabel;
     std::wstring borderLabel;

@@ -389,7 +389,6 @@ anthropic-beta: oauth-2025-04-20
       <li><strong>Undocumented endpoint.</strong> It isn't a public API, so the shape can change. The app should parse it defensively and show "stale" rather than wrong numbers.</li>
       <li><strong>Read the token, never refresh it.</strong> Claude Code renews the token itself. If this app refreshed it, it could rotate the refresh token and log Claude Code out. When the token has expired, the meter shows stale until Claude Code renews it.</li>
       <li><strong>Polling.</strong> Every 3 minutes over WinHTTP, plus once on the Claude hooks this app already installs (Stop and similar), so the meter moves right after a turn ends.</li>
-      <li><strong>One account.</strong> Limits belong to the account, so the Windows-side credentials are enough even when Claude Code also runs in WSL.</li>
     </ul>
   </div>
 </section>

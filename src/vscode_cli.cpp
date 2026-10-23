@@ -1,5 +1,4 @@
 #include "vscode_cli.h"
-#include "wsl.h"
 
 #include "claude_profile.h"
 #include "focus_trace.h"
@@ -122,14 +121,6 @@ bool RunVSCodeCli(const std::wstring& cmdPath, const std::wstring& args, const s
 
 bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const wchar_t* reason,
                          const std::wstring& profile) {
-    // A WSL folder (\\wsl.localhost\<distro>\... -- see wsl.h) opens in that
-    // distro's own Linux VS Code.
-    std::wstring distro, linuxPath;
-    if (ParseWslUncPath(folder, &distro, &linuxPath)) {
-        NoteWindowLaunchRequest(reason, 1);
-        LaunchInWsl(distro, LinuxVSCodeOpenCommand(distro, linuxPath));
-        return true;
-    }
     std::wstring cmdPath;
     if (!ResolveVSCodeCliShim(runningWindow, cmdPath)) return false;
     std::wstring args = folder.empty() ? L"-n" : L"-n \"" + folder + L"\"";
@@ -141,16 +132,8 @@ bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const w
     return true;
 }
 
-void CloseVSCodeWindow(HWND target, const wchar_t* reason) {
-    if (!target || !IsWindow(target)) return;
-    wchar_t cls[64] = {};
-    GetClassNameW(target, cls, 64);
-    if (wcscmp(cls, kWslgWindowClass) != 0) {
-        PostMessageW(target, WM_CLOSE, 0, 0);
-        return;
-    }
-    RequestForeground(target, FocusTargetKind::ExternalWindow, reason);
-    SendMessageTimeoutW(target, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 2000, nullptr);
+void CloseVSCodeWindow(HWND target) {
+    if (target && IsWindow(target)) PostMessageW(target, WM_CLOSE, 0, 0);
 }
 
 void ConfirmAndCloseVSCodeWindows(HWND owner, const std::vector<HWND>& targets, const wchar_t* source) {
@@ -169,7 +152,7 @@ void ConfirmAndCloseVSCodeWindows(HWND owner, const std::vector<HWND>& targets, 
         return;
     }
     for (HWND target : live) {
-        CloseVSCodeWindow(target, L"close-all");
+        CloseVSCodeWindow(target);
     }
     Log(L"%ls close-all: sent WM_CLOSE to %d window(s)", source, (int)live.size());
 }
@@ -247,12 +230,9 @@ void CloseAndReopenVSCodeWindows(const std::vector<ReopenWindow>& windows, bool 
     for (const ReopenWindow& w : windows) {
         if (!w.target || !IsWindow(w.target)) continue;
         batch.windows.push_back(w);
-        wchar_t cls[64] = {};
-        GetClassNameW(w.target, cls, 64);
         DWORD pid = 0;
         GetWindowThreadProcessId(w.target, &pid);
-        // A WSLg window's process is WSL's, which outlives it.
-        if (pid && wcscmp(cls, kWslgWindowClass) != 0 &&
+        if (pid &&
             std::find(batch.vscodePids.begin(), batch.vscodePids.end(), pid) == batch.vscodePids.end()) {
             batch.vscodePids.push_back(pid);
         }
@@ -261,7 +241,7 @@ void CloseAndReopenVSCodeWindows(const std::vector<ReopenWindow>& windows, bool 
             ClaudeProfileName(w.profile).c_str());
     }
     if (batch.windows.empty()) return;
-    for (const ReopenWindow& w : batch.windows) CloseVSCodeWindow(w.target, reason);
+    for (const ReopenWindow& w : batch.windows) CloseVSCodeWindow(w.target);
     batch.closedAt = GetTickCount64();
     UINT_PTR id = SetTimer(nullptr, 0, kReopenPollMs, ReopenTimerProc);
     if (!id) {

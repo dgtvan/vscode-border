@@ -1,2 +1,0 @@
-# Built and applied inside Linux: keep LF even on a Windows checkout.
-* text eol=lf

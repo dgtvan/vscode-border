@@ -11,8 +11,7 @@
 // kept in vscode_installs.ini next to config.ini, across restarts.
 
 // Notes the install of process `pid` -- a tracked VS Code window's. Ignores
-// anything that isn't a Windows VS Code (a WSLg window's process is WSL's
-// msrdc.exe).
+// anything that isn't a VS Code executable.
 void NoteVSCodeInstall(DWORD pid);
 
 // The remembered Code.exe, or empty.

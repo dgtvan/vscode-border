@@ -1,12 +1,10 @@
 #include "window_discovery.h"
 #include "logger.h"
-#include "wsl.h"
 
 #include <dwmapi.h>
 #include <psapi.h>
 
 #include <algorithm>
-#include <map>
 
 bool GetProcessImageName(HWND hwnd, std::wstring& outName) {
     DWORD pid = 0;
@@ -34,16 +32,6 @@ bool IsVSCodeExe(const std::wstring& name) {
     return lower == L"code.exe" || lower == L"code - insiders.exe";
 }
 
-static bool IsWslgWindow(HWND hwnd) {
-    wchar_t cls[256] = {};
-    GetClassNameW(hwnd, cls, 256);
-    return wcscmp(cls, kWslgWindowClass) == 0;
-}
-
-bool IsVSCodeWindowProcess(HWND hwnd, const std::wstring& exeName) {
-    return IsWslgWindow(hwnd) ? IsWslgHostExe(exeName) : IsVSCodeExe(exeName);
-}
-
 bool IsCandidateTopLevelWindow(HWND hwnd) {
     if (!IsWindowVisible(hwnd)) return false;
     if (GetWindow(hwnd, GW_OWNER) != nullptr) return false;
@@ -53,109 +41,13 @@ bool IsCandidateTopLevelWindow(HWND hwnd) {
 
     wchar_t cls[256] = {};
     GetClassNameW(hwnd, cls, 256);
-    bool wslg = wcscmp(cls, kWslgWindowClass) == 0;
-    if (!wslg && wcscmp(cls, L"Chrome_WidgetWin_1") != 0) return false;
+    if (wcscmp(cls, L"Chrome_WidgetWin_1") != 0) return false;
 
     wchar_t title[512] = {};
     GetWindowTextW(hwnd, title, 512);
     if (title[0] == L'\0') return false;
-    // Every Linux app WSLg shows shares this class (and process), so only
-    // the title says which ones are VS Code -- see wsl.h.
-    if (wslg && !SplitWslgVSCodeTitle(title, nullptr, nullptr)) return false;
 
     return true;
-}
-
-// A WSLg window's shadow margin while not maximized (see wsl.h's
-// MeasureWslgShadowInsets), remembered per window. Measuring means rendering
-// the whole window, so it isn't redone on a plain move; it is after a size
-// change (once the size has held for kWslgRemeasureSettleMs -- not on every
-// step of a resize -- and at most every kWslgRemeasureIntervalMs) and on a
-// monitor change (DPI). Only a measurement with the same margin on all four
-// sides is kept: Linux VS Code's shadow is uniform, so anything else is the
-// window caught mid-change (or out of step with the app inside it), and the
-// last good margin stands until a uniform one comes back.
-static const ULONGLONG kWslgRemeasureSettleMs = 300;
-static const ULONGLONG kWslgRemeasureIntervalMs = 1000;
-// A window that has just appeared can measure as no margin at all -- Linux
-// VS Code's first frames come before its shadow does -- so a 0 margin is
-// taken as provisional and re-measured (every kWslgRemeasureIntervalMs) for
-// this long after the window was first measured.
-static const ULONGLONG kWslgProvisionalZeroMs = 30000;
-struct WslgInsetCache {
-    bool valid = false;      // insets holds a good (uniform) measurement
-    HMONITOR monitor = nullptr;
-    SIZE size = {};          // window size `insets` was measured at
-    RECT insets = {};
-    SIZE seenSize = {};      // window size last seen, and when it last changed
-    ULONGLONG seenTick = 0;
-    ULONGLONG lastMeasureTick = 0;
-    ULONGLONG firstMeasureTick = 0; // see kWslgProvisionalZeroMs
-};
-static std::map<HWND, WslgInsetCache> g_wslgInsets;
-
-static void ApplyWslgShadowInsets(HWND hwnd, RECT& rect) {
-    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    if (IsZoomed(hwnd)) {
-        // Maximized, Linux VS Code fills the work area: either the window
-        // rect is exactly that, or (custom title bar, no AppBar shrinking the
-        // work area) its shadow margin hangs off-screen around it. Pulled in
-        // by the same 2px a maximized Windows VS Code window gets (see
-        // GetVisibleWindowRect), so the border shows the same strip along the
-        // screen edges instead of landing entirely off-screen.
-        MONITORINFO mi = {sizeof(mi)};
-        if (GetMonitorInfoW(monitor, &mi)) {
-            IntersectRect(&rect, &rect, &mi.rcWork);
-            InflateRect(&rect, -2, -2);
-        }
-        return;
-    }
-    WslgInsetCache& c = g_wslgInsets[hwnd];
-    ULONGLONG now = GetTickCount64();
-    SIZE size = {rect.right - rect.left, rect.bottom - rect.top};
-    if (size.cx != c.seenSize.cx || size.cy != c.seenSize.cy) {
-        c.seenSize = size;
-        c.seenTick = now;
-    }
-    bool current = c.valid && c.monitor == monitor && c.size.cx == size.cx && c.size.cy == size.cy;
-    bool provisionalZero = c.valid && c.insets.left == 0 && now - c.firstMeasureTick < kWslgProvisionalZeroMs;
-    bool due = !c.valid || c.monitor != monitor || provisionalZero ||
-               (!current && now - c.seenTick >= kWslgRemeasureSettleMs);
-    if (!c.firstMeasureTick) c.firstMeasureTick = now;
-    if (due && now - c.lastMeasureTick >= (c.valid ? kWslgRemeasureIntervalMs : 0)) {
-        c.lastMeasureTick = now;
-        RECT insets;
-        if (MeasureWslgShadowInsets(hwnd, insets) && insets.left == insets.top && insets.left == insets.right &&
-            insets.left == insets.bottom) {
-            if (!c.valid || !EqualRect(&insets, &c.insets) || c.monitor != monitor) {
-                Log(L"wsl: hwnd=%p shadow insets l=%ld t=%ld r=%ld b=%ld (monitor=%p)", hwnd, insets.left,
-                    insets.top, insets.right, insets.bottom, monitor);
-            }
-            c.valid = true;
-            c.monitor = monitor;
-            c.size = size;
-            c.insets = insets;
-        }
-    }
-    // Not measured well yet (e.g. content not painted): the window rect as is.
-    if (!c.valid) return;
-    auto it = g_wslgInsets.find(hwnd);
-    rect.left += it->second.insets.left;
-    rect.top += it->second.insets.top;
-    rect.right -= it->second.insets.right;
-    rect.bottom -= it->second.insets.bottom;
-}
-
-int GetWslgShadowMargin(HWND hwnd) {
-    auto it = g_wslgInsets.find(hwnd);
-    if (it == g_wslgInsets.end() || !it->second.valid) return 0;
-    const RECT& in = it->second.insets;
-    // Only a uniform margin is trusted as "the" margin.
-    return (in.left == in.top && in.left == in.right && in.left == in.bottom) ? in.left : 0;
-}
-
-void ForgetVisibleWindowRect(HWND hwnd) {
-    g_wslgInsets.erase(hwnd);
 }
 
 // GetWindowRect includes Windows' invisible resize hit-test margin, which
@@ -163,13 +55,6 @@ void ForgetVisibleWindowRect(HWND hwnd) {
 // would leave a visible gap between the window and the border. The DWM
 // extended frame bounds give the true visible bounds instead.
 bool GetVisibleWindowRect(HWND hwnd, RECT& out) {
-    if (IsWslgWindow(hwnd)) {
-        // WSLg windows have square corners and no Windows-side resize margin,
-        // so the window rect is exact apart from Linux VS Code's own shadow.
-        if (!GetWindowRect(hwnd, &out)) return false;
-        ApplyWslgShadowInsets(hwnd, out);
-        return true;
-    }
     if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &out, sizeof(RECT)))) {
         // Even the extended frame bounds still leave a 1-2px gap on Windows
         // 11: its rounded window corners and drop-shadow anti-aliasing eat

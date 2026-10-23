@@ -45,11 +45,6 @@ struct Config {
     bool verboseLogging = false; // logs every WinEvent + overlay sync decision for tracked windows
     std::vector<COLORREF> palette;
 
-    // Extra Linux VS Code arguments per WSL distro, from
-    // `wsl_vscode_extra_args.<distro>` keys (see wsl.h's LinuxVSCodeOpenCommand).
-    // The distro name is lowercased, as config.ini keys are.
-    std::vector<std::pair<std::wstring, std::vector<std::wstring>>> wslVSCodeExtraArgs;
-
     // The Claude profiles in slot order (see claude_profile.h): slot 1, the
     // default profile, always first; then the slots that have a
     // _profile_path.

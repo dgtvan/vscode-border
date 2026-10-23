@@ -30,8 +30,6 @@ struct ProjectListHudEntry {
                             // "Copy Directory Path" and "Open Directory in File Explorer".
     COLORREF color = RGB(0, 0, 0);
     ClaudeStatus claudeStatus = ClaudeStatus::None;
-    std::wstring wslDistro; // distro a WSLg window's Linux VS Code runs in (see wsl.h), empty for Windows
-                            // VS Code -- a WSLg entry shows the WSL icon in front of its label
     std::wstring profile;   // Claude profile the window runs Claude Code as (see claude_profile.h), empty for
                             // the default
     bool showProfileIcon = false; // the profile's icon in front of the label (see ShowsClaudeProfileIcon)

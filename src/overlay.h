@@ -16,14 +16,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 // Left-click-and-hold on the label chip drags the target window around (a
 // maximized one is restored first and put back under the cursor, like a
-// title-bar drag). With a resize strip (see PaintOverlay's resizeMargin),
-// left-click-and-drag on the border or the strip resizes it from that
-// edge/corner, showing the matching resize cursor. The overlay is
-// click-through everywhere else, though -- it must never get in the way of
-// the window it frames -- so it's made clickable only while the cursor is
-// actually over the chip or the strip, with that part on screen (not covered
-// by another window) and no mouse button already held for something else. Call often (tracking.cpp's 50ms
-// foreground poll) for every overlay to keep that up to date.
+// title-bar drag). The overlay is click-through everywhere else, though --
+// it must never get in the way of the window it frames -- so it's made
+// clickable only while the cursor is actually over the chip, with the chip
+// on screen (not covered by another window) and no mouse button already
+// held for something else. Call often (tracking.cpp's 50ms foreground poll)
+// for every overlay to keep that up to date.
 void UpdateOverlayLabelHover(HWND overlay);
 
 // Paints a hollow rectangular frame of `thickness` px into the overlay's
@@ -34,15 +32,9 @@ void UpdateOverlayLabelHover(HWND overlay);
 //
 // Label text color is either fixed (`labelTextColor`, used when
 // `labelTextColorAuto` is false) or auto-picked for contrast against `color`
-// (when `labelTextColorAuto` is true). A non-empty `wslDistro` (a WSLg
-// window -- see wsl.h) puts the WSL icon in front of the label text, and a
-// non-null `profileIcon` the icon of that Claude profile (see
-// claude_profile.h). A
-// non-zero `resizeMargin` adds an invisible strip that wide all around,
-// outside the border (so `width`/`height` include it), which works as the
-// window's resize edges -- see UpdateOverlayLabelHover. Also records where
-// the chip and the strip are, for UpdateOverlayLabelHover.
+// (when `labelTextColorAuto` is true). A non-null `profileIcon` puts the
+// icon of that Claude profile (see claude_profile.h) in front of the label
+// text. Also records where the chip is, for UpdateOverlayLabelHover.
 void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thickness, int opacity,
                    const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,
-                   bool labelTextColorAuto, COLORREF labelTextColor, const std::wstring& wslDistro,
-                   const std::wstring* profileIcon, int resizeMargin);
+                   bool labelTextColorAuto, COLORREF labelTextColor, const std::wstring* profileIcon);

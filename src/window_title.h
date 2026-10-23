@@ -10,8 +10,7 @@ struct VSCodeTitleParts {
 
 // VS Code's window.title is configured as
 // "${activeRepositoryName} - ${activeRepositoryBranchName} - ${folderName} - ${appName}"
-// -- the trailing " - Visual Studio Code" (and a WSLg window's " (<distro>)"
-// after it) is stripped first. When the window is inside a git repo, the
+// -- the trailing " - Visual Studio Code" is stripped first. When the window is inside a git repo, the
 // rest yields 3 " - "-separated
 // segments (repo, branch, folder). Outside a git repo, VS Code substitutes
 // "-" for the empty repo/branch placeholders and then collapses/trims the

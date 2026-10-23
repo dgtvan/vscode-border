@@ -14,7 +14,6 @@
 #include "worktree_resolver.h"
 #include "vscode_installs.h"
 #include "vscode_settings.h"
-#include "wsl.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -75,8 +74,6 @@ struct TrackedWindow {
     std::wstring repoName;   // the title's raw ${activeRepositoryName} (pre-worktree-substitution), empty
                               // outside a git repo -- ResolveFolderPath's hint for picking between several
                               // recorded folders that share folderName
-    std::wstring wslDistro;  // distro a WSLg window's Linux VS Code runs in (from its title, see wsl.h),
-                              // empty for a Windows VS Code window
     std::wstring profile;    // Claude profile this window runs Claude Code as (see claude_profile.h), empty
                               // for the default -- see UpdateWindowProfile
     bool profileKnown = false; // UpdateWindowProfile has run, so a change of profile is worth logging
@@ -122,8 +119,6 @@ static void ApplyLabelForTitle(TrackedWindow& tw, const std::wstring& title) {
     if (folderName != tw.folderName || parts.repo != tw.repoName) InvalidateWorktreeCache();
     tw.folderName = folderName;
     tw.repoName = parts.repo;
-    tw.wslDistro.clear();
-    SplitWslgVSCodeTitle(title, nullptr, &tw.wslDistro);
 
     // Inside a git worktree checkout, VS Code's ${activeRepositoryName} is
     // the *worktree's* folder name rather than the main repo's -- substitute
@@ -249,7 +244,7 @@ static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<A
     bool noFolderWindow = !tw.hasFolderOrRepoInTitle;
     if (!noFolderWindow) {
         if (tw.folderName.empty()) return ClaudeStatus::None;
-        folderPath = ResolveFolderPath(tw.folderName, tw.repoName, tw.wslDistro);
+        folderPath = ResolveFolderPath(tw.folderName, tw.repoName);
     }
     while (!folderPath.empty() && (folderPath.back() == L'\\' || folderPath.back() == L'/')) folderPath.pop_back();
     LogDiag(L"ai_status: matching window folderName=[%ls] resolvedFolderPath=[%ls]%ls against %zu session(s)",
@@ -343,10 +338,9 @@ static void SyncProjectListHud() {
         entry.aliasKey = kv.second.aliasKey;
         entry.path = kv.second.folderName.empty()
                          ? L""
-                         : ResolveFolderPath(kv.second.folderName, kv.second.repoName, kv.second.wslDistro);
+                         : ResolveFolderPath(kv.second.folderName, kv.second.repoName);
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
-        entry.wslDistro = kv.second.wslDistro;
         entry.profile = kv.second.profile;
         entry.showProfileIcon = ShowsClaudeProfileIcon(kv.second.profile);
         entry.loading = IsWindowLoading(kv.second, kv.first);
@@ -508,27 +502,14 @@ static int PeekNextColorIndex() {
 
 // Repositions/resizes/repaints/hides the overlay to match its target's
 // current state. Cheap when only position changed (no repaint needed).
-// The overlay's resize strip width for `tw` -- see SyncOverlay.
-static int ResizeMarginFor(HWND target, const TrackedWindow& tw) {
-    const int kWslResizeMargin = 5;
-    // Only with the patched WSLg modules: without them a resize from here
-    // never reaches the Linux app (see wsl.h's WslgWindowControlAvailable).
-    return (!tw.wslDistro.empty() && !IsZoomed(target) && WslgWindowControlAvailable(tw.wslDistro))
-               ? kWslResizeMargin
-               : 0;
-}
-
 // Works out which Claude profile the window runs (see claude_profile.h's
-// ClaudeProfileOfWindow), logging when that changes. A WSLg window's Linux
-// VS Code runs none of them. With nothing to go on -- a title still
+// ClaudeProfileOfWindow), logging when that changes. With nothing to go on -- a title still
 // settling, say -- the profile already worked out stands, so the window's
 // icon and favourite don't flicker.
 static void UpdateWindowProfile(HWND target, TrackedWindow& tw) {
     std::wstring profile;
-    if (tw.wslDistro.empty()) {
-        std::wstring path = tw.folderName.empty() ? L"" : ResolveFolderPath(tw.folderName, tw.repoName);
-        if (!ClaudeProfileOfWindow(path, tw.folderName, profile) && tw.profileKnown) return;
-    }
+    std::wstring path = tw.folderName.empty() ? L"" : ResolveFolderPath(tw.folderName, tw.repoName);
+    if (!ClaudeProfileOfWindow(path, tw.folderName, profile) && tw.profileKnown) return;
     if (tw.profileKnown && profile == tw.profile) return;
     if (tw.profileKnown || !profile.empty()) {
         Log(L"hwnd=%p [%ls] runs as Claude profile [%ls]", target, tw.rawLabel.c_str(),
@@ -557,8 +538,6 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
         return;
     }
 
-    if (!tw.wslDistro.empty()) FixWslgClampedMaximize(target, GetWslgShadowMargin(target));
-
     RECT r;
     if (!GetVisibleWindowRect(target, r)) {
         SyncProjectListHud();
@@ -566,17 +545,10 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
     }
 
     int t = g_config.thickness;
-    // A WSLg window's own left/right resize edges don't work (they fall on
-    // the fully transparent part of Linux VS Code's shadow margin, which
-    // Windows treats as click-through), so the overlay supplies them: an
-    // invisible strip this wide outside the border -- together about the
-    // size of a Windows window's own resize band. Not while maximized,
-    // same as a real window.
-    int m = ResizeMarginFor(target, tw);
-    int ox = r.left - t - m;
-    int oy = r.top - t - m;
-    int ow = (r.right - r.left) + 2 * (t + m);
-    int oh = (r.bottom - r.top) + 2 * (t + m);
+    int ox = r.left - t;
+    int oy = r.top - t;
+    int ow = (r.right - r.left) + 2 * t;
+    int oh = (r.bottom - r.top) + 2 * t;
     if (ow <= 0 || oh <= 0) {
         SyncProjectListHud();
         return;
@@ -589,8 +561,8 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
         COLORREF color = g_config.palette[tw.colorIndex % g_config.palette.size()];
         PaintOverlay(tw.overlay, ow, oh, color, t, g_config.opacity,
                      borderLabel, g_config.showLabel, g_config.labelHeight, g_config.labelFontSize,
-                     g_config.labelTextColorAuto, g_config.labelTextColor, tw.wslDistro,
-                     icon.empty() ? nullptr : &tw.profile, m);
+                     g_config.labelTextColorAuto, g_config.labelTextColor,
+                     icon.empty() ? nullptr : &tw.profile);
         tw.lastWidth = ow;
         tw.lastHeight = oh;
         tw.lastLabel = borderLabel;
@@ -690,7 +662,7 @@ static void TrackWindow(HWND hwnd) {
     if (!IsCandidateTopLevelWindow(hwnd)) return;
 
     std::wstring exeName;
-    if (!GetProcessImageName(hwnd, exeName) || !IsVSCodeWindowProcess(hwnd, exeName)) return;
+    if (!GetProcessImageName(hwnd, exeName) || !IsVSCodeExe(exeName)) return;
 
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
@@ -707,7 +679,6 @@ static void TrackWindow(HWND hwnd) {
     tw.trackSeq = g_nextTrackSeq++;
     tw.loadingEpisodeStartTick = GetTickCount64();
     ApplyLabelForTitle(tw, title);
-    NoteWslVSCodeDistro(tw.wslDistro, g_config.showLabel);
     LogDiag(L"tracked(initial) hwnd=%p title=[%ls] rawLabel=[%ls] hasRepoInTitle=%d loadingEpisodeStartTick=%llu",
             hwnd, title, tw.rawLabel.c_str(), tw.hasRepoInTitle, (unsigned long long)tw.loadingEpisodeStartTick);
     g_tracked[hwnd] = tw;
@@ -725,7 +696,6 @@ static void UntrackWindow(HWND hwnd) {
     FreeColorIndex(it->second.colorIndex);
     ForgetSessionAlias(SessionAliasKey(it->second.trackSeq));
     ReleasePidHooks(it->second.pid);
-    ForgetVisibleWindowRect(hwnd);
     DestroyWindow(it->second.overlay);
     g_tracked.erase(it);
     UpdateForegroundPollTimer();
@@ -862,7 +832,7 @@ std::vector<ReopenWindow> GetReopenableWindows() {
         w.profile = tw.profile;
         w.label = tw.label;
         if (tw.hasFolderOrRepoInTitle) {
-            w.folder = tw.folderName.empty() ? L"" : ResolveFolderPath(tw.folderName, tw.repoName, tw.wslDistro);
+            w.folder = tw.folderName.empty() ? L"" : ResolveFolderPath(tw.folderName, tw.repoName);
             w.reopen = !w.folder.empty();
         }
         result.push_back(w);
@@ -885,7 +855,6 @@ std::vector<TrackedWindowDiag> GetTrackedWindowDiagnostics() {
         d.lastPaintedHeight = tw.lastHeight;
         d.lastKnownRect = tw.lastKnownRect;
         d.loading = IsWindowLoading(tw, kv.first);
-        d.resizeMargin = ResizeMarginFor(kv.first, tw);
         d.label = tw.label;
         d.rawLabel = tw.rawLabel;
         d.borderLabel = BorderLabel(tw);
@@ -937,9 +906,8 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
                 // before its one final update (see kLoadingGraceMs).
                 wchar_t rawTitle[512] = {};
                 GetWindowTextW(hwnd, rawTitle, 512);
-                // WSLg re-sends a window's unchanged title whenever it's
-                // activated or deactivated -- nothing to reload, and taking
-                // it for one would grey the hub item out as "Loading...".
+                // An unchanged title is nothing to reload, and taking it
+                // for one would grey the hub item out as "Loading...".
                 if (it->second.lastTitle == rawTitle) return;
                 it->second.lastTitle = rawTitle;
                 bool wasLoading = IsWindowLoading(it->second, hwnd);

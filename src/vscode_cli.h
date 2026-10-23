@@ -39,9 +39,7 @@ bool RunVSCodeCli(const std::wstring& cmdPath, const std::wstring& args, const s
 
 // Opens a brand-new VS Code window -- empty if `folder` is empty, else with
 // `folder` open (note `code -n` on a folder VS Code already has open just
-// re-activates that window). A WSL folder (its \\wsl.localhost path, see
-// wsl.h) opens in that distro's Linux VS Code instead, which no Claude
-// profile reaches. Otherwise the window runs Claude Code as profile
+// re-activates that window). The window runs Claude Code as profile
 // `profile` (see claude_profile.h; empty: the default). `reason` tags the
 // focus-trace launch record. Returns whether the launch was handed off
 // (false, logged, if no CLI shim was found or it couldn't be run).
@@ -49,12 +47,8 @@ bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const w
                          const std::wstring& profile = L"");
 
 // Asks one VS Code window to close -- the same request as its own X button,
-// so VS Code still gets to prompt about unsaved changes. A WSLg window (see
-// wsl.h) only passes a close on to Linux VS Code while it's the active
-// window, so it's activated first and the request handled before this
-// returns; a Windows one is just posted WM_CLOSE. `reason` tags the
-// focus-trace log line.
-void CloseVSCodeWindow(HWND target, const wchar_t* reason);
+// so VS Code still gets to prompt about unsaved changes.
+void CloseVSCodeWindow(HWND target);
 
 // A VS Code window to close and open again (see CloseAndReopenVSCodeWindows).
 struct ReopenWindow {

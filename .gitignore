@@ -1,6 +1,2 @@
 # Build output (produced by build.ps1)
 /bin/
-
-# WSLg module build: output and the Weston source tarball (see docs/WSLG-PATCHES.md)
-/tools/wslg-patches/out/
-/tools/wslg-patches/weston-*.tar.gz

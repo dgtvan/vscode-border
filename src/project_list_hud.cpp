@@ -10,7 +10,6 @@
 #include "taskbar_backdrop.h"
 #include "vscode_cli.h"
 #include "window_discovery.h"
-#include "wsl.h"
 
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -590,14 +589,10 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index, const
 
 // The running VS Code window the CLI shim is derived from (see
 // vscode_cli.h's ResolveVSCodeCliShim) -- null once every window is closed,
-// which that resolver falls back from. Never a WSLg window: its process is
-// WSL's msrdc.exe, not a VS Code install with a shim next to it.
+// which that resolver falls back from.
 static HWND AnyTrackedWindow(const ProjectListHudState* state) {
-    if (!state) return nullptr;
-    for (const ProjectListHudEntry& e : state->entries) {
-        if (e.wslDistro.empty()) return e.target;
-    }
-    return nullptr;
+    if (!state || state->entries.empty()) return nullptr;
+    return state->entries.front().target;
 }
 
 // Minimizes every tracked VS Code window -- the hub's minimize-all button.
@@ -828,40 +823,29 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     // nothing here is usable yet.
     // "Reopen As" closes this window and opens its folder again as another
     // Claude profile (any configured one but the window's own) -- see
-    // vscode_cli.h's CloseAndReopenVSCodeWindows. Left off with no path, for
-    // a WSL window, or when there's no other profile.
+    // vscode_cli.h's CloseAndReopenVSCodeWindows. Left off with no path, or
+    // when there's no other profile.
     bool loading =index >= 0 && index < (int)state->entries.size() && state->entries[index].loading;
     bool hasPath = !loading && index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
     bool alreadyFav = hasPath && EntryIsFavourite(state->entries[index]);
     bool hasAlias = !loading && index >= 0 && index < (int)state->entries.size() &&
                     state->entries[index].label != state->entries[index].rawLabel;
-    // A WSL window's folder (its \\wsl.localhost path, see wsl.h) can only be
-    // shown in Explorer while the distro shares its files with Windows,
-    // which it can switch off -- greyed out then, rather than an item that
-    // silently does nothing. (The distro is running: its window is open.)
-    bool explorerReachable = true;
-    if (hasPath && ParseWslUncPath(state->entries[index].path, nullptr, nullptr)) {
-        DWORD attrs = GetFileAttributesW(state->entries[index].path.c_str());
-        explorerReachable = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
-    }
 
     HMENU menu = CreatePopupMenu();
     UINT itemFlags = MF_STRING | (loading ? MF_GRAYED : 0);
     if (hasPath || loading) {
         AppendMenuW(menu, itemFlags, 5, L"Copy Directory Path");
-        AppendMenuW(menu, itemFlags | (explorerReachable ? 0 : MF_GRAYED), 6, L"Open Directory in File Explorer");
+        AppendMenuW(menu, itemFlags, 6, L"Open Directory in File Explorer");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
     // Reopen As ids: kReopenAsBase + profile slot (0 for the default, 1 + i
     // for profiles[i]).
     const UINT kReopenAsBase = 0x100;
     const std::vector<std::wstring> profiles = OtherClaudeProfiles();
-    bool wslEntry = index >= 0 && index < (int)state->entries.size() &&
-                    (!state->entries[index].wslDistro.empty() || ParseWslUncPath(state->entries[index].path, nullptr, nullptr));
     if (loading && !profiles.empty()) {
         AppendMenuW(menu, itemFlags, 0, L"Reopen As");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    } else if (hasPath && !wslEntry) {
+    } else if (hasPath) {
         HMENU reopenMenu = CreatePopupMenu();
         for (size_t slot = 0; slot <= profiles.size(); slot++) {
             std::wstring profile = slot == 0 ? std::wstring() : profiles[slot - 1];
@@ -926,17 +910,14 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     } else if (cmd == 4) {
         RemoveFavourite(state->entries[index].path);
     } else if (cmd == 5) {
-        // A WSL folder as the Linux path it is inside the distro.
-        std::wstring linuxPath;
-        bool wsl = ParseWslUncPath(state->entries[index].path, nullptr, &linuxPath);
-        CopyPathToClipboard(hud, wsl ? linuxPath : state->entries[index].path);
+        CopyPathToClipboard(hud, state->entries[index].path);
     } else if (cmd == 6) {
         OpenPathInExplorer(state->entries[index].path);
     } else if (cmd == 7 && index >= 0 && index < (int)state->entries.size()) {
         // Same request as the window's own X button -- VS Code still gets
         // to prompt about unsaved changes (see CloseVSCodeWindow).
         HWND target = state->entries[index].target;
-        CloseVSCodeWindow(target, L"hud-item-close");
+        CloseVSCodeWindow(target);
         Log(L"hud item close: sent WM_CLOSE to [%ls]", state->entries[index].label.c_str());
     }
 }
@@ -951,8 +932,8 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // each as its own submenu -- hovering a
 // favourite's name expands it to "Open in New Window As" (a submenu of every
 // profile it could open as -- see vscode_cli.h's OpenNewVSCodeWindow; on an
-// open folder it just re-activates its window, whatever profile that runs;
-// a WSL folder lists only the default) and "Remove from Favourites". A plain
+// open folder it just re-activates its window, whatever profile that runs)
+// and "Remove from Favourites". A plain
 // Win32 popup menu item can't both carry its own click action and expand a
 // submenu on hover, so nesting "open" one level down (rather than a bare
 // top-level click) is what buys room for "remove" to live right next to it,
@@ -997,10 +978,8 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
         for (size_t i = 0; i < favourites.size(); i++) {
             UINT removeId = (UINT)(1 + i);
             HMENU sub = CreatePopupMenu();
-            // A WSL folder only opens as the default.
             HMENU asMenu = CreatePopupMenu();
-            size_t lastSlot = ParseWslUncPath(favourites[i].path, nullptr, nullptr) ? 0 : profiles.size();
-            for (size_t slot = 0; slot <= lastSlot; slot++) {
+            for (size_t slot = 0; slot <= profiles.size(); slot++) {
                 AppendProfileMenuItem(asMenu, kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, slotProfile(slot));
             }
             AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
@@ -1683,13 +1662,9 @@ static void DrawFavouriteMarker(UINT32* pixels, int width, int height, const REC
 }
 
 // How much further right an entry's label starts, to make room for the
-// icons in front of it: WSL (see ProjectListHudEntry::wslDistro), then the
-// profile's (ProjectListHudEntry::profile).
-static int WslIconTextShift(const ProjectListHudEntry& entry) {
-    return entry.wslDistro.empty() ? 0 : kWslIconSize + kWslIconGap;
-}
+// profile's icon in front of it (ProjectListHudEntry::profile).
 static int LabelIconsTextShift(const ProjectListHudEntry& entry) {
-    return WslIconTextShift(entry) + (entry.showProfileIcon ? kProfileIconSize + kProfileIconGap : 0);
+    return entry.showProfileIcon ? kProfileIconSize + kProfileIconGap : 0;
 }
 
 // Draws one entry's chip (background + label text, alpha-blended by
@@ -1775,13 +1750,6 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
     // below so it fades with the rest of the chip on hover/normal opacity,
     // same reasoning as the Claude status indicator's placement.
     if (showFavouriteMarker) DrawFavouriteMarker(pixels, width, height, item, color);
-    // A WSLg entry's WSL icon: where the label would otherwise start,
-    // after the star on a favourite, with the label moved over to make room.
-    if (!entry.wslDistro.empty()) {
-        BlendWslIcon(pixels, width, height, (int)item.left + leftTextPad, (int)item.top + (rowHeight - kWslIconSize) / 2,
-                     item);
-        leftTextPad += WslIconTextShift(entry);
-    }
     if (entry.showProfileIcon) {
         BlendClaudeProfileIcon(entry.profile, pixels, width, height, (int)item.left + leftTextPad,
                                (int)item.top + (rowHeight - kProfileIconSize) / 2, item);

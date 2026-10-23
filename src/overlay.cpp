@@ -4,7 +4,6 @@
 #include "focus_trace.h"
 #include "layered_rendering.h"
 #include "logger.h"
-#include "wsl.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -16,37 +15,12 @@ const wchar_t* kOverlayClassName = L"VSCodeBorderOverlayWndClass";
 // a click (which just activates the window).
 static const int kLabelDragThreshold = 4;
 
-// Edges a resize grab moves (see OverlayState::resizeEdges).
-enum { kEdgeLeft = 1, kEdgeTop = 2, kEdgeRight = 4, kEdgeBottom = 8 };
-
-// Smallest window a resize grab shrinks the target to.
-static const int kMinResizeWidth = 400, kMinResizeHeight = 270;
-
-// While resizing, re-checks whether the window has caught up with the last
-// size sent (see SendResize).
-static const UINT_PTR kResizeTimerId = 1;
-static const UINT kResizeTimerMs = 30;
-// Gives up waiting for a size to land and sends the next one anyway.
-static const ULONGLONG kResizeSettleTimeoutMs = 120;
-
 struct OverlayState {
     HWND target = nullptr;
     RECT label = {}; // label chip, overlay-local -- empty when none is drawn
-    int frame = 0;   // border thickness + resize margin as last painted: the overlay rect deflated by
-                     // this is the target's visible rect
-    int resizeMargin = 0; // invisible grab strip outside the border, 0 if none (see PaintOverlay)
     bool clickable = false; // WS_EX_TRANSPARENT currently lifted (see UpdateOverlayLabelHover)
-    int hoverEdges = 0; // while clickable over the resize strip: which kEdge* bits the cursor is on
-                        // (0 = over the label chip instead)
-    bool pressed = false; // left button went down on the chip (or strip) and hasn't come up yet
-    int resizeEdges = 0;  // ...on the strip: the edges being dragged (0 = moving via the chip)
+    bool pressed = false; // left button went down on the chip and hasn't come up yet
     bool dragging = false; // ...and has moved past kLabelDragThreshold
-    RECT wantRect = {};    // resizing: where the cursor says the window should be now
-    RECT sentRect = {};    // resizing: the last rect actually sent (empty = none outstanding)
-    RECT sentFrom = {};    // resizing: the window's rect when it was sent -- once that changes, WSLg has
-                           // replied (see SendResize)
-    ULONGLONG sentTick = 0;
-    ULONGLONG releaseTick = 0; // resizing: when the button came up -- see WM_TIMER
     bool wasZoomed = false; // target was maximized when the press began
     POINT pressPos = {};    // cursor at the press (or at the restore, see WM_MOUSEMOVE)
     RECT pressRect = {};    // target's window rect at the same moment
@@ -69,97 +43,12 @@ static void SetOverlayClickable(HWND overlay, OverlayState& st, bool clickable) 
     st.clickable = clickable;
 }
 
-// True if a visible window other than `overlay` sits in front of `target`
-// at `pt` -- i.e. the overlay's own pixels there aren't actually on screen.
-static bool CoveredInFrontOf(HWND target, HWND overlay, POINT pt) {
-    for (HWND w = GetWindow(target, GW_HWNDPREV); w; w = GetWindow(w, GW_HWNDPREV)) {
-        if (w == overlay || !IsWindowVisible(w)) continue;
-        RECT r;
-        if (GetWindowRect(w, &r) && PtInRect(&r, pt)) return true;
-    }
-    return false;
-}
-
-// The distro a WSLg target runs in (from its title, see wsl.h), or empty.
-static std::wstring TargetWslDistro(HWND target) {
-    wchar_t title[512] = {};
-    GetWindowTextW(target, title, 512);
-    std::wstring distro;
-    SplitWslgVSCodeTitle(title, nullptr, &distro);
-    return distro;
-}
-
-static LPCWSTR ResizeCursor(int edges) {
-    bool h = (edges & (kEdgeLeft | kEdgeRight)) != 0, v = (edges & (kEdgeTop | kEdgeBottom)) != 0;
-    if (h && v) {
-        bool nwse = (edges & kEdgeLeft) ? (edges & kEdgeTop) != 0 : (edges & kEdgeBottom) != 0;
-        return nwse ? IDC_SIZENWSE : IDC_SIZENESW;
-    }
-    return h ? IDC_SIZEWE : IDC_SIZENS;
-}
-
-// Asks for st.wantRect. With the patched WSLg (see wsl.h), only through its
-// control FIFO: Linux VS Code decides the size it actually takes (it may
-// round, or hit a limit), and WSLg's reply then sets the Windows frame to
-// match -- setting the frame here as well would leave the two disagreeing
-// whenever the app picks a slightly different size, and the border (drawn
-// from the frame) off the app. One request at a time: the next goes once the
-// window has changed since the last one (WSLg replied) or
-// kResizeSettleTimeoutMs has passed, and never the same rect twice -- so
-// older replies can't land after newer requests. Without the patch, the
-// frame is all there is to set. Called on every mouse move and
-// kResizeTimerId tick of a resize.
-static void SendResize(OverlayState& st) {
-    RECT now;
-    if (!GetWindowRect(st.target, &now)) return;
-    std::wstring distro = TargetWslDistro(st.target);
-    if (!distro.empty() && WslgWindowControlAvailable(distro)) {
-        if (EqualRect(&st.wantRect, &st.sentRect)) return; // already asked for (the timer stops on release)
-        bool outstanding = !IsRectEmpty(&st.sentRect) && EqualRect(&now, &st.sentFrom);
-        if (outstanding && GetTickCount64() - st.sentTick < kResizeSettleTimeoutMs) return;
-        SendWslgWindowRect(st.target, distro, st.wantRect);
-        st.sentRect = st.wantRect;
-        st.sentFrom = now;
-        st.sentTick = GetTickCount64();
-        return;
-    }
-    if (!IsRectEmpty(&st.sentRect) && !EqualRect(&now, &st.sentRect) &&
-        GetTickCount64() - st.sentTick < kResizeSettleTimeoutMs) {
-        return; // still on its way
-    }
-    if (EqualRect(&now, &st.wantRect)) {
-        st.sentRect = {};
-        return; // already there
-    }
-    SetWindowPos(st.target, nullptr, st.wantRect.left, st.wantRect.top, st.wantRect.right - st.wantRect.left,
-                 st.wantRect.bottom - st.wantRect.top, SWP_NOZORDER | SWP_NOACTIVATE);
-    st.sentRect = st.wantRect;
-    st.sentTick = GetTickCount64();
-}
-
-// Which kEdge* bits screen point `pt` is on if it's in the overlay's resize
-// strip (or border) -- outside the window, within the overlay -- else 0.
-static int ResizeEdgesAt(HWND overlay, const OverlayState& st, POINT pt) {
-    RECT o;
-    if (st.resizeMargin <= 0 || !GetWindowRect(overlay, &o) || !PtInRect(&o, pt)) return 0;
-    RECT visible = o;
-    InflateRect(&visible, -st.frame, -st.frame);
-    if (PtInRect(&visible, pt)) return 0;
-    int edges = 0;
-    if (pt.x < visible.left) edges |= kEdgeLeft;
-    if (pt.x >= visible.right) edges |= kEdgeRight;
-    if (pt.y < visible.top) edges |= kEdgeTop;
-    if (pt.y >= visible.bottom) edges |= kEdgeBottom;
-    return edges;
-}
-
 void UpdateOverlayLabelHover(HWND overlay) {
     auto it = g_overlays.find(overlay);
     if (it == g_overlays.end()) return;
     OverlayState& st = it->second;
     if (st.pressed) return; // mid-press/drag: stays clickable until the button comes up
     bool want = false;
-    int edges = 0;
     POINT pt;
     RECT o;
     // A button already held (e.g. a text selection being dragged across the
@@ -174,20 +63,9 @@ void UpdateOverlayLabelHover(HWND overlay) {
             // -- not some other window covering this corner.
             HWND under = GetAncestor(WindowFromPoint(pt), GA_ROOT);
             want = under == overlay || under == st.target;
-        } else if ((edges = ResizeEdgesAt(overlay, st, pt)) != 0 && !CoveredInFrontOf(st.target, overlay, pt)) {
-            // Outside the window, within the border or the grab strip around
-            // it -- which edge(s), corners being both.
-            want = true;
-        } else {
-            edges = 0;
         }
     }
-    bool changed = want && edges && (!st.clickable || edges != st.hoverEdges);
-    st.hoverEdges = want ? edges : 0;
     SetOverlayClickable(overlay, st, want);
-    // The cursor is only updated on the next mouse move otherwise -- so it
-    // would keep showing whatever was under it a moment ago.
-    if (changed) SetCursor(LoadCursorW(nullptr, ResizeCursor(edges)));
 }
 
 LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -198,55 +76,22 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     switch (msg) {
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
-        case WM_SETCURSOR: {
-            // Over the resize strip: the same resize cursor the window's own
-            // edge would show, for wherever the cursor is right now. (The
-            // label chip keeps the normal arrow.)
-            POINT pt;
-            GetCursorPos(&pt);
-            int edges = st.pressed ? st.resizeEdges : ResizeEdgesAt(hwnd, st, pt);
-            if (!edges) break;
-            SetCursor(LoadCursorW(nullptr, ResizeCursor(edges)));
-            return TRUE;
-        }
         case WM_LBUTTONDOWN:
             if (!st.target || !IsWindow(st.target)) return 0;
             st.pressed = true;
-            {
-                POINT pt;
-                GetCursorPos(&pt);
-                st.resizeEdges = st.hoverEdges ? ResizeEdgesAt(hwnd, st, pt) : 0;
-            }
             st.dragging = false;
             st.wasZoomed = IsZoomed(st.target) != 0;
             GetCursorPos(&st.pressPos);
             GetWindowRect(st.target, &st.pressRect);
-            st.wantRect = st.pressRect;
-            st.sentRect = {};
             SetCapture(hwnd);
-            if (st.resizeEdges) SetTimer(hwnd, kResizeTimerId, kResizeTimerMs, nullptr);
             // Same as clicking the window itself there would have done.
-            RequestForeground(st.target, FocusTargetKind::ExternalWindow,
-                              st.resizeEdges ? L"resize-press" : L"label-press");
+            RequestForeground(st.target, FocusTargetKind::ExternalWindow, L"label-press");
             return 0;
         case WM_MOUSEMOVE: {
             if (!st.pressed || GetCapture() != hwnd) return 0;
             POINT pt;
             GetCursorPos(&pt);
             int dx = pt.x - st.pressPos.x, dy = pt.y - st.pressPos.y;
-            if (st.resizeEdges) {
-                // Resizing: the grabbed edges follow the cursor, the others
-                // stay put. Window-rect deltas are the same as visible-rect
-                // ones, so a WSLg window's shadow margin needs no special care.
-                RECT r = st.pressRect;
-                if (st.resizeEdges & kEdgeLeft) r.left = std::min(r.left + dx, r.right - kMinResizeWidth);
-                if (st.resizeEdges & kEdgeRight) r.right = std::max(r.right + dx, r.left + kMinResizeWidth);
-                if (st.resizeEdges & kEdgeTop) r.top = std::min(r.top + dy, r.bottom - kMinResizeHeight);
-                if (st.resizeEdges & kEdgeBottom) r.bottom = std::max(r.bottom + dy, r.top + kMinResizeHeight);
-                st.wantRect = r;
-                SendResize(st);
-                return 0;
-            }
             if (!st.dragging) {
                 if (abs(dx) < kLabelDragThreshold && abs(dy) < kLabelDragThreshold) return 0;
                 st.dragging = true;
@@ -275,38 +120,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                          SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             return 0;
         }
-        case WM_TIMER:
-            if (wParam != kResizeTimerId) break;
-            // Keeps sending until the window has reached where the cursor
-            // left it -- also after the button is up (see WM_CAPTURECHANGED).
-            if (st.target && IsWindow(st.target)) SendResize(st);
-            // After release: stops once the last size has been sent (FIFO)
-            // or reached (frame), or a second after release regardless, in
-            // case the window settles on a size of its own.
-            if (!st.pressed && (IsRectEmpty(&st.sentRect) || EqualRect(&st.sentRect, &st.wantRect) ||
-                                GetTickCount64() - st.releaseTick > 1000)) {
-                st.sentRect = {};
-                KillTimer(hwnd, kResizeTimerId);
-            }
-            return 0;
         case WM_LBUTTONUP:
             if (GetCapture() == hwnd) ReleaseCapture();
             return 0;
         case WM_CAPTURECHANGED:
-            if (st.dragging && st.target && IsWindow(st.target)) {
-                // A label drag moved a WSLg window: tell Linux where it is now,
-                // or its menus and popups keep opening at the old position.
-                RECT now;
-                std::wstring distro = TargetWslDistro(st.target);
-                if (!distro.empty() && GetWindowRect(st.target, &now)) SendWslgWindowRect(st.target, distro, now);
-            }
             st.pressed = false;
-            st.resizeEdges = 0;
             st.dragging = false;
-            st.releaseTick = GetTickCount64();
-            // A resize's last size may still be on its way: the timer keeps
-            // going until it has landed (or nothing was outstanding).
-            if (IsRectEmpty(&st.sentRect)) KillTimer(hwnd, kResizeTimerId);
             return 0;
         case WM_NCDESTROY:
             g_overlays.erase(it);
@@ -319,16 +138,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 // width*height area) so resizing a large window stays cheap.
 void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thickness, int opacity,
                    const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,
-                   bool labelTextColorAuto, COLORREF labelTextColor, const std::wstring& wslDistro,
-                   const std::wstring* profileIcon, int resizeMargin) {
+                   bool labelTextColorAuto, COLORREF labelTextColor, const std::wstring* profileIcon) {
     if (width <= 0 || height <= 0) return;
     RECT labelRect = {}; // where the chip ends up, if drawn -- see UpdateOverlayLabelHover
-    // Everything below is drawn inside the resize margin: the border and the
-    // chip at the same place relative to the window as without one.
-    const int m = std::max(0, std::min(resizeMargin, std::min(width, height) / 4));
-    const int fullWidth = width;
-    width -= 2 * m;
-    height -= 2 * m;
     int t = std::min(thickness, std::min(width, height) / 2);
     if (t < 1) t = 1;
 
@@ -337,8 +149,8 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
 
     BITMAPINFO bmi = {};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = fullWidth;
-    bmi.bmiHeader.biHeight = -(height + 2 * m); // top-down
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height; // top-down
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -363,23 +175,8 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
     BYTE b = (BYTE)((GetBValue(color) * a) / 255);
     UINT32 px = (UINT32(a) << 24) | (UINT32(r) << 16) | (UINT32(g) << 8) | UINT32(b);
 
-    // The resize margin: alpha 1 of 255, so it's invisible but -- unlike the
-    // fully transparent rest -- still hit-tests as the overlay's, which is
-    // what lets it catch a resize grab (see UpdateOverlayLabelHover).
-    UINT32* surface = (UINT32*)bits;
-    if (m > 0) {
-        const UINT32 kGrabPx = 0x01000000u;
-        for (int y = 0; y < height + 2 * m; y++) {
-            bool band = y < m || y >= height + m;
-            for (int x = 0; x < fullWidth; x++) {
-                if (band || x < m || x >= width + m) surface[y * fullWidth + x] = kGrabPx;
-            }
-        }
-    }
-    // From here on, (0,0) is the border's own top-left, with rows still
-    // fullWidth apart.
-    UINT32* pixels = surface + m * fullWidth + m;
-    const int stride = fullWidth;
+    UINT32* pixels = (UINT32*)bits;
+    const int stride = width;
 
     // Border bands.
     for (int y = 0; y < t; y++)
@@ -409,8 +206,7 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
             GetTextExtentPoint32W(memDC, label.c_str(), (int)label.size(), &textSz);
             SelectObject(memDC, oldFont);
             const int paddingX = 10;
-            int wslShift = wslDistro.empty() ? 0 : kWslIconSize + kWslIconGap;
-            int iconShift = wslShift + (profileIcon ? kProfileIconSize + kProfileIconGap : 0);
+            int iconShift = profileIcon ? kProfileIconSize + kProfileIconGap : 0;
             int lw = std::min(width - 2 * t, (int)textSz.cx + paddingX * 2 + iconShift);
             if (lw > 4) {
                 int lx = t, ly = t;
@@ -419,16 +215,10 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
                 UINT32 lpx = (UINT32(255) << 24) | (UINT32(bgR) << 16) | (UINT32(bgG) << 8) | UINT32(bgB);
                 for (int y = ly; y < ly + lh; y++)
                     for (int x = lx; x < lx + lw; x++) pixels[y * stride + x] = lpx;
-                labelRect = {m + lx, m + ly, m + lx + lw, m + ly + lh};
-                // The helpers below take the whole surface, so their
-                // coordinates are back in it (offset by the margin).
-                if (!wslDistro.empty()) {
-                    BlendWslIcon(surface, fullWidth, height + 2 * m, m + lx + paddingX,
-                                 m + ly + (lh - kWslIconSize) / 2, labelRect);
-                }
+                labelRect = {lx, ly, lx + lw, ly + lh};
                 if (profileIcon) {
-                    BlendClaudeProfileIcon(*profileIcon, surface, fullWidth, height + 2 * m, m + lx + paddingX + wslShift,
-                                     m + ly + (lh - kProfileIconSize) / 2, labelRect);
+                    BlendClaudeProfileIcon(*profileIcon, pixels, width, height, lx + paddingX,
+                                           ly + (lh - kProfileIconSize) / 2, labelRect);
                 }
 
                 // GDI's ClearType/antialiased text rendering writes partial
@@ -440,8 +230,8 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
                 // glyphs into an isolated black-background mask instead and
                 // use its per-channel brightness as blend coverage, so the
                 // label rect written above always stays fully opaque.
-                BlendTextIntoPixels(screenDC, surface, fullWidth, height + 2 * m, m + lx + paddingX + iconShift,
-                                    m + ly, lw - paddingX * 2 - iconShift, lh,
+                BlendTextIntoPixels(screenDC, pixels, width, height, lx + paddingX + iconShift,
+                                    ly, lw - paddingX * 2 - iconShift, lh,
                                     label, font, color, textColor, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
 
@@ -450,7 +240,7 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
     }
 
     POINT ptSrc = {0, 0};
-    SIZE sz = {fullWidth, height + 2 * m};
+    SIZE sz = {width, height};
     BLENDFUNCTION blend = {};
     blend.BlendOp = AC_SRC_OVER;
     blend.SourceConstantAlpha = 255;
@@ -458,11 +248,7 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
 
     UpdateLayeredWindow(overlay, screenDC, nullptr, &sz, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
     auto it = g_overlays.find(overlay);
-    if (it != g_overlays.end()) {
-        it->second.label = labelRect;
-        it->second.frame = t + m;
-        it->second.resizeMargin = m;
-    }
+    if (it != g_overlays.end()) it->second.label = labelRect;
 
     SelectObject(memDC, oldBmp);
     DeleteObject(bmp);
