@@ -1,6 +1,6 @@
 #include "favourites.h"
 
-#include "account.h"
+#include "claude_profile.h"
 #include "file_util.h"
 #include "focus_trace.h"
 #include "logger.h"
@@ -39,21 +39,21 @@ std::vector<FavouriteProject> LoadAll() {
         if (line.empty() || line[0] == ';' || line[0] == '#') continue;
 
         // "=" is the field delimiter (path=label per line), split on the
-        // *first* occurrence only -- see text_util.h. Another account's
-        // favourite is prefixed "@account|": no absolute path starts with
-        // "@", and an account name can't contain "|".
-        std::wstring account;
+        // *first* occurrence only -- see text_util.h. A favourite of a
+        // profile other than the default is prefixed "@<profile id>|": no
+        // absolute path starts with "@", and none contains "|".
+        std::wstring profile;
         if (line[0] == '@') {
             size_t bar = line.find('|');
             if (bar == std::string::npos) continue;
-            account = UnescapeTextLine(line.substr(1, bar - 1));
+            profile = UnescapeTextLine(line.substr(1, bar - 1));
             line = line.substr(bar + 1);
         }
         size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
         std::wstring path = UnescapeTextLine(line.substr(0, eq));
         std::wstring label = UnescapeTextLine(line.substr(eq + 1));
-        if (!path.empty() && !label.empty()) result.push_back({label, path, account});
+        if (!path.empty() && !label.empty()) result.push_back({label, path, profile});
     }
     return result;
 }
@@ -61,7 +61,7 @@ std::vector<FavouriteProject> LoadAll() {
 void SaveAll(const std::vector<FavouriteProject>& all) {
     std::string out;
     for (const FavouriteProject& f : all) {
-        if (!f.account.empty()) out += "@" + EscapeTextLine(f.account) + "|";
+        if (!f.profile.empty()) out += "@" + EscapeTextLine(f.profile) + "|";
         out += EscapeTextLine(f.path) + "=" + EscapeTextLine(f.label) + "\n";
     }
     WriteFileBytes(GetFavouritesFilePath(), out);
@@ -82,24 +82,15 @@ bool SamePath(const std::wstring& a, const std::wstring& b) {
     return !ta.empty() && ta.size() == tb.size() && _wcsicmp(ta.c_str(), tb.c_str()) == 0;
 }
 
-// Windows account names are case-insensitive, non-ASCII letters included.
-bool SameAccountName(const std::wstring& a, const std::wstring& b) {
-    return CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
-}
-
-bool IsAlreadyOpen(const FavouriteProject& f, const std::vector<OpenFolder>& openFolders) {
-    for (const OpenFolder& open : openFolders) {
-        if (SamePath(f.path, open.path) && SameAccountName(f.account, open.account)) return true;
+bool IsAlreadyOpen(const FavouriteProject& f, const std::vector<std::wstring>& openFolders) {
+    for (const std::wstring& open : openFolders) {
+        if (SamePath(f.path, open)) return true;
     }
     return false;
 }
 
-bool Matches(const FavouriteProject& f, const std::wstring& pathKey, const std::wstring& account) {
-    return ToLowerCopy(f.path) == pathKey && SameAccountName(f.account, account);
-}
-
-const wchar_t* AccountForLog(const std::wstring& account) {
-    return account.empty() ? L"this account" : account.c_str();
+bool Matches(const FavouriteProject& f, const std::wstring& pathKey, const std::wstring& profile) {
+    return ToLowerCopy(f.path) == pathKey && SameClaudeProfile(f.profile, profile);
 }
 
 std::vector<FavouriteProject> g_favourites;
@@ -119,26 +110,27 @@ std::vector<FavouriteProject> LoadFavourites() {
     return g_favourites;
 }
 
-bool IsFavourite(const std::wstring& path, const std::wstring& account) {
+bool IsFavourite(const std::wstring& path, const std::wstring& profile) {
     EnsureLoaded();
     std::wstring key = ToLowerCopy(path);
     return std::any_of(g_favourites.begin(), g_favourites.end(),
-                       [&](const FavouriteProject& f) { return Matches(f, key, account); });
+                       [&](const FavouriteProject& f) { return Matches(f, key, profile); });
 }
 
-void AddFavourite(const std::wstring& label, const std::wstring& path, const std::wstring& account) {
+void AddFavourite(const std::wstring& label, const std::wstring& path, const std::wstring& profile) {
     EnsureLoaded();
-    if (path.empty() || IsFavourite(path, account)) return;
-    g_favourites.push_back({label, path, account});
+    if (path.empty() || IsFavourite(path, profile)) return;
+    g_favourites.push_back({label, path, profile});
     SaveAll(g_favourites);
-    Log(L"favourites: added [%ls] (%ls) as [%ls]", label.c_str(), path.c_str(), AccountForLog(account));
+    Log(L"favourites: added [%ls] (%ls) as Claude profile [%ls]", label.c_str(), path.c_str(),
+        ClaudeProfileName(profile).c_str());
 }
 
-void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& account, const std::wstring& label) {
+void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& profile, const std::wstring& label) {
     EnsureLoaded();
     std::wstring key = ToLowerCopy(path);
     for (FavouriteProject& f : g_favourites) {
-        if (!Matches(f, key, account)) continue;
+        if (!Matches(f, key, profile)) continue;
         if (f.label != label) {
             f.label = label;
             SaveAll(g_favourites);
@@ -147,23 +139,18 @@ void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& account
     }
 }
 
-void RemoveFavourite(const std::wstring& path, const std::wstring& account) {
+void RemoveFavourite(const std::wstring& path, const std::wstring& profile) {
     EnsureLoaded();
     std::wstring key = ToLowerCopy(path);
     auto it = std::remove_if(g_favourites.begin(), g_favourites.end(),
-                             [&](const FavouriteProject& f) { return Matches(f, key, account); });
+                             [&](const FavouriteProject& f) { return Matches(f, key, profile); });
     if (it == g_favourites.end()) return;
     g_favourites.erase(it, g_favourites.end());
     SaveAll(g_favourites);
-    Log(L"favourites: removed %ls as [%ls]", path.c_str(), AccountForLog(account));
+    Log(L"favourites: removed %ls as Claude profile [%ls]", path.c_str(), ClaudeProfileName(profile).c_str());
 }
 
-bool IsFavouriteOpen(const FavouriteProject& favourite, const std::vector<OpenFolder>& openFolders) {
-    return IsAlreadyOpen(favourite, openFolders);
-}
-
-void OpenAllFavourites(HWND runningWindow, HWND owner, const std::vector<OpenFolder>& alreadyOpenFolders,
-                       const wchar_t* reason) {
+void OpenAllFavourites(HWND runningWindow, const std::vector<std::wstring>& alreadyOpenFolders, const wchar_t* reason) {
     EnsureLoaded();
     if (g_favourites.empty()) return;
 
@@ -173,9 +160,9 @@ void OpenAllFavourites(HWND runningWindow, HWND owner, const std::vector<OpenFol
     std::vector<const FavouriteProject*> toOpen;
     for (const FavouriteProject& f : g_favourites) {
         if (IsAlreadyOpen(f, alreadyOpenFolders)) {
-            Log(L"favourites: [%ls] is already open as [%ls] -- not relaunching it (a redundant `code -n` would "
-                L"only re-activate that window, leaving the others highlighted in the taskbar)",
-                f.path.c_str(), AccountForLog(f.account));
+            Log(L"favourites: [%ls] is already open -- not relaunching it (a redundant `code -n` would only "
+                L"re-activate that window, leaving the others highlighted in the taskbar)",
+                f.path.c_str());
             continue;
         }
         toOpen.push_back(&f);
@@ -185,17 +172,14 @@ void OpenAllFavourites(HWND runningWindow, HWND owner, const std::vector<OpenFol
         return;
     }
 
-    // This account's shim is only needed for its own Windows folders -- a
-    // WSL one (see wsl.h) opens in its distro's Linux VS Code, and another
-    // account's finds that account's VS Code by itself.
-    auto usesOwnShim = [](const FavouriteProject* f) {
-        return f->account.empty() && !ParseWslUncPath(f->path, nullptr, nullptr);
-    };
+    // The shim is only needed for Windows folders -- a WSL one (see wsl.h)
+    // opens in its distro's Linux VS Code.
+    auto usesOwnShim = [](const FavouriteProject* f) { return !ParseWslUncPath(f->path, nullptr, nullptr); };
     std::wstring cmdPath;
     if (std::any_of(toOpen.begin(), toOpen.end(), usesOwnShim) && !ResolveVSCodeCliShim(runningWindow, cmdPath)) {
         size_t before = toOpen.size();
         toOpen.erase(std::remove_if(toOpen.begin(), toOpen.end(), usesOwnShim), toOpen.end());
-        LogWarn(L"favourites: no VS Code CLI shim -- skipping %zu of this account's favourite(s) in open-all (%ls)",
+        LogWarn(L"favourites: no VS Code CLI shim -- skipping %zu Windows favourite(s) in open-all (%ls)",
                 before - toOpen.size(), reason);
         if (toOpen.empty()) return;
     }
@@ -212,8 +196,10 @@ void OpenAllFavourites(HWND runningWindow, HWND owner, const std::vector<OpenFol
 
     for (const FavouriteProject* f : toOpen) {
         std::wstring distro, linuxPath;
-        if (ParseWslUncPath(f->path, &distro, &linuxPath)) LaunchInWsl(distro, LinuxVSCodeOpenCommand(distro, linuxPath));
-        else if (!f->account.empty()) OpenNewVSCodeWindowAs(owner, f->account, f->path, reason);
-        else RunVSCodeCli(cmdPath, L"-n \"" + f->path + L"\"");
+        if (ParseWslUncPath(f->path, &distro, &linuxPath)) {
+            LaunchInWsl(distro, LinuxVSCodeOpenCommand(distro, linuxPath));
+        } else if (RunVSCodeCli(cmdPath, L"-n \"" + f->path + L"\"", f->profile)) {
+            NoteClaudeProfileLaunch(f->path, f->profile);
+        }
     }
 }

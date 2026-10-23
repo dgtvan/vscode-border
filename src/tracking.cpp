@@ -1,6 +1,6 @@
 #include "tracking.h"
 
-#include "account.h"
+#include "claude_profile.h"
 #include "ai_provider.h"
 #include "claude_usage.h"
 #include "config.h"
@@ -77,8 +77,11 @@ struct TrackedWindow {
                               // recorded folders that share folderName
     std::wstring wslDistro;  // distro a WSLg window's Linux VS Code runs in (from its title, see wsl.h),
                               // empty for a Windows VS Code window
-    std::wstring account;    // Windows account this window's VS Code runs as, when that isn't this app's own
-                              // (see account.h), else empty
+    std::wstring profile;    // Claude profile this window runs Claude Code as (see claude_profile.h), empty
+                              // for the default -- see UpdateWindowProfile
+    bool profileKnown = false; // UpdateWindowProfile has run, so a change of profile is worth logging
+    std::wstring lastIcon;     // profile icon last painted on the border's label chip: "+" and the profile
+                               // id, or empty for none
     std::wstring lastTitle; // window title as of the last NAMECHANGE acted on (or tracking) -- see WinEventProc
     std::wstring lastLabel; // label last painted, to detect changes
     RECT lastKnownRect = {}; // last on-screen bounds seen while not minimized (see SyncProjectListHud) --
@@ -219,19 +222,6 @@ static std::wstring LastPathSegment(const std::wstring& path) {
     return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
-// True if `cwd`, or any folder above it, is named `name` -- the name-only
-// stand-in for PathIsWithinFolder when there's no path to compare against.
-static bool PathHasSegmentNamed(std::wstring cwd, const std::wstring& name) {
-    while (!name.empty() && !cwd.empty()) {
-        while (!cwd.empty() && (cwd.back() == L'\\' || cwd.back() == L'/')) cwd.pop_back();
-        if (_wcsicmp(LastPathSegment(cwd).c_str(), name.c_str()) == 0) return true;
-        size_t slash = cwd.find_last_of(L"\\/");
-        if (slash == std::wstring::npos) break;
-        cwd.erase(slash);
-    }
-    return false;
-}
-
 // Aggregates every AI session (see ai_provider.h) that belongs to this
 // window's folder into one status, attention > working > waiting > none.
 // Prefers a real path match via worktree_resolver's ResolveFolderPath
@@ -249,11 +239,9 @@ static bool PathHasSegmentNamed(std::wstring cwd, const std::wstring& name) {
 // window matches the same sessions -- nothing on the session side says
 // which of several bare windows it runs in.
 //
-// Only sessions of the window's own account count (see account.h), and the
-// home directory is that account's. Another account's window's path may
-// not be its own -- ResolveFolderPath falls back to this account's records
-// when that account's can't be read -- so its windows match by name alone:
-// a session whose cwd is in a folder named like the window's.
+// Sessions match by folder alone, whichever Claude profile they run as: VS
+// Code keeps one window per folder, so a session in a window's folder is
+// that window's.
 static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<AiSessionStatus>& sessions) {
     if (sessions.empty()) return ClaudeStatus::None;
 
@@ -261,31 +249,26 @@ static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<A
     bool noFolderWindow = !tw.hasFolderOrRepoInTitle;
     if (!noFolderWindow) {
         if (tw.folderName.empty()) return ClaudeStatus::None;
-        if (tw.account.empty()) folderPath = ResolveFolderPath(tw.folderName, tw.repoName, tw.wslDistro);
+        folderPath = ResolveFolderPath(tw.folderName, tw.repoName, tw.wslDistro);
     }
     while (!folderPath.empty() && (folderPath.back() == L'\\' || folderPath.back() == L'/')) folderPath.pop_back();
-    LogDiag(L"ai_status: matching window folderName=[%ls] account=[%ls] resolvedFolderPath=[%ls]%ls against %zu "
-            L"session(s)",
-            tw.folderName.c_str(), tw.account.c_str(), folderPath.c_str(),
+    LogDiag(L"ai_status: matching window folderName=[%ls] resolvedFolderPath=[%ls]%ls against %zu session(s)",
+            tw.folderName.c_str(), folderPath.c_str(),
             noFolderWindow ? L" (no folder: home dir)" : L"", sessions.size());
     bool anyAttention = false, anyWorking = false, anyWaiting = false;
     for (const AiSessionStatus& s : sessions) {
         bool matches;
-        if (CompareStringOrdinal(s.account.c_str(), -1, tw.account.c_str(), -1, TRUE) != CSTR_EQUAL) {
-            matches = false;
-        } else if (noFolderWindow) {
+        if (noFolderWindow) {
             std::wstring cwd = s.cwd, home = s.home;
             while (!cwd.empty() && (cwd.back() == L'\\' || cwd.back() == L'/')) cwd.pop_back();
             while (!home.empty() && (home.back() == L'\\' || home.back() == L'/')) home.pop_back();
             matches = !cwd.empty() && _wcsicmp(cwd.c_str(), home.c_str()) == 0;
-        } else if (!tw.account.empty()) {
-            matches = PathHasSegmentNamed(s.cwd, tw.folderName);
         } else {
             matches = !folderPath.empty() ? PathIsWithinFolder(s.cwd, folderPath)
                                           : _wcsicmp(LastPathSegment(s.cwd).c_str(), tw.folderName.c_str()) == 0;
         }
-        LogDiag(L"ai_status:   session account=[%ls] cwd=[%ls] status=[%ls] -> %ls", s.account.c_str(),
-                s.cwd.c_str(), s.status.c_str(), matches ? L"MATCH" : L"no match");
+        LogDiag(L"ai_status:   session cwd=[%ls] status=[%ls] -> %ls", s.cwd.c_str(), s.status.c_str(),
+                matches ? L"MATCH" : L"no match");
         if (!matches) continue;
         if (s.status == L"attention") anyAttention = true;
         else if (s.status == L"working") anyWorking = true;
@@ -360,13 +343,12 @@ static void SyncProjectListHud() {
         entry.aliasKey = kv.second.aliasKey;
         entry.path = kv.second.folderName.empty()
                          ? L""
-                         : ResolveFolderPath(kv.second.folderName, kv.second.repoName, kv.second.wslDistro,
-                                             kv.second.account);
+                         : ResolveFolderPath(kv.second.folderName, kv.second.repoName, kv.second.wslDistro);
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
         entry.wslDistro = kv.second.wslDistro;
-        entry.account = kv.second.account;
-        entry.iconAccount = IconAccountFor(kv.second.account);
+        entry.profile = kv.second.profile;
+        entry.showProfileIcon = ShowsClaudeProfileIcon(kv.second.profile);
         entry.loading = IsWindowLoading(kv.second, kv.first);
         // Fixed placeholder text while loading -- entry.label/rawLabel
         // otherwise still churns underneath (see IsWindowLoading), and
@@ -396,15 +378,12 @@ static void SyncProjectListHud() {
     for (size_t i = 0; i < usage.size(); i++) {
         const ClaudeUsageSnapshot& u = usage[i];
         ProjectListHudUsageRing ring;
-        ring.iconAccount = IconAccountFor(u.account);
-        for (const UserProfile& p : g_config.userProfiles) {
-            bool same = p.thisAccount ? u.account.empty()
-                                      : CompareStringOrdinal(p.account.c_str(), -1, u.account.c_str(), -1, TRUE) ==
-                                            CSTR_EQUAL;
-            if (!same) continue;
-            ring.hasChipColor = p.hasColor;
-            ring.chipColor = p.color;
-            if (!p.ringBadge) ring.iconAccount.clear();
+        ring.profile = u.profile;
+        ring.showProfileIcon = ShowsClaudeProfileIcon(u.profile);
+        if (const ClaudeProfile* p = FindClaudeProfile(u.profile)) {
+            ring.hasChipColor = p->hasColor;
+            ring.chipColor = p->color;
+            if (!p->ringBadge) ring.showProfileIcon = false;
         }
         ring.sessionPercent = CurrentUsagePercent(u.session);
         ring.weeklyPercent = CurrentUsagePercent(u.weekly);
@@ -539,8 +518,27 @@ static int ResizeMarginFor(HWND target, const TrackedWindow& tw) {
                : 0;
 }
 
+// Works out which Claude profile the window runs (see claude_profile.h's
+// ClaudeProfileOfWindow), logging when that changes. A WSLg window's Linux
+// VS Code runs none of them.
+static void UpdateWindowProfile(HWND target, TrackedWindow& tw) {
+    std::wstring profile;
+    if (tw.wslDistro.empty()) {
+        std::wstring path = tw.folderName.empty() ? L"" : ResolveFolderPath(tw.folderName, tw.repoName);
+        profile = ClaudeProfileOfWindow(path, tw.folderName);
+    }
+    if (tw.profileKnown && profile == tw.profile) return;
+    if (tw.profileKnown || !profile.empty()) {
+        Log(L"hwnd=%p [%ls] runs as Claude profile [%ls]", target, tw.rawLabel.c_str(),
+            ClaudeProfileName(profile).c_str());
+    }
+    tw.profile = profile;
+    tw.profileKnown = true;
+}
+
 static void SyncOverlay(HWND target, TrackedWindow& tw) {
     if (!IsWindow(target) || !tw.overlay) return;
+    UpdateWindowProfile(target, tw);
 
     // Re-resolve on every sync (cheap: an in-memory map lookup) so a
     // freshly-set alias (see project_list_hud.cpp's BeginAliasEdit) shows
@@ -582,16 +580,19 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
         return;
     }
 
-    if (ow != tw.lastWidth || oh != tw.lastHeight || borderLabel != tw.lastLabel) {
+    std::wstring icon = ShowsClaudeProfileIcon(tw.profile) ? L"+" + tw.profile : L"";
+    if (ow != tw.lastWidth || oh != tw.lastHeight || borderLabel != tw.lastLabel || icon != tw.lastIcon) {
         LogFastDiag(L"sync hwnd=%p REPAINT ow=%d oh=%d (was %dx%d) label=[%ls] (was [%ls])", target, ow, oh,
                     tw.lastWidth, tw.lastHeight, borderLabel.c_str(), tw.lastLabel.c_str());
         COLORREF color = g_config.palette[tw.colorIndex % g_config.palette.size()];
         PaintOverlay(tw.overlay, ow, oh, color, t, g_config.opacity,
                      borderLabel, g_config.showLabel, g_config.labelHeight, g_config.labelFontSize,
-                     g_config.labelTextColorAuto, g_config.labelTextColor, tw.wslDistro, IconAccountFor(tw.account), m);
+                     g_config.labelTextColorAuto, g_config.labelTextColor, tw.wslDistro,
+                     icon.empty() ? nullptr : &tw.profile, m);
         tw.lastWidth = ow;
         tw.lastHeight = oh;
         tw.lastLabel = borderLabel;
+        tw.lastIcon = icon;
     }
 
     // Move/resize without touching Z-order. This has to be a separate call
@@ -700,8 +701,7 @@ static void TrackWindow(HWND hwnd) {
     tw.overlay = CreateOverlay(g_hInstance, hwnd);
     tw.colorIndex = AllocateColorIndex();
     tw.pid = pid;
-    tw.account = OtherAccountOfProcess(pid);
-    NoteVSCodeInstall(pid, tw.account);
+    NoteVSCodeInstall(pid);
     tw.trackSeq = g_nextTrackSeq++;
     tw.loadingEpisodeStartTick = GetTickCount64();
     ApplyLabelForTitle(tw, title);
@@ -713,8 +713,8 @@ static void TrackWindow(HWND hwnd) {
     AddPidHooks(pid);
     UpdateForegroundPollTimer();
 
-    Log(L"tracked hwnd=%p colorIndex=%d overlay=%p pid=%lu%ls%ls title=[%ls] label=[%ls]", hwnd, tw.colorIndex,
-        tw.overlay, pid, tw.account.empty() ? L"" : L" account=", tw.account.c_str(), title, tw.label.c_str());
+    Log(L"tracked hwnd=%p colorIndex=%d overlay=%p pid=%lu title=[%ls] label=[%ls]", hwnd, tw.colorIndex, tw.overlay,
+        pid, title, tw.label.c_str());
 }
 
 static void UntrackWindow(HWND hwnd) {

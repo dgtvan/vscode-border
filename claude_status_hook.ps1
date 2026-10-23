@@ -2,7 +2,8 @@
 # Not meant to be edited in bin\ -- that copy is overwritten on every build
 # (see build.ps1); edit this file at the repo root instead.
 #
-# Configure in ~/.claude/settings.json to run on SessionStart, UserPromptSubmit,
+# Configure in each Claude profile's settings.json (~/.claude/settings.json,
+# or $CLAUDE_CONFIG_DIR/settings.json) to run on SessionStart, UserPromptSubmit,
 # Stop, StopFailure, SessionEnd, PermissionRequest, Elicitation,
 # ElicitationResult, and SubagentStop, pointing at this file's path in bin\
 # (see README.md's "AI status indicator" section for the exact JSON).
@@ -352,6 +353,12 @@ if ($claudePid) { $content += "pid=$claudePid`n" }
 # not exist -- observed with cwd=...\proplyst\src\web\app\src, whose
 # transcript is under the directory for ...\proplyst.
 if ($data.transcript_path) { $content += "transcript=$($data.transcript_path)`n" }
+
+# The Claude profile the session runs as (see src/claude_profile.h): its
+# config folder, empty for the default one. Every profile's hooks write to
+# this one status folder, so this is where its transcripts are found when
+# transcript= is missing.
+if ($env:CLAUDE_CONFIG_DIR) { $content += "config_dir=$($env:CLAUDE_CONFIG_DIR)`n" }
 
 # Which background tasks this "working" is waiting on, with the transcript's
 # length now: a task's <task-notification> cannot be written before it ends,

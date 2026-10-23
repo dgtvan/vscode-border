@@ -1,11 +1,10 @@
 #include "vscode_cli.h"
 #include "wsl.h"
 
+#include "claude_profile.h"
 #include "focus_trace.h"
 #include "logger.h"
 #include "vscode_installs.h"
-
-#include <shellapi.h>
 
 #include <cwchar>
 
@@ -90,31 +89,37 @@ bool FindInstalledVSCodeCli(std::wstring& outCmdPath) {
 
 bool ResolveVSCodeCliShim(HWND runningWindow, std::wstring& outCmdPath) {
     if (ResolveFromWindow(runningWindow, outCmdPath)) return true;
-    std::wstring remembered = RememberedVSCodeInstall(L"");
+    std::wstring remembered = RememberedVSCodeInstall();
     if (!remembered.empty() && ResolveFromExe(remembered, outCmdPath)) return true;
     if (FindInstalledVSCodeCli(outCmdPath)) return true;
-    for (const std::wstring& shared : SharedVSCodeInstalls(L"")) {
-        if (ResolveFromExe(shared, outCmdPath)) {
-            Log(L"vscode CLI shim: using another account's install, %ls", shared.c_str());
-            return true;
-        }
-    }
     LogWarn(L"vscode CLI shim: could not locate code.cmd/code-insiders.cmd (no running window to derive it "
-            L"from, none remembered, none on PATH or in the usual install locations, and no other account's "
-            L"shared install)");
+            L"from, none remembered, none on PATH or in the usual install locations)");
     return false;
 }
 
-bool RunVSCodeCli(const std::wstring& cmdPath, const std::wstring& args) {
-    HINSTANCE result = ShellExecuteW(nullptr, L"open", cmdPath.c_str(), args.c_str(), nullptr, SW_HIDE);
-    if ((INT_PTR)result <= 32) {
-        LogWarn(L"ShellExecuteW(%ls %ls) failed, code=%Id", cmdPath.c_str(), args.c_str(), (INT_PTR)result);
+bool RunVSCodeCli(const std::wstring& cmdPath, const std::wstring& args, const std::wstring& profile) {
+    wchar_t system32[MAX_PATH] = {};
+    GetSystemDirectoryW(system32, MAX_PATH);
+    std::wstring cmdExe = std::wstring(system32) + L"\\cmd.exe";
+    std::wstring commandLine = L"cmd.exe /d /c \"\"" + cmdPath + L"\" " + args + L"\"";
+    std::wstring environment = ClaudeProfileEnvironment(profile);
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(cmdExe.c_str(), &commandLine[0], nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, &environment[0], nullptr, &si, &pi)) {
+        LogWarn(L"couldn't run the VS Code CLI (%ls %ls) as Claude profile [%ls], lastError=%lu", cmdPath.c_str(),
+                args.c_str(), ClaudeProfileName(profile).c_str(), GetLastError());
         return false;
     }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
     return true;
 }
 
-bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const wchar_t* reason) {
+bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const wchar_t* reason,
+                         const std::wstring& profile) {
     // A WSL folder (\\wsl.localhost\<distro>\... -- see wsl.h) opens in that
     // distro's own Linux VS Code.
     std::wstring distro, linuxPath;
@@ -127,7 +132,11 @@ bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const w
     if (!ResolveVSCodeCliShim(runningWindow, cmdPath)) return false;
     std::wstring args = folder.empty() ? L"-n" : L"-n \"" + folder + L"\"";
     NoteWindowLaunchRequest(reason, 1);
-    return RunVSCodeCli(cmdPath, args);
+    if (!RunVSCodeCli(cmdPath, args, profile)) return false;
+    NoteClaudeProfileLaunch(folder, profile);
+    Log(L"opened a new VS Code window%ls%ls as Claude profile [%ls] (%ls)", folder.empty() ? L"" : L" for ",
+        folder.c_str(), ClaudeProfileName(profile).c_str(), reason);
+    return true;
 }
 
 void CloseVSCodeWindow(HWND target, const wchar_t* reason) {

@@ -1,6 +1,6 @@
 #include "claude_usage.h"
 
-#include "account.h"
+#include "claude_profile.h"
 #include "config.h"
 #include "file_util.h"
 #include "json_scan.h"
@@ -15,8 +15,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
-
-const wchar_t* const kClaudeUsageHelperArg = L"--claude-usage-helper";
 
 namespace {
 
@@ -121,9 +119,7 @@ struct FetchResult {
     bool ok = false;
     ClaudeUsageLimit session, weekly;
     std::wstring error;
-    bool wrongPassword = false; // set by a user profile's worker -- the saved password is to be dropped
-    std::wstring note;          // something worth logging that isn't a failure (a renewed login)
-    bool noteOnly = false;      // a helper's note line: carries no result
+    std::wstring note; // something worth logging that isn't a failure (a renewed login)
 };
 
 ClaudeUsageLimit ParseLimit(const std::string& content, const JsonScan::Span& root, const char* key) {
@@ -136,24 +132,15 @@ ClaudeUsageLimit ParseLimit(const std::string& content, const JsonScan::Span& ro
     return limit;
 }
 
-// Claude Code's config folder for the account this runs as: CLAUDE_CONFIG_DIR
-// if set (Claude Code honours it too), else %USERPROFILE%\.claude.
-std::wstring ClaudeConfigDir() {
-    wchar_t buf[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) return buf;
-    n = GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) return std::wstring(buf) + L"\\.claude";
-    return L"";
+// The login file in Claude Code config folder `dir`.
+std::wstring CredentialsPath(const std::wstring& dir) {
+    return dir + L"\\.credentials.json";
 }
 
-// The account's login file's last write time, 0 if it can't be read.
-ULONGLONG CredentialsWriteTime() {
-    std::wstring dir = ClaudeConfigDir();
+// The profile's login file's last write time, 0 if it can't be read.
+ULONGLONG CredentialsWriteTime(const std::wstring& dir) {
     WIN32_FILE_ATTRIBUTE_DATA data;
-    if (dir.empty() || !GetFileAttributesExW((dir + L"\\.credentials.json").c_str(), GetFileExInfoStandard, &data)) {
-        return 0;
-    }
+    if (!GetFileAttributesExW(CredentialsPath(dir).c_str(), GetFileExInfoStandard, &data)) return 0;
     return ((ULONGLONG)data.ftLastWriteTime.dwHighDateTime << 32) | data.ftLastWriteTime.dwLowDateTime;
 }
 
@@ -161,19 +148,19 @@ ULONGLONG CredentialsWriteTime() {
 const DWORD kCredentialsPollMs = 3000;
 
 // Waits `ms` for `stop`; true if it fired. After a failed fetch
-// (`watchCredentials`) it also ends early, returning false, once the
-// account's login file changes: Claude Code rewrites it when it renews an
-// expired token or signs in, so the next fetch can work within seconds
-// rather than a whole refresh interval later.
-bool WaitForNextFetch(HANDLE stop, DWORD ms, bool watchCredentials) {
+// (`watchCredentials`) it also ends early, returning false, once the login
+// file in config folder `dir` changes: Claude Code rewrites it when it
+// renews an expired token or signs in, so the next fetch can work within
+// seconds rather than a whole refresh interval later.
+bool WaitForNextFetch(HANDLE stop, DWORD ms, bool watchCredentials, const std::wstring& dir) {
     if (!watchCredentials) return WaitForSingleObject(stop, ms) == WAIT_OBJECT_0;
-    ULONGLONG start = GetTickCount64(), seen = CredentialsWriteTime();
+    ULONGLONG start = GetTickCount64(), seen = CredentialsWriteTime(dir);
     for (;;) {
         ULONGLONG elapsed = GetTickCount64() - start;
         if (elapsed >= ms) return false;
         DWORD wait = (DWORD)std::min<ULONGLONG>(kCredentialsPollMs, ms - elapsed);
         if (WaitForSingleObject(stop, wait) == WAIT_OBJECT_0) return true;
-        if (CredentialsWriteTime() != seen) {
+        if (CredentialsWriteTime(dir) != seen) {
             // A moment for Claude Code to finish writing it.
             return WaitForSingleObject(stop, 1000) == WAIT_OBJECT_0;
         }
@@ -254,7 +241,7 @@ bool HttpGetUsage(const std::string& token, std::string& body, std::wstring& err
                 if (c == L'\r' || c == L'\n') c = L' ';
             }
             const wchar_t* hint = status == 401   ? L" -- the login token was rejected; Claude Code renews it the next "
-                                                    L"time it runs in this account"
+                                                    L"time it runs as this profile"
                                   : status == 429 ? L" -- rate limited; try a longer usage_meter_refresh_minutes"
                                                   : L"";
             error = FormatError(L"api.anthropic.com answered HTTP %lu%ls: %ls", status, hint, snippet.c_str());
@@ -266,9 +253,9 @@ bool HttpGetUsage(const std::string& token, std::string& body, std::wstring& err
     return ok;
 }
 
-// The Claude Code executable the account this runs as has: on PATH (the
-// native installer's ~/.local/bin), its native install, else the newest
-// one bundled with its VS Code extension. Empty if none.
+// The Claude Code executable: on PATH (the native installer's
+// ~/.local/bin), its native install, else the newest one bundled with the VS
+// Code extension. Empty if none.
 std::wstring FindClaudeExe() {
     wchar_t found[MAX_PATH] = {};
     if (SearchPathW(nullptr, L"claude.exe", nullptr, MAX_PATH, found, nullptr) > 0) return found;
@@ -302,18 +289,20 @@ std::wstring FindClaudeExe() {
 
 const DWORD kRenewTimeoutMs = 60000;
 
-// Has Claude Code renew the account's expired login: `claude -p` with
+// Has Claude Code renew a profile's expired login -- run with `environment`
+// (the profile's, see claude_profile.h's ClaudeProfileEnvironment), so with
+// its CLAUDE_CONFIG_DIR: `claude -p` with
 // nothing on stdin renews the token as it starts, then stops with "Input
 // must be provided" before calling the model -- so it costs no usage. (Seen
 // with Claude Code 2.1.304: `claude auth status` doesn't renew.) Claude Code
 // does the renewing itself, so its own login is never at risk the way it
 // would be if this app refreshed the token. True once it has run; false with
-// `error` set if it couldn't be. Doesn't log (see RunClaudeUsageHelper).
-bool RunClaudeCodeToRenewLogin(std::wstring& exeOut, std::wstring& error) {
+// `error` set if it couldn't be. Doesn't log: it runs on a worker thread.
+bool RunClaudeCodeToRenewLogin(std::wstring environment, std::wstring& exeOut, std::wstring& error) {
     exeOut = FindClaudeExe();
     if (exeOut.empty()) {
-        error = L"no Claude Code found for this account to renew it with (not on PATH, in ~\\.local\\bin, or in "
-                L"its VS Code extensions)";
+        error = L"no Claude Code found to renew it with (not on PATH, in ~\\.local\\bin, or in the VS Code "
+                L"extensions)";
         return false;
     }
     wchar_t tempDir[MAX_PATH] = {};
@@ -343,8 +332,8 @@ bool RunClaudeCodeToRenewLogin(std::wstring& exeOut, std::wstring& error) {
     // would otherwise report one starting and ending.
     std::wstring commandLine = L"\"" + exeOut + L"\" -p --settings \"{\\\"disableAllHooks\\\":true}\"";
     bool started = outFile != INVALID_HANDLE_VALUE &&
-                   CreateProcessW(exeOut.c_str(), &commandLine[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
-                                  tempDir, &si, &pi);
+                   CreateProcessW(exeOut.c_str(), &commandLine[0], nullptr, nullptr, TRUE,
+                                  CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, &environment[0], tempDir, &si, &pi);
     DWORD startError = GetLastError();
     CloseHandle(stdinRead);
     CloseHandle(stdinWrite); // nothing on stdin
@@ -376,12 +365,12 @@ bool RunClaudeCodeToRenewLogin(std::wstring& exeOut, std::wstring& error) {
     return true;
 }
 
-// The login file's expiresAt (Unix ms), 0 if it can't be read.
-long long ReadLoginExpiry() {
-    std::wstring dir = ClaudeConfigDir();
+// The login file's expiresAt (Unix ms) in config folder `dir`, 0 if it
+// can't be read.
+long long ReadLoginExpiry(const std::wstring& dir) {
     std::string content;
     DWORD err = 0;
-    if (dir.empty() || !ReadSharedFile(dir + L"\\.credentials.json", content, err) ||
+    if (!ReadSharedFile(CredentialsPath(dir), content, err) ||
         JsonScan::FindRootObjectOpenBrace(content) == std::string::npos) {
         return 0;
     }
@@ -392,48 +381,43 @@ long long ReadLoginExpiry() {
     return expiresAtMs;
 }
 
-FetchResult FetchClaudeUsageOnce();
+FetchResult FetchClaudeUsageOnce(const std::wstring& dir);
 
-// One fetch for the account this runs as. When the login has expired, has
-// Claude Code renew it (see RunClaudeCodeToRenewLogin) and fetches again --
-// once per expired token, so a renewal that doesn't work isn't retried every
-// fetch. Doesn't log (see RunClaudeUsageHelper).
-FetchResult FetchClaudeUsage() {
-    static long long renewTriedFor = 0; // the expiresAt last tried
-    FetchResult r = FetchClaudeUsageOnce();
-    long long expiredAt = r.ok ? 0 : ReadLoginExpiry();
+// One fetch for the profile with config folder `dir` and environment
+// `environment`. When the login has expired, has Claude Code renew it (see
+// RunClaudeCodeToRenewLogin) and fetches again -- once per expired token
+// (`renewTriedFor`, the expiresAt last tried), so a renewal that doesn't
+// work isn't retried every fetch. Doesn't log: it runs on a worker thread.
+FetchResult FetchClaudeUsage(const std::wstring& dir, const std::wstring& environment, long long& renewTriedFor) {
+    FetchResult r = FetchClaudeUsageOnce(dir);
+    long long expiredAt = r.ok ? 0 : ReadLoginExpiry(dir);
     if (r.ok || expiredAt <= 0 || expiredAt / 1000 > UnixNow() || expiredAt == renewTriedFor) return r;
     renewTriedFor = expiredAt;
 
     std::wstring exe, said;
-    if (!RunClaudeCodeToRenewLogin(exe, said)) {
+    if (!RunClaudeCodeToRenewLogin(environment, exe, said)) {
         r.error += L" -- and the app couldn't renew it: " + said;
         return r;
     }
-    long long now = ReadLoginExpiry();
+    long long now = ReadLoginExpiry(dir);
     if (now <= expiredAt || now / 1000 <= UnixNow()) {
         r.error += L" -- running Claude Code (" + exe + L") to renew it didn't" + (said.empty() ? L"" : L"; it said: " + said);
         return r;
     }
-    FetchResult renewed = FetchClaudeUsageOnce();
+    FetchResult renewed = FetchClaudeUsageOnce(dir);
     renewed.note = L"renewed the expired login (it had expired at " + FormatLocalTime(expiredAt / 1000) +
                    L") by running Claude Code: " + exe;
     return renewed;
 }
 
-FetchResult FetchClaudeUsageOnce() {
+FetchResult FetchClaudeUsageOnce(const std::wstring& dir) {
     FetchResult r;
-    std::wstring dir = ClaudeConfigDir();
-    if (dir.empty()) {
-        r.error = L"neither CLAUDE_CONFIG_DIR nor USERPROFILE is set";
-        return r;
-    }
-    std::wstring path = dir + L"\\.credentials.json";
+    std::wstring path = CredentialsPath(dir);
     std::string content;
     DWORD err = 0;
     if (!ReadSharedFile(path, content, err)) {
         r.error = err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND
-                      ? FormatError(L"no Claude Code login at %ls -- sign in with /login in Claude Code as this account",
+                      ? FormatError(L"no Claude Code login at %ls -- sign in with /login in Claude Code as this profile",
                                     path.c_str())
                       : FormatError(L"can't read %ls (error %lu)", path.c_str(), err);
         return r;
@@ -478,62 +462,20 @@ FetchResult FetchClaudeUsageOnce() {
     return r;
 }
 
-// One line of text for the helper's protocol.
-std::string OneLine(const std::wstring& text) {
-    std::string out = WideToUtf8(text);
-    for (char& c : out) {
-        if (c == '\r' || c == '\n') c = ' ';
-    }
-    return out;
-}
-
-// The helper's stdout protocol, one UTF-8 line per result, after a note
-// line if it has one:
-//   note <message>
-//   ok <session %> <session resets_at> <weekly %> <weekly resets_at>
-//   err <message>
-std::string FormatHelperLine(const FetchResult& r) {
-    std::string note = r.note.empty() ? "" : "note " + OneLine(r.note) + "\n";
-    char buf[160];
-    if (r.ok) {
-        snprintf(buf, sizeof(buf), "ok %.4f %lld %.4f %lld\n", r.session.percent, r.session.resetsAt,
-                 r.weekly.percent, r.weekly.resetsAt);
-        return note + buf;
-    }
-    return note + "err " + OneLine(r.error) + "\n";
-}
-
-FetchResult ParseHelperLine(const std::string& line) {
-    FetchResult r;
-    if (line.rfind("ok ", 0) == 0 &&
-        sscanf(line.c_str() + 3, "%lf %lld %lf %lld", &r.session.percent, &r.session.resetsAt, &r.weekly.percent,
-               &r.weekly.resetsAt) == 4) {
-        r.ok = true;
-    } else if (line.rfind("err ", 0) == 0) {
-        r.error = Utf8ToWide(line.substr(4));
-    } else if (line.rfind("note ", 0) == 0) {
-        r.note = Utf8ToWide(line.substr(5));
-        r.noteOnly = true;
-    } else {
-        r.error = L"the usage helper wrote an unexpected line: " + Utf8ToWide(line.substr(0, 200));
-    }
-    return r;
-}
-
-// One monitored account. Shared between its worker thread and the main
+// One monitored profile. Shared between its worker thread and the main
 // thread, under g_lock, except where marked.
 struct Worker {
-    std::wstring account; // empty for this app's own
+    std::wstring profile;     // its id (see claude_profile.h)
+    std::wstring configDir;   // fixed at start, like environment: g_config can be reloaded under the thread
+    std::wstring environment; // see ClaudeProfileEnvironment
     int intervalMinutes = 5;
     HWND notifyWnd = nullptr;
     UINT notifyMsg = 0;
     HANDLE stopEvent = nullptr;
     HANDLE thread = nullptr;
-    HANDLE child = nullptr; // the running helper, for StopClaudeUsageMonitor to end
 
     ClaudeUsageSnapshot snapshot;
     unsigned seq = 0; // bumped per result
-    bool forgetPassword = false;
     std::vector<std::wstring> notes; // not yet logged
 
     // Main thread only: what ProcessClaudeUsageResults last logged.
@@ -550,9 +492,7 @@ void Report(Worker& w, const FetchResult& r) {
     AcquireSRWLockExclusive(&g_lock);
     long long now = UnixNow();
     if (!r.note.empty()) w.notes.push_back(r.note);
-    if (r.noteOnly) {
-        // Its result follows on the next line.
-    } else if (r.ok) {
+    if (r.ok) {
         w.snapshot.haveData = true;
         w.snapshot.session = r.session;
         w.snapshot.weekly = r.weekly;
@@ -562,92 +502,9 @@ void Report(Worker& w, const FetchResult& r) {
         w.snapshot.error = r.error;
         w.snapshot.errorAt = now;
     }
-    if (r.wrongPassword) w.forgetPassword = true;
     w.seq++;
     ReleaseSRWLockExclusive(&g_lock);
     PostMessageW(w.notifyWnd, w.notifyMsg, 0, 0);
-}
-
-bool WaitForStop(Worker& w, DWORD ms) {
-    return WaitForSingleObject(w.stopEvent, ms) == WAIT_OBJECT_0;
-}
-
-// Runs one helper as w.account until it exits, reporting every line it
-// writes.
-void RunHelperOnce(Worker& w) {
-    SECURITY_ATTRIBUTES inherit = {sizeof(inherit), nullptr, TRUE};
-    HANDLE childIn = nullptr, ourIn = nullptr, ourOut = nullptr, childOut = nullptr;
-    if (!CreatePipe(&childIn, &ourIn, &inherit, 0) || !CreatePipe(&ourOut, &childOut, &inherit, 0)) {
-        FetchResult r;
-        r.error = FormatError(L"couldn't create the pipes for the usage helper (error %lu)", GetLastError());
-        if (childIn) CloseHandle(childIn);
-        if (ourIn) CloseHandle(ourIn);
-        Report(w, r);
-        return;
-    }
-    // Only the child's ends may be inherited: a copy of ours in the child
-    // would keep its stdin from ever reaching end-of-file.
-    SetHandleInformation(ourIn, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(ourOut, HANDLE_FLAG_INHERIT, 0);
-
-    wchar_t exe[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    std::wstring commandLine = L"\"" + std::wstring(exe) + L"\" " + kClaudeUsageHelperArg + L" " +
-                               std::to_wstring(w.intervalMinutes);
-    DWORD err = 0;
-    HANDLE child = StartHiddenProcessAsAccount(w.account, exe, commandLine, GetExeDir(), childIn, childOut, err);
-    CloseHandle(childIn);
-    CloseHandle(childOut);
-    if (!child) {
-        FetchResult r;
-        if (err == ERROR_NOT_FOUND) {
-            r.error = L"no password saved for this account -- open a VS Code window as it from the hub's + button "
-                      L"and tick Remember";
-        } else if (err == ERROR_LOGON_FAILURE) {
-            r.error = L"its saved password was rejected, so it's been dropped -- open a VS Code window as it from the "
-                      L"hub's + button to save the right one";
-            r.wrongPassword = true;
-        } else {
-            r.error = L"couldn't start the usage helper as this account: " + StartAsErrorText(err);
-        }
-        CloseHandle(ourIn);
-        CloseHandle(ourOut);
-        Report(w, r);
-        return;
-    }
-    AcquireSRWLockExclusive(&g_lock);
-    w.child = child;
-    ReleaseSRWLockExclusive(&g_lock);
-    if (WaitForStop(w, 0)) TerminateProcess(child, 0);
-
-    std::string pending;
-    char buf[512];
-    DWORD read = 0;
-    while (ReadFile(ourOut, buf, sizeof(buf), &read, nullptr) && read > 0) {
-        pending.append(buf, read);
-        size_t eol;
-        while ((eol = pending.find('\n')) != std::string::npos) {
-            std::string line = pending.substr(0, eol);
-            pending.erase(0, eol + 1);
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (!line.empty()) Report(w, ParseHelperLine(line));
-        }
-    }
-
-    AcquireSRWLockExclusive(&g_lock);
-    w.child = nullptr;
-    ReleaseSRWLockExclusive(&g_lock);
-    if (!WaitForStop(w, 0)) {
-        WaitForSingleObject(child, 2000);
-        DWORD code = 0;
-        GetExitCodeProcess(child, &code);
-        FetchResult r;
-        r.error = FormatError(L"the usage helper running as this account exited (code %lu)", code);
-        Report(w, r);
-    }
-    CloseHandle(child);
-    CloseHandle(ourIn);
-    CloseHandle(ourOut);
 }
 
 DWORD WINAPI WorkerThread(LPVOID param) {
@@ -655,47 +512,29 @@ DWORD WINAPI WorkerThread(LPVOID param) {
     delete (std::shared_ptr<Worker>*)param;
     Worker& w = *owned;
     DWORD intervalMs = (DWORD)w.intervalMinutes * 60 * 1000;
-    bool wrongPassword = false, failed = false;
+    long long renewTriedFor = 0;
+    bool failed = false;
     do {
-        if (w.account.empty()) {
-            FetchResult r = FetchClaudeUsage();
-            failed = !r.ok;
-            Report(w, r);
-            continue;
-        }
-        // Never retry a password that was rejected (that could lock the
-        // account out): wait until the main thread has dropped it and a new
-        // one has been saved.
-        if (wrongPassword && !HasSavedAccountPassword(w.account)) wrongPassword = false;
-        if (wrongPassword) continue;
-        RunHelperOnce(w);
-        AcquireSRWLockShared(&g_lock);
-        wrongPassword = w.forgetPassword;
-        ReleaseSRWLockShared(&g_lock);
-        // The helper watches that account's login file itself.
-        failed = false;
-    } while (!WaitForNextFetch(w.stopEvent, intervalMs, failed));
+        FetchResult r = FetchClaudeUsage(w.configDir, w.environment, renewTriedFor);
+        failed = !r.ok;
+        Report(w, r);
+    } while (!WaitForNextFetch(w.stopEvent, intervalMs, failed, w.configDir));
     return 0;
 }
 
-std::wstring AccountForLog(const std::wstring& account) {
-    return account.empty() ? L"this account (" + CurrentAccountName() + L")" : L"[" + account + L"]";
+std::wstring ProfileForLog(const std::wstring& profile) {
+    return L"[" + ClaudeProfileName(profile) + L"]";
 }
 
 void StopWorkers() {
-    for (const std::shared_ptr<Worker>& w : g_workers) {
-        SetEvent(w->stopEvent);
-        AcquireSRWLockExclusive(&g_lock);
-        if (w->child) TerminateProcess(w->child, 0);
-        ReleaseSRWLockExclusive(&g_lock);
-    }
+    for (const std::shared_ptr<Worker>& w : g_workers) SetEvent(w->stopEvent);
     for (const std::shared_ptr<Worker>& w : g_workers) {
         // A fetch can sit in WinHTTP for up to its timeouts; past this the
         // thread is left to finish on its own -- it holds its own reference
         // to the Worker, so nothing it touches goes away under it.
         if (WaitForSingleObject(w->thread, 5000) != WAIT_OBJECT_0) {
             LogWarn(L"claude_usage: the worker for %ls didn't stop within 5s -- leaving it to finish",
-                    AccountForLog(w->account).c_str());
+                    ProfileForLog(w->profile).c_str());
         }
         CloseHandle(w->thread);
     }
@@ -705,30 +544,35 @@ void StopWorkers() {
 } // namespace
 
 void SyncClaudeUsageMonitor(HWND notifyWnd, UINT notifyMsg) {
-    std::vector<std::wstring> accounts;
+    std::vector<std::wstring> profiles;
     if (g_config.usageMeterEnabled) {
-        accounts.push_back(L"");
-        for (const std::wstring& account : ConfiguredUserProfiles()) accounts.push_back(account);
+        profiles.push_back(L"");
+        for (const std::wstring& profile : OtherClaudeProfiles()) profiles.push_back(profile);
     }
-    bool same = accounts.size() == g_workers.size() && g_config.usageMeterRefreshMinutes == g_intervalMinutes;
-    for (size_t i = 0; same && i < accounts.size(); i++) same = accounts[i] == g_workers[i]->account;
+    bool same = profiles.size() == g_workers.size() && g_config.usageMeterRefreshMinutes == g_intervalMinutes;
+    for (size_t i = 0; same && i < profiles.size(); i++) {
+        same = profiles[i] == g_workers[i]->profile && ClaudeProfileConfigDir(profiles[i]) == g_workers[i]->configDir &&
+               ClaudeProfileEnvironment(profiles[i]) == g_workers[i]->environment;
+    }
     if (same) return;
 
     // Kept across the restart, so the rings don't blank out on a reload.
     std::vector<std::shared_ptr<Worker>> previous = g_workers;
     StopWorkers();
     g_intervalMinutes = g_config.usageMeterRefreshMinutes;
-    Log(L"claude_usage: monitoring %zu account(s), every %d minute(s)", accounts.size(), g_intervalMinutes);
+    Log(L"claude_usage: monitoring %zu Claude profile(s), every %d minute(s)", profiles.size(), g_intervalMinutes);
 
-    for (const std::wstring& account : accounts) {
+    for (const std::wstring& profile : profiles) {
         auto w = std::make_shared<Worker>();
-        w->account = account;
+        w->profile = profile;
+        w->configDir = ClaudeProfileConfigDir(profile);
+        w->environment = ClaudeProfileEnvironment(profile);
         w->intervalMinutes = g_intervalMinutes;
         w->notifyWnd = notifyWnd;
         w->notifyMsg = notifyMsg;
-        w->snapshot.account = account;
+        w->snapshot.profile = profile;
         for (const std::shared_ptr<Worker>& old : previous) {
-            if (old->account != account) continue;
+            if (old->profile != profile || old->configDir != w->configDir) continue;
             w->snapshot = old->snapshot;
             w->loggedError = old->loggedError;
             w->loggedOk = old->loggedOk;
@@ -736,7 +580,7 @@ void SyncClaudeUsageMonitor(HWND notifyWnd, UINT notifyMsg) {
         w->stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         w->thread = CreateThread(nullptr, 0, WorkerThread, new std::shared_ptr<Worker>(w), 0, nullptr);
         if (!w->thread) {
-            LogWarn(L"claude_usage: couldn't start the worker for %ls (error %lu)", AccountForLog(account).c_str(),
+            LogWarn(L"claude_usage: couldn't start the worker for %ls (error %lu)", ProfileForLog(profile).c_str(),
                     GetLastError());
             continue;
         }
@@ -753,19 +597,16 @@ void ProcessClaudeUsageResults() {
         AcquireSRWLockExclusive(&g_lock);
         ClaudeUsageSnapshot s = w->snapshot;
         unsigned seq = w->seq;
-        bool forget = w->forgetPassword;
-        w->forgetPassword = false;
         std::vector<std::wstring> notes;
         notes.swap(w->notes);
         ReleaseSRWLockExclusive(&g_lock);
 
-        if (forget) ForgetSavedAccountPassword(w->account);
+        std::wstring who = ProfileForLog(w->profile);
         for (const std::wstring& note : notes) {
-            Log(L"claude_usage: %ls: %ls", AccountForLog(w->account).c_str(), note.c_str());
+            Log(L"claude_usage: %ls: %ls", who.c_str(), note.c_str());
         }
         if (seq == w->loggedSeq) continue;
         w->loggedSeq = seq;
-        std::wstring who = AccountForLog(w->account);
         if (!s.error.empty()) {
             if (s.error != w->loggedError) {
                 LogWarn(L"claude_usage: can't read Claude usage for %ls: %ls", who.c_str(), s.error.c_str());
@@ -810,7 +651,7 @@ double CurrentUsagePercent(const ClaudeUsageLimit& limit) {
 }
 
 std::wstring DescribeClaudeUsage(const ClaudeUsageSnapshot& s) {
-    std::wstring text = L"Claude usage - " + (s.account.empty() ? AccountForLog(s.account) : s.account);
+    std::wstring text = L"Claude usage - " + ClaudeProfileName(s.profile);
     long long now = UnixNow();
     auto describeLimit = [&](const wchar_t* name, const ClaudeUsageLimit& limit) {
         wchar_t line[200];
@@ -840,39 +681,3 @@ std::wstring DescribeClaudeUsage(const ClaudeUsageSnapshot& s) {
     return text;
 }
 
-namespace {
-
-struct StdinWatch {
-    HANDLE in, closed;
-};
-
-// Blocks reading stdin, which ends when the app closes its end or exits.
-DWORD WINAPI StdinWatchThread(LPVOID param) {
-    StdinWatch* watch = (StdinWatch*)param;
-    char buf[64];
-    DWORD read = 0;
-    while (ReadFile(watch->in, buf, sizeof(buf), &read, nullptr) && read > 0) {
-    }
-    SetEvent(watch->closed);
-    return 0;
-}
-
-} // namespace
-
-int RunClaudeUsageHelper(int intervalMinutes) {
-    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
-    HANDLE stdinClosed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    CreateThread(nullptr, 0, StdinWatchThread, new StdinWatch{GetStdHandle(STD_INPUT_HANDLE), stdinClosed}, 0,
-                 nullptr);
-
-    DWORD intervalMs = (DWORD)std::min(60, std::max(1, intervalMinutes)) * 60 * 1000;
-    bool failed = false;
-    do {
-        FetchResult r = FetchClaudeUsage();
-        failed = !r.ok;
-        std::string line = FormatHelperLine(r);
-        DWORD written = 0;
-        if (!WriteFile(out, line.data(), (DWORD)line.size(), &written, nullptr)) return 1;
-    } while (!WaitForNextFetch(stdinClosed, intervalMs, failed));
-    return 0;
-}

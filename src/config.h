@@ -6,25 +6,24 @@
 #include <utility>
 #include <vector>
 
-// One of config.ini's user profile slots, user_profile_<N>_* (see account.h).
-// Slot 1 is always the account this app runs as; the others are other
-// Windows accounts.
-struct UserProfile {
-    std::wstring account;  // Windows account name, as written
-    std::wstring icon;     // user_profile_<N>_icon: an image path or base64 image data, or empty
-    bool hasColor = false; // user_profile_<N>_color set: its usage rings' background (see claude_usage.h)
+// One of config.ini's Claude profile slots, claude_profile_<N>_* (see
+// claude_profile.h). Slot 1 is always the default profile; the others are
+// further Claude Code config folders.
+struct ClaudeProfile {
+    std::wstring name;        // claude_profile_<N>_name, empty: derived (see claude_profile.h's ClaudeProfileName)
+    std::wstring path;        // claude_profile_<N>_profile_path as written, empty only in slot 1
+    std::wstring configDir;   // the Claude Code config folder it names: path with environment variables
+                              // expanded, no trailing separator; slot 1's without a path is %USERPROFILE%\.claude
+    std::wstring icon;        // claude_profile_<N>_icon: an image path or base64 image data, or empty
+    bool hasColor = false;    // claude_profile_<N>_color set: its usage rings' background (see claude_usage.h)
     COLORREF color = RGB(0, 0, 0);
-    bool ringBadge = true;    // user_profile_<N>_ring_badge: its icon in front of its usage rings
+    bool ringBadge = true;    // claude_profile_<N>_ring_badge: its icon in front of its usage rings
     int slot = 0;             // N
-    bool thisAccount = false; // slot 1
+    bool isDefault = false;   // slot 1
 };
 
-// Slots user_profile_1_* .. user_profile_<kMaxUserProfiles>_*.
-const int kMaxUserProfiles = 5;
-
-// user_profile_1_account's value in config.ini: slot 1 is always the account
-// this app runs as, so its account isn't something to fill in.
-extern const char* const kThisAccountMarker;
+// Slots claude_profile_1_* .. claude_profile_<kMaxClaudeProfiles>_*.
+const int kMaxClaudeProfiles = 5;
 
 
 struct Config {
@@ -51,10 +50,10 @@ struct Config {
     // The distro name is lowercased, as config.ini keys are.
     std::vector<std::pair<std::wstring, std::vector<std::wstring>>> wslVSCodeExtraArgs;
 
-    // The user profiles in slot order (see account.h): slot 1, this app's
-    // own account, always first; then the other Windows accounts VS Code can
-    // be started as, the slots that have an account.
-    std::vector<UserProfile> userProfiles;
+    // The Claude profiles in slot order (see claude_profile.h): slot 1, the
+    // default profile, always first; then the slots that have a
+    // _profile_path.
+    std::vector<ClaudeProfile> claudeProfiles;
 
     // AI status indicator (see ai_provider.h) -- "claude" is the only
     // currently-implemented provider; other tokens (e.g. a future "copilot")
@@ -67,7 +66,7 @@ struct Config {
     bool aiIndicatorBorderColorAuto = true; // true = auto black/white contrast against the item's own color
     COLORREF aiIndicatorBorderColor = RGB(255, 255, 255); // used when aiIndicatorBorderColorAuto is false
 
-    // Claude usage rings on the hub, one pair per account (see claude_usage.h).
+    // Claude usage rings on the hub, one pair per Claude profile (see claude_usage.h).
     bool usageMeterEnabled = true;
     int usageMeterRefreshMinutes = 5;
 };

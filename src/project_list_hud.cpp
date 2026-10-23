@@ -1,6 +1,6 @@
 #include "project_list_hud.h"
 
-#include "account.h"
+#include "claude_profile.h"
 #include "favourites.h"
 #include "focus_trace.h"
 #include "label_alias.h"
@@ -37,6 +37,9 @@ static const int kReorderDragThreshold = 4; // pixels of movement before a plain
                                              // commits to a reorder-drag instead of a click-to-activate
 static const int kProjectListMinRowHeight = 18;
 static const UINT kAppBarCallbackMsg = WM_APP + 1; // shell -> HUD AppBar notifications (ABN_*)
+static const UINT_PTR kReopenTimerId = 2; // polls the windows Reopen As is waiting on (see PollPendingReopens)
+static const UINT kReopenPollMs = 250;
+static const ULONGLONG kReopenTimeoutMs = 60000;
 static const UINT_PTR kClaudePulseTimerId = 1; // repaints while >=1 item is ClaudeStatus::Working or
                                                 // loading, to animate its indicator -- started/stopped
                                                 // on demand, see UpdateProjectListHud
@@ -50,8 +53,8 @@ static const int kRingCells[8][2] = {
     {0, 0}, {1, 0}, {2, 0}, {2, 1}, {2, 2}, {1, 2}, {0, 2}, {0, 1},
 };
 
-// Usage rings (see ProjectListHudUsageRing): each account's group is a chip
-// in that account's own background color (or none), holding its icon (other accounts only) and a rowHeight-square pair of
+// Usage rings (see ProjectListHudUsageRing): each profile's group is a chip
+// in that profile's own background color (or none), holding its icon (if shown) and a rowHeight-square pair of
 // rings, outer weekly and inner session.
 static const int kUsageRingPad = 3, kUsageRingBadgeGap = 3, kUsageRingGap = 4;
 static const double kUsageWarnPercent = 70, kUsageCriticalPercent = 90;
@@ -72,6 +75,14 @@ static HFONT CreateHudFont(int fontSize, int weight) {
 
 struct ProjectListHudState {
     std::vector<ProjectListHudEntry> entries;
+    // Windows Reopen As has closed, to open again as another Claude profile
+    // once gone (see PollPendingReopens).
+    struct PendingReopen {
+        HWND target;
+        std::wstring path, profile, label;
+        ULONGLONG closedAt;
+    };
+    std::vector<PendingReopen> pendingReopens;
     std::vector<RECT> itemRects; // per-entry rect within the HUD's own client area (local coords)
     int x = 0;
     int y = 0;
@@ -180,7 +191,7 @@ static int ActionButtonsRowWidth(const ProjectListHudState* state) {
 }
 
 static int UsageRingGroupWidth(const ProjectListHudState* state, const ProjectListHudUsageRing& ring) {
-    return 2 * kUsageRingPad + (ring.iconAccount.empty() ? 0 : kAccountIconSize + kUsageRingBadgeGap) + state->rowHeight;
+    return 2 * kUsageRingPad + (ring.showProfileIcon ? kProfileIconSize + kUsageRingBadgeGap : 0) + state->rowHeight;
 }
 
 static int UsageRingsRowWidth(const ProjectListHudState* state) {
@@ -240,11 +251,11 @@ static int ProjectListDragCandidate(const ProjectListHudState* state, int x) {
     return (int)state->itemRects.size() - 1;
 }
 
-// True if `entry`'s folder is a saved favourite for the account its window
+// True if `entry`'s folder is a saved favourite for the profile its window
 // runs as (see favourites.h) -- shown as the star marker only; it has no
 // effect on the item's position.
 static bool EntryIsFavourite(const ProjectListHudEntry& entry) {
-    return !entry.path.empty() && IsFavourite(entry.path, entry.account);
+    return !entry.path.empty() && IsFavourite(entry.path, entry.profile);
 }
 
 static bool IsProjectListResizeEdge(const ProjectListHudState* state, int x) {
@@ -591,12 +602,11 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index, const
 // The running VS Code window the CLI shim is derived from (see
 // vscode_cli.h's ResolveVSCodeCliShim) -- null once every window is closed,
 // which that resolver falls back from. Never a WSLg window: its process is
-// WSL's msrdc.exe, not a VS Code install with a shim next to it. Nor another
-// account's window (see account.h): its install may not be this account's.
+// WSL's msrdc.exe, not a VS Code install with a shim next to it.
 static HWND AnyTrackedWindow(const ProjectListHudState* state) {
     if (!state) return nullptr;
     for (const ProjectListHudEntry& e : state->entries) {
-        if (e.wslDistro.empty() && e.account.empty()) return e.target;
+        if (e.wslDistro.empty()) return e.target;
     }
     return nullptr;
 }
@@ -799,16 +809,37 @@ static void OpenPathInExplorer(const std::wstring& path) {
     }
 }
 
-// Appends `account` (empty for this app's own) to `m` as item `id`, with its
-// icon (see IconAccountFor).
-static void AppendAccountMenuItem(HMENU m, UINT id, const std::wstring& account) {
-    AppendMenuW(m, MF_STRING, id, AccountMenuText(account.empty() ? CurrentAccountName() : account).c_str());
-    std::wstring iconAccount = IconAccountFor(account);
-    if (iconAccount.empty()) return;
+// Appends Claude profile `profile` (empty for the default) to `m` as item
+// `id`, with its icon (see ShowsClaudeProfileIcon).
+static void AppendProfileMenuItem(HMENU m, UINT id, const std::wstring& profile) {
+    AppendMenuW(m, MF_STRING, id, ClaudeProfileMenuText(profile).c_str());
     MENUITEMINFOW mii = {sizeof(mii)};
     mii.fMask = MIIM_BITMAP;
-    mii.hbmpItem = GetAccountIconMenuBitmap(iconAccount);
+    mii.hbmpItem = GetClaudeProfileMenuBitmap(profile);
     if (mii.hbmpItem) SetMenuItemInfoW(m, GetMenuItemCount(m) - 1, TRUE, &mii);
+}
+
+// "Reopen As" closes the window first and opens its folder again as the
+// other profile only once it's gone: VS Code keeps one window per folder, so
+// opening it while the window is still there would just bring that window
+// forward. Closing can be held up (or cancelled) at VS Code's prompt about
+// unsaved changes, so the window is polled, and given up on after a while.
+static void PollPendingReopens(HWND hud, ProjectListHudState* state) {
+    ULONGLONG now = GetTickCount64();
+    std::vector<ProjectListHudState::PendingReopen> waiting;
+    for (const ProjectListHudState::PendingReopen& r : state->pendingReopens) {
+        if (!IsWindow(r.target)) {
+            OpenNewVSCodeWindow(AnyTrackedWindow(state), r.path, L"hud-item-reopen-as", r.profile);
+        } else if (now - r.closedAt > kReopenTimeoutMs) {
+            Log(L"hud item menu: [%ls] is still open %llus after Reopen As closed it (close cancelled?) -- not "
+                L"reopening it as [%ls]",
+                r.label.c_str(), (unsigned long long)(kReopenTimeoutMs / 1000), ClaudeProfileName(r.profile).c_str());
+        } else {
+            waiting.push_back(r);
+        }
+    }
+    state->pendingReopens = waiting;
+    if (waiting.empty()) KillTimer(hud, kReopenTimerId);
 }
 
 static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
@@ -829,11 +860,10 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     // than a menu whose shape/enabled-state shifts as that data trickles
     // in, show every possible item, all disabled, so it's unambiguous:
     // nothing here is usable yet.
-    // "Reopen As" opens the window's folder as another account (this app's
-    // own or a configured profile, minus the window's own) and then closes
-    // this window -- only once the new one has been started, so a cancelled
-    // password prompt leaves it open. Left off with no path, for a WSL
-    // window, or when there's no other account.
+    // "Reopen As" closes this window and opens its folder again as another
+    // Claude profile (any configured one but the window's own) -- see
+    // PollPendingReopens. Left off with no path, for a WSL window, or when
+    // there's no other profile.
     bool loading =index >= 0 && index < (int)state->entries.size() && state->entries[index].loading;
     bool hasPath = !loading && index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
     bool alreadyFav = hasPath && EntryIsFavourite(state->entries[index]);
@@ -856,10 +886,10 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         AppendMenuW(menu, itemFlags | (explorerReachable ? 0 : MF_GRAYED), 6, L"Open Directory in File Explorer");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
-    // Reopen As ids: kReopenAsBase + account slot (0 for this app's own,
-    // 1 + i for profiles[i]).
+    // Reopen As ids: kReopenAsBase + profile slot (0 for the default, 1 + i
+    // for profiles[i]).
     const UINT kReopenAsBase = 0x100;
-    const std::vector<std::wstring> profiles = ConfiguredUserProfiles();
+    const std::vector<std::wstring> profiles = OtherClaudeProfiles();
     bool wslEntry = index >= 0 && index < (int)state->entries.size() &&
                     (!state->entries[index].wslDistro.empty() || ParseWslUncPath(state->entries[index].path, nullptr, nullptr));
     if (loading && !profiles.empty()) {
@@ -868,11 +898,9 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     } else if (hasPath && !wslEntry) {
         HMENU reopenMenu = CreatePopupMenu();
         for (size_t slot = 0; slot <= profiles.size(); slot++) {
-            std::wstring account = slot == 0 ? std::wstring() : profiles[slot - 1];
-            if (CompareStringOrdinal(account.c_str(), -1, state->entries[index].account.c_str(), -1, TRUE) == CSTR_EQUAL) {
-                continue;
-            }
-            AppendAccountMenuItem(reopenMenu, kReopenAsBase + (UINT)slot, account);
+            std::wstring profile = slot == 0 ? std::wstring() : profiles[slot - 1];
+            if (SameClaudeProfile(profile, state->entries[index].profile)) continue;
+            AppendProfileMenuItem(reopenMenu, kReopenAsBase + (UINT)slot, profile);
         }
         if (GetMenuItemCount(reopenMenu) > 0) {
             AppendMenuW(menu, MF_POPUP, (UINT_PTR)reopenMenu, L"Reopen As");
@@ -906,14 +934,12 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     if (cmd >= (int)kReopenAsBase) {
         size_t slot = (size_t)(cmd - (int)kReopenAsBase);
         if (index < 0 || index >= (int)state->entries.size() || slot > profiles.size()) return;
-        // Copied: the entries can change while a password prompt is up.
-        ProjectListHudEntry entry = state->entries[index];
-        std::wstring account = slot == 0 ? std::wstring() : profiles[slot - 1];
-        Log(L"hud item menu: [%ls] -> Reopen As [%ls]", entry.label.c_str(),
-            account.empty() ? CurrentAccountName().c_str() : account.c_str());
-        bool opened = account.empty() ? OpenNewVSCodeWindow(AnyTrackedWindow(state), entry.path, L"hud-item-reopen-as")
-                                      : OpenNewVSCodeWindowAs(hud, account, entry.path, L"hud-item-reopen-as");
-        if (opened) CloseVSCodeWindow(entry.target, L"hud-item-reopen-as");
+        const ProjectListHudEntry& entry = state->entries[index];
+        std::wstring profile = slot == 0 ? std::wstring() : profiles[slot - 1];
+        Log(L"hud item menu: [%ls] -> Reopen As [%ls]", entry.label.c_str(), ClaudeProfileName(profile).c_str());
+        state->pendingReopens.push_back({entry.target, entry.path, profile, entry.label, GetTickCount64()});
+        CloseVSCodeWindow(entry.target, L"hud-item-reopen-as");
+        SetTimer(hud, kReopenTimerId, kReopenPollMs, nullptr);
         return;
     }
     if (cmd > 0 && index >= 0 && index < (int)state->entries.size()) {
@@ -927,9 +953,9 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     else if (cmd == 2) ClearAlias(hud, state, index);
     else if (cmd == 3) {
         const ProjectListHudEntry& entry = state->entries[index];
-        AddFavourite(entry.label, entry.path, entry.account);
+        AddFavourite(entry.label, entry.path, entry.profile);
     } else if (cmd == 4) {
-        RemoveFavourite(state->entries[index].path, state->entries[index].account);
+        RemoveFavourite(state->entries[index].path, state->entries[index].profile);
     } else if (cmd == 5) {
         // A WSL folder as the Linux path it is inside the distro.
         std::wstring linuxPath;
@@ -947,21 +973,18 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 }
 
 // Click on the fixed "+" new-window button. First "Start VS Code": with
-// other accounts' user profiles configured (see account.h) a submenu of
-// which account to open the new window as -- this app's own (the default,
-// bolded, with its icon if user_profile_1_icon is set), then the other
-// profiles in slot order, each with its icon; without any it's a plain item
-// opening the window as this account. (Forgetting a profile's saved
-// password is on the tray menu.) Then, after a separator, a "Favourites" submenu
+// Claude profiles configured besides the default (see claude_profile.h) a
+// submenu of which profile to open the new window as -- the default (bolded,
+// with its icon if claude_profile_1_icon is set), then the others in slot
+// order, each with its icon; without any it's a plain item opening the
+// window as the default. Then, after a separator, a "Favourites" submenu
 // holding "Open All" (every favourite not already open -- see
 // OpenAllFavourites for why open ones are skipped), then the saved favourite
 // projects (see favourites.h), each as its own submenu -- hovering a
 // favourite's name expands it to "Open in New Window As" (a submenu of every
-// account it could open as: this app's own and the configured profiles --
-// see vscode_cli.h's OpenNewVSCodeWindow
-// and account.h's OpenNewVSCodeWindowAs; on an open one it just re-activates
-// its window; a WSL folder lists only this app's own) and "Remove from
-// Favourites". A plain
+// profile it could open as -- see vscode_cli.h's OpenNewVSCodeWindow; on an
+// open folder it just re-activates its window, whatever profile that runs;
+// a WSL folder lists only the default) and "Remove from Favourites". A plain
 // Win32 popup menu item can't both carry its own click action and expand a
 // submenu on hover, so nesting "open" one level down (rather than a bare
 // top-level click) is what buys room for "remove" to live right next to it,
@@ -971,16 +994,16 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // from Favourites" only reaches a favourite while it's a live entry.
 static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
     std::vector<FavouriteProject> favourites = LoadFavourites();
-    const std::vector<std::wstring> profiles = ConfiguredUserProfiles();
+    const std::vector<std::wstring> profiles = OtherClaudeProfiles();
 
-    // Sorted by label, so one folder saved for several accounts sits
-    // together; those then follow the "Start VS Code" submenu's account
-    // order (this account, then the profiles in slot order, then any
-    // account no longer configured, by name).
-    auto accountRank = [&](const std::wstring& account) -> size_t {
-        if (account.empty()) return 0;
+    // Sorted by label, so one folder saved for several profiles sits
+    // together; those then follow the "Start VS Code" submenu's profile
+    // order (the default, then the others in slot order, then any profile
+    // no longer configured, by id).
+    auto profileRank = [&](const std::wstring& profile) -> size_t {
+        if (profile.empty()) return 0;
         for (size_t i = 0; i < profiles.size(); i++) {
-            if (CompareStringOrdinal(profiles[i].c_str(), -1, account.c_str(), -1, TRUE) == CSTR_EQUAL) return 1 + i;
+            if (SameClaudeProfile(profiles[i], profile)) return 1 + i;
         }
         return 1 + profiles.size();
     };
@@ -989,29 +1012,29 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
         int byLabel = CompareStringEx(LOCALE_NAME_USER_DEFAULT, NORM_IGNORECASE | SORT_DIGITSASNUMBERS, a.label.c_str(),
                                       -1, b.label.c_str(), -1, nullptr, nullptr, 0);
         if (byLabel != CSTR_EQUAL) return byLabel == CSTR_LESS_THAN;
-        size_t ra = accountRank(a.account), rb = accountRank(b.account);
+        size_t ra = profileRank(a.profile), rb = profileRank(b.profile);
         if (ra != rb) return ra < rb;
-        return CompareStringOrdinal(a.account.c_str(), -1, b.account.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+        return CompareStringOrdinal(a.profile.c_str(), -1, b.profile.c_str(), -1, TRUE) == CSTR_LESS_THAN;
     });
 
     // Command ids: Open All = 1; per favourite i, open = 2 + i*2, remove =
-    // 3 + i*2, open as account slot j = kOpenAsBase + i*kOpenAsStride + j;
-    // this account = kThisAccountId, profile i = kThisAccountId + 1 + i, well
-    // above any favourite's -- decoded back on return below. An account slot
-    // is 0 for this app's own account, 1 + i for profiles[i].
+    // 3 + i*2, open as profile slot j = kOpenAsBase + i*kOpenAsStride + j;
+    // start as profile slot j = kStartAsBase + j, well above any favourite's
+    // -- decoded back on return below. A profile slot is 0 for the default,
+    // 1 + i for profiles[i].
     const UINT kOpenAllId = 1;
     const UINT kOpenAsBase = 0x1000, kOpenAsStride = 8; // stride > the 5 profile slots
-    const UINT kThisAccountId = 0x8000;
-    auto slotAccount = [&](size_t slot) { return slot == 0 ? std::wstring() : profiles[slot - 1]; };
+    const UINT kStartAsBase = 0x8000;
+    auto slotProfile = [&](size_t slot) { return slot == 0 ? std::wstring() : profiles[slot - 1]; };
     HMENU menu = CreatePopupMenu();
     if (profiles.empty()) {
-        AppendMenuW(menu, MF_STRING, kThisAccountId, L"Start VS Code");
+        AppendMenuW(menu, MF_STRING, kStartAsBase, L"Start VS Code");
     } else {
         HMENU startMenu = CreatePopupMenu();
         for (size_t slot = 0; slot <= profiles.size(); slot++) {
-            AppendAccountMenuItem(startMenu, kThisAccountId + (UINT)slot, slotAccount(slot));
+            AppendProfileMenuItem(startMenu, kStartAsBase + (UINT)slot, slotProfile(slot));
         }
-        SetMenuDefaultItem(startMenu, kThisAccountId, FALSE);
+        SetMenuDefaultItem(startMenu, kStartAsBase, FALSE);
         AppendMenuW(menu, MF_POPUP, (UINT_PTR)startMenu, L"Start VS Code");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1026,20 +1049,21 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
             UINT openId = (UINT)(2 + i * 2);
             UINT removeId = (UINT)(3 + i * 2);
             HMENU sub = CreatePopupMenu();
-            // The favourite's own account gets openId; a WSL folder only opens
-            // as this app's own account.
+            // The favourite's own profile gets openId; a WSL folder only
+            // opens as the default.
             HMENU asMenu = CreatePopupMenu();
             if (ParseWslUncPath(favourites[i].path, nullptr, nullptr)) {
-                AppendAccountMenuItem(asMenu, openId, L"");
+                AppendProfileMenuItem(asMenu, openId, L"");
             } else {
                 bool ownListed = false;
                 for (size_t slot = 0; slot <= profiles.size(); slot++) {
-                    std::wstring account = slotAccount(slot);
-                    bool own = CompareStringOrdinal(account.c_str(), -1, favourites[i].account.c_str(), -1, TRUE) == CSTR_EQUAL;
+                    std::wstring profile = slotProfile(slot);
+                    bool own = SameClaudeProfile(profile, favourites[i].profile);
                     ownListed = ownListed || own;
-                    AppendAccountMenuItem(asMenu, own ? openId : kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, account);
+                    AppendProfileMenuItem(asMenu, own ? openId : kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot,
+                                          profile);
                 }
-                if (!ownListed) AppendAccountMenuItem(asMenu, openId, favourites[i].account);
+                if (!ownListed) AppendProfileMenuItem(asMenu, openId, favourites[i].profile);
             }
             AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
@@ -1056,41 +1080,34 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     DestroyMenu(menu); // recursively destroys the Start VS Code, Favourites, per-favourite and open-as submenus too
 
     if (cmd <= 0) return;
-    if (cmd == (int)kThisAccountId) {
-        OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button");
-        return;
-    }
-    if (cmd > (int)kThisAccountId) {
-        size_t p = (size_t)(cmd - (int)kThisAccountId - 1);
-        if (p < profiles.size()) OpenNewVSCodeWindowAs(hud, profiles[p], L"", L"hud-new-window-profile");
+    if (cmd >= (int)kStartAsBase) {
+        size_t slot = (size_t)(cmd - (int)kStartAsBase);
+        if (slot <= profiles.size()) OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button", slotProfile(slot));
         return;
     }
     if (cmd >= (int)kOpenAsBase) {
         size_t i = (size_t)(cmd - (int)kOpenAsBase) / kOpenAsStride;
         size_t slot = (size_t)(cmd - (int)kOpenAsBase) % kOpenAsStride;
         if (i >= favourites.size() || slot > profiles.size()) return;
-        if (slot == 0) OpenNewVSCodeWindow(AnyTrackedWindow(state), favourites[i].path, L"hud-favourite-open-as");
-        else OpenNewVSCodeWindowAs(hud, profiles[slot - 1], favourites[i].path, L"hud-favourite-open-as");
+        OpenNewVSCodeWindow(AnyTrackedWindow(state), favourites[i].path, L"hud-favourite-open-as", slotProfile(slot));
         return;
     }
     if (cmd == (int)kOpenAllId) {
         // Open-ness comes from the HUD's own entries (see
         // ProjectListHudEntry::path for which windows have no path).
-        std::vector<OpenFolder> openFolders;
+        std::vector<std::wstring> openFolders;
         for (const ProjectListHudEntry& e : state->entries) {
-            if (!e.path.empty()) openFolders.push_back({e.path, e.account});
+            if (!e.path.empty()) openFolders.push_back(e.path);
         }
-        OpenAllFavourites(AnyTrackedWindow(state), hud, openFolders, L"hud-favourites-open-all");
+        OpenAllFavourites(AnyTrackedWindow(state), openFolders, L"hud-favourites-open-all");
         return;
     }
     size_t i = (size_t)(cmd - 2) / 2;
     bool isOpen = (cmd - 2) % 2 == 0;
     if (i >= favourites.size()) return;
     const FavouriteProject& f = favourites[i];
-    if (!isOpen) RemoveFavourite(f.path, f.account);
-    else if (f.account.empty() || ParseWslUncPath(f.path, nullptr, nullptr))
-        OpenNewVSCodeWindow(AnyTrackedWindow(state), f.path, L"hud-favourite-open");
-    else OpenNewVSCodeWindowAs(hud, f.account, f.path, L"hud-favourite-open");
+    if (!isOpen) RemoveFavourite(f.path, f.profile);
+    else OpenNewVSCodeWindow(AnyTrackedWindow(state), f.path, L"hud-favourite-open", f.profile);
 }
 
 // Shared cleanup for ending a DragReorder, called both from a real
@@ -1474,6 +1491,7 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             }
             return 0;
         case WM_TIMER:
+            if (wParam == kReopenTimerId && state) PollPendingReopens(hwnd, state);
             if (wParam == kClaudePulseTimerId && state) {
                 RenderProjectListHud(hwnd, state);
                 bool ringPulsing = std::any_of(state->usageRings.begin(), state->usageRings.end(),
@@ -1743,12 +1761,12 @@ static void DrawFavouriteMarker(UINT32* pixels, int width, int height, const REC
 
 // How much further right an entry's label starts, to make room for the
 // icons in front of it: WSL (see ProjectListHudEntry::wslDistro), then the
-// account's (ProjectListHudEntry::account).
+// profile's (ProjectListHudEntry::profile).
 static int WslIconTextShift(const ProjectListHudEntry& entry) {
     return entry.wslDistro.empty() ? 0 : kWslIconSize + kWslIconGap;
 }
 static int LabelIconsTextShift(const ProjectListHudEntry& entry) {
-    return WslIconTextShift(entry) + (entry.iconAccount.empty() ? 0 : kAccountIconSize + kAccountIconGap);
+    return WslIconTextShift(entry) + (entry.showProfileIcon ? kProfileIconSize + kProfileIconGap : 0);
 }
 
 // Draws one entry's chip (background + label text, alpha-blended by
@@ -1841,10 +1859,10 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
                      item);
         leftTextPad += WslIconTextShift(entry);
     }
-    if (!entry.iconAccount.empty()) {
-        BlendAccountIcon(entry.iconAccount, pixels, width, height, (int)item.left + leftTextPad,
-                         (int)item.top + (rowHeight - kAccountIconSize) / 2, item);
-        leftTextPad += kAccountIconSize + kAccountIconGap;
+    if (entry.showProfileIcon) {
+        BlendClaudeProfileIcon(entry.profile, pixels, width, height, (int)item.left + leftTextPad,
+                               (int)item.top + (rowHeight - kProfileIconSize) / 2, item);
+        leftTextPad += kProfileIconSize + kProfileIconGap;
     }
 
     COLORREF tx = labelTextColorAuto ? ContrastTextColor(color) : labelTextColor;
@@ -2027,8 +2045,8 @@ static COLORREF UsageRingColor(double percent, bool stale) {
     return kUsageOkColor;
 }
 
-// Draws one account's usage ring group (see ProjectListHudUsageRing) at
-// `item`: the chip in the account's own color, its icon, the twin
+// Draws one profile's usage ring group (see ProjectListHudUsageRing) at
+// `item`: the chip in the profile's own color, its icon, the twin
 // rings -- antialiased by supersampling -- then the same opacity pass as
 // DrawHudItem.
 static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight, const RECT& item,
@@ -2045,10 +2063,10 @@ static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight,
     }
 
     int left = (int)item.left + kUsageRingPad;
-    if (!ring.iconAccount.empty()) {
-        BlendAccountIcon(ring.iconAccount, pixels, width, height, left, (int)item.top + (rowHeight - kAccountIconSize) / 2,
+    if (ring.showProfileIcon) {
+        BlendClaudeProfileIcon(ring.profile, pixels, width, height, left, (int)item.top + (rowHeight - kProfileIconSize) / 2,
                          item);
-        left += kAccountIconSize + kUsageRingBadgeGap;
+        left += kProfileIconSize + kUsageRingBadgeGap;
     }
 
     const double kPi = 3.14159265358979323846;
@@ -2525,7 +2543,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     // window title reparses differently once VS Code picks up this app's
     // window.title setting, or the user sets/changes an alias).
     for (const ProjectListHudEntry& e : settled) {
-        if (!e.path.empty()) RefreshFavouriteLabel(e.path, e.account, e.label);
+        if (!e.path.empty()) RefreshFavouriteLabel(e.path, e.profile, e.label);
     }
 
     std::vector<ProjectListHudEntry> sorted = settled;

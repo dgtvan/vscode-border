@@ -5,31 +5,23 @@
 #include <string>
 #include <vector>
 
-// Claude usage limits per Windows account -- the session (5-hour) and weekly
-// percentages Claude Code's /usage screen shows -- for the hub's usage rings
-// (see project_list_hud.h's ProjectListHudUsageRing).
+// Claude usage limits per Claude profile (see claude_profile.h) -- the
+// session (5-hour) and weekly percentages Claude Code's /usage screen shows
+// -- for the hub's usage rings (see project_list_hud.h's
+// ProjectListHudUsageRing).
 //
 // They come from https://api.anthropic.com/api/oauth/usage, called with the
-// account's own Claude Code login token (.credentials.json in its Claude
-// config folder). That endpoint isn't a documented API, so every way it can
-// fail is reported back as an error instead of a number. The token is never
+// profile's own Claude Code login token (.credentials.json in its config
+// folder). That endpoint isn't a documented API, so every way it can fail is
+// reported back as an error instead of a number. The token is never
 // refreshed here: that would rotate the refresh token Claude Code itself
-// holds and sign it out. When it has expired, the app instead runs that
-// account's Claude Code briefly, in a way that renews the login without
+// holds and sign it out. When it has expired, the app instead runs Claude
+// Code briefly as that profile, in a way that renews the login without
 // using any of its quota, and fetches again.
 //
-// This app's own account is fetched in-process. Another account's token
-// file is inside that account's profile, which this account can't read, so
-// each user profile (config.ini's user_profile_<N>_account, see account.h)
-// gets a hidden helper -- this same exe, run with kClaudeUsageHelperArg as
-// that account through its password saved in Credential Manager -- which
-// fetches on the same schedule and writes each result to a pipe.
-//
-// Fetching runs on worker threads; results reach the main thread as
-// `notifyMsg` posted to `notifyWnd`, which calls ProcessClaudeUsageResults.
-
-// Command-line switch that runs the exe as the helper (see RunClaudeUsageHelper).
-extern const wchar_t* const kClaudeUsageHelperArg;
+// Fetching runs on a worker thread per profile; results reach the main
+// thread as `notifyMsg` posted to `notifyWnd`, which calls
+// ProcessClaudeUsageResults.
 
 struct ClaudeUsageLimit {
     double percent = -1;    // -1 when the response didn't include this limit
@@ -37,7 +29,7 @@ struct ClaudeUsageLimit {
 };
 
 struct ClaudeUsageSnapshot {
-    std::wstring account; // empty for this app's own account
+    std::wstring profile; // its id (see claude_profile.h), empty for the default
     bool haveData = false; // a fetch has succeeded at least once
     ClaudeUsageLimit session, weekly; // from the last successful fetch
     long long fetchedAt = 0;          // Unix seconds of that fetch
@@ -46,26 +38,26 @@ struct ClaudeUsageSnapshot {
 };
 
 // Starts, restarts or stops fetching to match g_config (usage_meter_enabled,
-// usage_meter_refresh_minutes, the user profiles). Call at startup and on
+// usage_meter_refresh_minutes, the Claude profiles). Call at startup and on
 // every config reload; a no-op when nothing relevant changed.
 void SyncClaudeUsageMonitor(HWND notifyWnd, UINT notifyMsg);
 
-// Stops every worker and helper. Call on quit.
+// Stops every worker. Call on quit.
 void StopClaudeUsageMonitor();
 
 // Main thread, on `notifyMsg`: logs what changed since the last call -- a
 // failure as a warning, once per distinct error, and its recovery.
 void ProcessClaudeUsageResults();
 
-// One snapshot per monitored account: this app's own first, then the user
-// profiles in slot order. Empty while the monitor is off.
+// One snapshot per monitored Claude profile: the default first, then the
+// others in slot order. Empty while the monitor is off.
 std::vector<ClaudeUsageSnapshot> GetClaudeUsageSnapshots();
 
 // Whether the snapshot's numbers can't be trusted as current: the latest
 // fetch failed, or none has succeeded for a while.
 bool IsClaudeUsageStale(const ClaudeUsageSnapshot& s);
 
-// Whether the account's usage is unavailable: a read has been tried and
+// Whether the profile's usage is unavailable: a read has been tried and
 // there are no current numbers -- the latest one failed, whatever the
 // reason, or none has worked for a while. Unlike IsClaudeUsageStale, false
 // while the first read is still on its way.
@@ -75,11 +67,5 @@ bool IsClaudeUsageUnavailable(const ClaudeUsageSnapshot& s);
 // next fetch says so; -1 when unknown.
 double CurrentUsagePercent(const ClaudeUsageLimit& limit);
 
-// Multi-line hover text for one account's rings.
+// Multi-line hover text for one profile's rings.
 std::wstring DescribeClaudeUsage(const ClaudeUsageSnapshot& s);
-
-// Entry point of the helper process: fetches every `intervalMinutes`,
-// writing one line per result to stdout, until stdin closes (the app exited
-// or stopped it). Never logs -- it runs as another account, whose log files
-// would be the wrong ones.
-int RunClaudeUsageHelper(int intervalMinutes);

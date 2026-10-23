@@ -15,7 +15,6 @@ static FILE* g_logFile = nullptr;
 static std::wstring g_logPath;
 static std::wstring g_logDir;
 static bool g_hasWarnings = false;
-static void (*g_logSink)(bool warning, const std::wstring& line) = nullptr;
 
 // Identifies this process's run -- fixed the first time any log line is
 // written and never changed again, even across day-rollover/size-rotation
@@ -137,12 +136,6 @@ static FILE* GetLogFile() {
 }
 
 static void LogVPrefixed(const wchar_t* prefix, const wchar_t* fmt, va_list args) {
-    if (g_logSink) {
-        wchar_t line[2048];
-        vswprintf_s(line, 2048, fmt, args);
-        g_logSink(*prefix != L'\0', line);
-        return;
-    }
     FILE* f = GetLogFile();
     if (!f) return;
 
@@ -244,8 +237,6 @@ void FlushLogBuffer() {
     fflush(f);
     g_ringBuffer.clear();
 }
-
-void SetLogSink(void (*sink)(bool warning, const std::wstring& line)) { g_logSink = sink; }
 
 std::wstring GetLogFilePath() {
     if (!g_logFile) OpenNewLogFile(); // lazily resolves g_logPath as a side effect

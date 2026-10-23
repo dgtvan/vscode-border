@@ -33,8 +33,9 @@
 //   tracking.*          - tracked-window bookkeeping, WinEvent hooks, sync
 //   vscode_cli.*        - VS Code CLI shim lookup, opening/closing VS Code windows
 //   favourites.*        - persisted favourite projects, open-all
-//   claude_usage.*      - Claude session/weekly usage per account, for the hub's usage rings
-//   vscode_installs.*   - each account's VS Code install, as last seen, for opening windows as it
+//   claude_profile.*    - Claude profiles (Claude Code config folders): which a window runs, opening as one
+//   claude_usage.*      - Claude session/weekly usage per Claude profile, for the hub's usage rings
+//   vscode_installs.*   - VS Code's install, as last seen, for opening windows once none is open
 
 #include <windows.h>
 #include <shellapi.h>
@@ -43,8 +44,8 @@
 #include <vector>
 #include "resource.h"
 
-#include "account.h"
 #include "ai_provider.h"
+#include "claude_profile.h"
 #include "claude_provider.h"
 #include "claude_usage.h"
 #include "config.h"
@@ -79,8 +80,6 @@ static const UINT ID_TRAY_EXIT = 4;
 static const UINT ID_TRAY_TOGGLE_HIDDEN = 5;
 static const UINT ID_TRAY_CLOSE_ALL = 6;
 static const UINT ID_TRAY_CAPTURE_SNAPSHOT = 7;
-// + user profile index (see account.h): forget that profile's saved password.
-static const UINT ID_TRAY_FORGET_PASSWORD_FIRST = 100;
 static const UINT_PTR TIMER_RESCAN = 1;
 // TIMER id 2 is kForegroundPollTimerId (tracking.cpp), started/stopped there.
 static const UINT_PTR TIMER_CAPTURE_SNAPSHOT = 3;
@@ -167,22 +166,6 @@ static void ShowTrayMenu(HWND hwnd) {
     AppendMenuW(menu, MF_STRING | (AreOverlaysHidden() ? MF_CHECKED : MF_UNCHECKED), ID_TRAY_TOGGLE_HIDDEN,
                 L"Hide Borders and Hub");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    // One item per user profile, greyed out while it has no saved password.
-    std::vector<std::wstring> profiles = ConfiguredUserProfiles();
-    if (!profiles.empty()) {
-        HMENU forgetMenu = CreatePopupMenu();
-        for (size_t i = 0; i < profiles.size(); i++) {
-            UINT flags = MF_STRING | (HasSavedAccountPassword(profiles[i]) ? 0 : MF_GRAYED);
-            AppendMenuW(forgetMenu, flags, ID_TRAY_FORGET_PASSWORD_FIRST + (UINT)i,
-                        AccountMenuText(profiles[i]).c_str());
-            MENUITEMINFOW mii = {sizeof(mii)};
-            mii.fMask = MIIM_BITMAP;
-            mii.hbmpItem = GetAccountIconMenuBitmap(profiles[i]);
-            if (mii.hbmpItem) SetMenuItemInfoW(forgetMenu, (UINT)i, TRUE, &mii);
-        }
-        AppendMenuW(menu, MF_POPUP, (UINT_PTR)forgetMenu, L"Forget Saved Password");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    }
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload Config");
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_CONFIG, L"Open Config");
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_LOG_FOLDER, L"Open Log Folder");
@@ -198,6 +181,7 @@ static void ShowTrayMenu(HWND hwnd) {
 static void ReloadConfig() {
     g_config = LoadConfig(GetConfigPath());
     SyncWindowTitleSetting(g_config.showLabel);
+    CheckClaudeProfileFolders();
     SyncAllAiProviders(g_config);
     SyncClaudeUsageMonitor(g_nid.hWnd, WM_APP_CLAUDE_USAGE);
     RefreshWorktreeCache();
@@ -308,11 +292,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetTimer(hwnd, TIMER_CAPTURE_SNAPSHOT, kSnapshotDelayMs, nullptr);
             } else if (LOWORD(wParam) == ID_TRAY_CLOSE_ALL) {
                 ConfirmAndCloseVSCodeWindows(hwnd, GetTrackedWindows(), L"tray");
-            } else if (LOWORD(wParam) >= ID_TRAY_FORGET_PASSWORD_FIRST &&
-                       LOWORD(wParam) < ID_TRAY_FORGET_PASSWORD_FIRST + kMaxUserProfiles) {
-                std::vector<std::wstring> profiles = ConfiguredUserProfiles();
-                size_t i = LOWORD(wParam) - ID_TRAY_FORGET_PASSWORD_FIRST;
-                if (i < profiles.size()) ForgetSavedAccountPassword(profiles[i]);
             }
             return 0;
         case WM_TIMER:
@@ -384,31 +363,6 @@ static void ResetToDefaultEnvironment() {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
-    // Before the single-instance check: the helpers run alongside the app,
-    // as another account in the same session.
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv && argc >= 2 && wcscmp(argv[1], kClaudeUsageHelperArg) == 0) {
-        int minutes = argc >= 3 ? _wtoi(argv[2]) : 5;
-        LocalFree(argv);
-        return RunClaudeUsageHelper(minutes);
-    }
-    if (argv && argc >= 2 && wcscmp(argv[1], kClaudeStatusHelperArg) == 0) {
-        bool install = argc >= 3 && wcscmp(argv[2], L"install") == 0;
-        bool verbose = argc >= 4 && wcscmp(argv[3], L"verbose") == 0;
-        LocalFree(argv);
-        return RunClaudeStatusHelper(install, verbose);
-    }
-    if (argv && argc >= 2 && wcscmp(argv[1], kFindVSCodeArg) == 0) {
-        LocalFree(argv);
-        return RunFindVSCode();
-    }
-    if (argv && argc >= 2 && wcscmp(argv[1], kListVSCodeFoldersArg) == 0) {
-        LocalFree(argv);
-        return RunListVSCodeFolders();
-    }
-    if (argv) LocalFree(argv);
-
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\VSCodeBorderApp_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         Log(L"another instance already running, exiting");
@@ -419,6 +373,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     g_hInstance = hInstance;
     g_config = LoadConfig(GetConfigPath());
     SyncWindowTitleSetting(g_config.showLabel);
+    CheckClaudeProfileFolders();
     SyncAllAiProviders(g_config);
 
     const wchar_t* kClassName = L"VSCodeBorderAppWndClass";

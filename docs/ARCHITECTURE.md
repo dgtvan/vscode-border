@@ -327,10 +327,11 @@ still 4 after, with the foreground bouncing across 3 of them inside about
 1.7s.
 
 The fix is that Open All now takes the list of folders that are already
-open (the project-list HUD entries' resolved paths, each with the account
-its window runs as) and launches only the favourites missing from it. A
-favourite is a folder and an account, so it counts as open only when its
-folder is open as its own account. The list is best-effort: a window whose
+open (the project-list HUD entries' resolved paths) and launches only the
+favourites missing from it. A favourite is a folder and a Claude profile,
+but it counts as open when its folder is, whatever profile that window
+runs: VS Code keeps one window per folder, so launching it would only
+bring that window forward. The list is best-effort: a window whose
 path cannot be resolved is simply absent, so its favourite is still
 launched, which is the old behaviour rather than a silent skip.
 

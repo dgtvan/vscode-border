@@ -8,68 +8,55 @@
 // One user-saved project/folder, offered from the project list HUD's "+"
 // new-window button's menu -- clicking it opens `path` in a
 // brand-new VS Code window (see vscode_cli.h's OpenNewVSCodeWindow) as
-// `account`. A favourite is the folder *and* the account it was saved from,
-// so the same folder can be a favourite once per account.
+// Claude profile `profile`. A favourite is the folder *and* the profile it
+// was saved from, so the same folder can be a favourite once per profile.
 struct FavouriteProject {
     std::wstring label; // display text shown in the favourites menu -- the item's label (alias, if any)
                         // as of the last time this path was seen open as a hub item (see
                         // RefreshFavouriteLabel), not necessarily its live value if the project isn't
                         // currently open
     std::wstring path;  // absolute folder path passed to the VS Code CLI shim
-    std::wstring account; // Windows account to open it as (see account.h), empty for this app's own --
-                          // the same convention as ProjectListHudEntry::account
-};
-
-// A folder open in a tracked VS Code window, and the account that window
-// runs as (empty for this app's own).
-struct OpenFolder {
-    std::wstring path;
-    std::wstring account;
+    std::wstring profile; // Claude profile id to open it as (see claude_profile.h), empty for the default --
+                          // the same convention as ProjectListHudEntry::profile
 };
 
 // Loads the persisted favourites list, in the order they were added.
 std::vector<FavouriteProject> LoadFavourites();
 
-// True if `path` is already saved as a favourite for `account` (both
-// case-insensitive; empty `account` is this app's own).
-bool IsFavourite(const std::wstring& path, const std::wstring& account);
+// True if `path` is already saved as a favourite for `profile` (path
+// case-insensitive; empty `profile` is the default).
+bool IsFavourite(const std::wstring& path, const std::wstring& profile);
 
-// Adds `path` (labelled `label`) as a favourite for `account` and persists
+// Adds `path` (labelled `label`) as a favourite for `profile` and persists
 // immediately to favourites.ini next to config.ini. No-op if `path` is
-// empty or already a favourite for that account.
-void AddFavourite(const std::wstring& label, const std::wstring& path, const std::wstring& account);
+// empty or already a favourite for that profile.
+void AddFavourite(const std::wstring& label, const std::wstring& path, const std::wstring& profile);
 
-// Removes `account`'s favourite at `path` (case-insensitive match) and
+// Removes `profile`'s favourite at `path` (case-insensitive match) and
 // persists immediately. No-op if not present.
-void RemoveFavourite(const std::wstring& path, const std::wstring& account);
+void RemoveFavourite(const std::wstring& path, const std::wstring& profile);
 
-// Updates the stored label for `account`'s favourite at `path` (case-insensitive
+// Updates the stored label for `profile`'s favourite at `path` (case-insensitive
 // match) to `label` and persists immediately, if it differs from what's
 // currently stored. No-op if `path` isn't a favourite or the label already
 // matches. Lets a favourite's menu entry track its live hub item's current
 // label (title reparse, alias change, ...) instead of staying frozen at
 // whatever label was captured when it was added -- see FavouriteProject::
 // label's comment.
-void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& account, const std::wstring& label);
+void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& profile, const std::wstring& label);
 
-// True if `favourite` is one of `openFolders` -- the same account, and the
-// same path case-insensitively, tolerant of a trailing separator on either
-// side.
-bool IsFavouriteOpen(const FavouriteProject& favourite, const std::vector<OpenFolder>& openFolders);
-
-// Opens every saved favourite that isn't already open, each in its own new
-// VS Code window. Called from the hub "+" button's Favourites >
-// Open All (never automatically at startup). `runningWindow` (null if
-// no VS Code window is running) picks which VS Code install's CLI shim is used (see vscode_cli.h's
-// ResolveVSCodeCliShim) for this account's favourites; logs a warning and
-// skips those if no shim can be found. Another account's favourite opens
-// through account.h's OpenNewVSCodeWindowAs, whose password prompt (if no
-// password is saved) is owned by `owner`. `reason` tags the log lines and
-// the focus-trace launch record.
+// Opens every saved favourite whose folder isn't already open, each in its
+// own new VS Code window as its own profile. Called from the hub "+"
+// button's Favourites > Open All (never automatically at startup).
+// `runningWindow` (null if no VS Code window is running) picks which VS Code
+// install's CLI shim is used (see vscode_cli.h's ResolveVSCodeCliShim) for
+// the Windows folders; logs a warning and skips those if no shim can be
+// found. `reason` tags the log lines and the focus-trace launch record.
 //
 // `alreadyOpenFolders` is the resolved folders of the open VS Code windows
-// (the hub entries' paths and accounts) -- a favourite counts as open only
-// when its folder is open as its own account. Skipping those matters for more than saving a redundant launch:
+// (the hub entries' paths) -- a favourite counts as open when its folder is,
+// whichever profile that window runs: VS Code keeps one window per folder.
+// Skipping those matters for more than saving a redundant launch:
 // `code -n <path>` on a folder VS Code already has open does NOT create a
 // second window, it *activates the existing one*. Firing that at several
 // already-open favourites in a row makes them fight over the foreground,
@@ -84,5 +71,4 @@ bool IsFavouriteOpen(const FavouriteProject& favourite, const std::vector<OpenFo
 // pre-existing behaviour. Erring that way keeps the feature working (the
 // project does open) instead of silently skipping something the user
 // expects to see.
-void OpenAllFavourites(HWND runningWindow, HWND owner, const std::vector<OpenFolder>& alreadyOpenFolders,
-                       const wchar_t* reason);
+void OpenAllFavourites(HWND runningWindow, const std::vector<std::wstring>& alreadyOpenFolders, const wchar_t* reason);
