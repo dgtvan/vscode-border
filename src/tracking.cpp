@@ -849,6 +849,25 @@ std::vector<HWND> GetTrackedWindows() {
     return windows;
 }
 
+std::vector<ReopenWindow> GetReopenableWindows() {
+    std::vector<ReopenWindow> result;
+    for (auto& kv : g_tracked) {
+        if (!IsWindow(kv.first) || !IsWindowVisible(kv.first)) continue;
+        TrackedWindow& tw = kv.second;
+        UpdateWindowProfile(kv.first, tw);
+        ReopenWindow w;
+        w.target = kv.first;
+        w.profile = tw.profile;
+        w.label = tw.label;
+        if (tw.hasFolderOrRepoInTitle) {
+            w.folder = tw.folderName.empty() ? L"" : ResolveFolderPath(tw.folderName, tw.repoName, tw.wslDistro);
+            w.reopen = !w.folder.empty();
+        }
+        result.push_back(w);
+    }
+    return result;
+}
+
 std::vector<TrackedWindowDiag> GetTrackedWindowDiagnostics() {
     std::vector<TrackedWindowDiag> result;
     result.reserve(g_tracked.size());

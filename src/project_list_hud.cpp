@@ -37,9 +37,6 @@ static const int kReorderDragThreshold = 4; // pixels of movement before a plain
                                              // commits to a reorder-drag instead of a click-to-activate
 static const int kProjectListMinRowHeight = 18;
 static const UINT kAppBarCallbackMsg = WM_APP + 1; // shell -> HUD AppBar notifications (ABN_*)
-static const UINT_PTR kReopenTimerId = 2; // polls the windows Reopen As is waiting on (see PollPendingReopens)
-static const UINT kReopenPollMs = 250;
-static const ULONGLONG kReopenTimeoutMs = 60000;
 static const UINT_PTR kClaudePulseTimerId = 1; // repaints while >=1 item is ClaudeStatus::Working or
                                                 // loading, to animate its indicator -- started/stopped
                                                 // on demand, see UpdateProjectListHud
@@ -75,14 +72,6 @@ static HFONT CreateHudFont(int fontSize, int weight) {
 
 struct ProjectListHudState {
     std::vector<ProjectListHudEntry> entries;
-    // Windows Reopen As has closed, to open again as another Claude profile
-    // once gone (see PollPendingReopens).
-    struct PendingReopen {
-        HWND target;
-        std::wstring path, profile, label;
-        ULONGLONG closedAt;
-    };
-    std::vector<PendingReopen> pendingReopens;
     std::vector<RECT> itemRects; // per-entry rect within the HUD's own client area (local coords)
     int x = 0;
     int y = 0;
@@ -819,29 +808,6 @@ static void AppendProfileMenuItem(HMENU m, UINT id, const std::wstring& profile)
     if (mii.hbmpItem) SetMenuItemInfoW(m, GetMenuItemCount(m) - 1, TRUE, &mii);
 }
 
-// "Reopen As" closes the window first and opens its folder again as the
-// other profile only once it's gone: VS Code keeps one window per folder, so
-// opening it while the window is still there would just bring that window
-// forward. Closing can be held up (or cancelled) at VS Code's prompt about
-// unsaved changes, so the window is polled, and given up on after a while.
-static void PollPendingReopens(HWND hud, ProjectListHudState* state) {
-    ULONGLONG now = GetTickCount64();
-    std::vector<ProjectListHudState::PendingReopen> waiting;
-    for (const ProjectListHudState::PendingReopen& r : state->pendingReopens) {
-        if (!IsWindow(r.target)) {
-            OpenNewVSCodeWindow(AnyTrackedWindow(state), r.path, L"hud-item-reopen-as", r.profile);
-        } else if (now - r.closedAt > kReopenTimeoutMs) {
-            Log(L"hud item menu: [%ls] is still open %llus after Reopen As closed it (close cancelled?) -- not "
-                L"reopening it as [%ls]",
-                r.label.c_str(), (unsigned long long)(kReopenTimeoutMs / 1000), ClaudeProfileName(r.profile).c_str());
-        } else {
-            waiting.push_back(r);
-        }
-    }
-    state->pendingReopens = waiting;
-    if (waiting.empty()) KillTimer(hud, kReopenTimerId);
-}
-
 static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
     // Groups top to bottom: directory, reopen, alias, favourites, close. No path means VS
     // Code hasn't recorded this window's folder in its own workspaceStorage
@@ -862,8 +828,8 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     // nothing here is usable yet.
     // "Reopen As" closes this window and opens its folder again as another
     // Claude profile (any configured one but the window's own) -- see
-    // PollPendingReopens. Left off with no path, for a WSL window, or when
-    // there's no other profile.
+    // vscode_cli.h's CloseAndReopenVSCodeWindows. Left off with no path, for
+    // a WSL window, or when there's no other profile.
     bool loading =index >= 0 && index < (int)state->entries.size() && state->entries[index].loading;
     bool hasPath = !loading && index >= 0 && index < (int)state->entries.size() && !state->entries[index].path.empty();
     bool alreadyFav = hasPath && EntryIsFavourite(state->entries[index]);
@@ -937,9 +903,12 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         const ProjectListHudEntry& entry = state->entries[index];
         std::wstring profile = slot == 0 ? std::wstring() : profiles[slot - 1];
         Log(L"hud item menu: [%ls] -> Reopen As [%ls]", entry.label.c_str(), ClaudeProfileName(profile).c_str());
-        state->pendingReopens.push_back({entry.target, entry.path, profile, entry.label, GetTickCount64()});
-        CloseVSCodeWindow(entry.target, L"hud-item-reopen-as");
-        SetTimer(hud, kReopenTimerId, kReopenPollMs, nullptr);
+        ReopenWindow w;
+        w.target = entry.target;
+        w.folder = entry.path;
+        w.profile = profile;
+        w.label = entry.label;
+        CloseAndReopenVSCodeWindows({w}, false, L"hud-item-reopen-as");
         return;
     }
     if (cmd > 0 && index >= 0 && index < (int)state->entries.size()) {
@@ -1491,7 +1460,6 @@ static LRESULT CALLBACK ProjectListHudWndProc(HWND hwnd, UINT msg, WPARAM wParam
             }
             return 0;
         case WM_TIMER:
-            if (wParam == kReopenTimerId && state) PollPendingReopens(hwnd, state);
             if (wParam == kClaudePulseTimerId && state) {
                 RenderProjectListHud(hwnd, state);
                 bool ringPulsing = std::any_of(state->usageRings.begin(), state->usageRings.end(),

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "vscode_cli.h"
+
 #include <windows.h>
 
 #include <cstddef>
@@ -57,6 +59,13 @@ size_t TrackedWindowCount();
 // Every currently tracked VS Code top-level window, in no particular order
 // (e.g. for the tray icon's Close All Windows).
 std::vector<HWND> GetTrackedWindows();
+
+// Every tracked window as a ReopenWindow (see vscode_cli.h) -- its folder
+// and the Claude profile it runs, as its hub item shows them -- for the
+// tray icon's Restart All Windows. A window whose folder path isn't known
+// (see worktree_resolver.h's ResolveFolderPath) has `reopen` false; one
+// with no folder open reopens empty.
+std::vector<ReopenWindow> GetReopenableWindows();
 
 // Per-window state as this app last computed it, for the tray menu's
 // Capture Diagnostic Snapshot (see diagnostic_snapshot.h) -- the snapshot

@@ -46,10 +46,17 @@ Start-Process bin\vscode_border.exe
 ```
 
 It runs in the background with a tray icon (right-click for **Close All
-Windows** / **Hide Borders and Hub** / **Reload Config** / **Open Config** /
-**Open Log Folder** / **Capture Diagnostic Snapshot** / **Exit**). **Close All
-Windows** asks for confirmation, then
+Windows** / **Restart All Windows** / **Hide Borders and Hub** / **Reload
+Config** / **Open Config** / **Open Log Folder** / **Capture Diagnostic
+Snapshot** / **Exit**). **Close All Windows** asks for confirmation, then
 closes every VS Code window (VS Code still prompts about unsaved changes).
+**Restart All Windows** asks the same, then closes every window and, once VS
+Code has exited, opens each folder again as the [Claude
+profile](#claude-profiles) it was running -- a full VS Code restart, e.g. to
+pick up a changed environment. A window that's still open a minute later
+(its close was cancelled at the unsaved-changes prompt) is left as it is;
+the confirmation lists any window whose folder isn't known, which closes
+but can't come back.
 **Hide Borders and Hub** is a checkable toggle that quickly hides
 every border overlay and the project list HUD together; it isn't saved, so
 the next launch shows everything again (to turn one off for good, use its

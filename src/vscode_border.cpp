@@ -80,6 +80,7 @@ static const UINT ID_TRAY_EXIT = 4;
 static const UINT ID_TRAY_TOGGLE_HIDDEN = 5;
 static const UINT ID_TRAY_CLOSE_ALL = 6;
 static const UINT ID_TRAY_CAPTURE_SNAPSHOT = 7;
+static const UINT ID_TRAY_RESTART_ALL = 8;
 static const UINT_PTR TIMER_RESCAN = 1;
 // TIMER id 2 is kForegroundPollTimerId (tracking.cpp), started/stopped there.
 static const UINT_PTR TIMER_CAPTURE_SNAPSHOT = 3;
@@ -162,6 +163,8 @@ static void ShowTrayMenu(HWND hwnd) {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING | (TrackedWindowCount() == 0 ? MF_GRAYED : 0), ID_TRAY_CLOSE_ALL,
                 L"Close All Windows");
+    AppendMenuW(menu, MF_STRING | (TrackedWindowCount() == 0 ? MF_GRAYED : 0), ID_TRAY_RESTART_ALL,
+                L"Restart All Windows");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (AreOverlaysHidden() ? MF_CHECKED : MF_UNCHECKED), ID_TRAY_TOGGLE_HIDDEN,
                 L"Hide Borders and Hub");
@@ -176,6 +179,30 @@ static void ShowTrayMenu(HWND hwnd) {
                       L"tray-menu"); // required so the menu dismisses correctly
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
     DestroyMenu(menu);
+}
+
+// Tray > Restart All Windows: closes every VS Code window and, once VS Code
+// has exited, opens each folder again as the Claude profile it ran (see
+// vscode_cli.h's CloseAndReopenVSCodeWindows) -- after an OK/Cancel
+// confirmation, which also names any window that won't come back.
+static void RestartAllVSCodeWindows(HWND owner) {
+    std::vector<ReopenWindow> windows = GetReopenableWindows();
+    if (windows.empty()) return;
+    std::wstring prompt = L"Restart all " + std::to_wstring(windows.size()) +
+                          L" VS Code window(s)?\n\nEach is closed and, once VS Code has exited, opened again with "
+                          L"the same folder and Claude profile.";
+    std::wstring lost;
+    for (const ReopenWindow& w : windows) {
+        if (!w.reopen) lost += L"\n    " + w.label;
+    }
+    if (!lost.empty()) prompt += L"\n\nThese won't be reopened (their folder isn't known):" + lost;
+    int choice = MessageBoxW(owner, prompt.c_str(), L"VS Code Border",
+                             MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND);
+    if (choice != IDOK) {
+        Log(L"tray restart-all: cancelled");
+        return;
+    }
+    CloseAndReopenVSCodeWindows(windows, true, L"tray-restart-all");
 }
 
 static void ReloadConfig() {
@@ -290,6 +317,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetOverlaysHidden(!AreOverlaysHidden());
             } else if (LOWORD(wParam) == ID_TRAY_CAPTURE_SNAPSHOT) {
                 SetTimer(hwnd, TIMER_CAPTURE_SNAPSHOT, kSnapshotDelayMs, nullptr);
+            } else if (LOWORD(wParam) == ID_TRAY_RESTART_ALL) {
+                RestartAllVSCodeWindows(hwnd);
             } else if (LOWORD(wParam) == ID_TRAY_CLOSE_ALL) {
                 ConfirmAndCloseVSCodeWindows(hwnd, GetTrackedWindows(), L"tray");
             }

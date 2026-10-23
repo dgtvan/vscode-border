@@ -56,6 +56,28 @@ bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const w
 // focus-trace log line.
 void CloseVSCodeWindow(HWND target, const wchar_t* reason);
 
+// A VS Code window to close and open again (see CloseAndReopenVSCodeWindows).
+struct ReopenWindow {
+    HWND target = nullptr;
+    std::wstring folder;  // what to open again: its folder, or empty for an empty window
+    bool reopen = true;   // false: closed but not opened again (its folder isn't known)
+    std::wstring profile; // the Claude profile to open it as (see claude_profile.h)
+    std::wstring label;   // for log lines
+};
+
+// Asks each window in `windows` to close (see CloseVSCodeWindow) and, once
+// it's gone, opens its folder again in a new window as its `profile`. Only
+// once it's gone: VS Code keeps one window per folder, so opening it while
+// the old window is still there would just bring that one forward. With
+// `waitForVSCodeExit` (restarting every window) nothing is reopened until
+// all of them are gone and VS Code itself has exited, so it starts afresh.
+// Closing can be held up, or cancelled, at VS Code's prompt about unsaved
+// changes: a window still open after a minute is left alone and not
+// reopened. Returns at once; the waiting runs on a timer on this thread.
+// `reason` tags the log lines and the focus-trace launch records.
+void CloseAndReopenVSCodeWindows(const std::vector<ReopenWindow>& windows, bool waitForVSCodeExit,
+                                 const wchar_t* reason);
+
 // Asks every window in `targets` to close, after an OK/Cancel confirmation
 // owned by `owner`. WM_CLOSE is the same request as the window's own X
 // button, so VS Code still gets to prompt about unsaved changes per window.

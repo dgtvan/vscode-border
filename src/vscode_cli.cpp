@@ -6,7 +6,9 @@
 #include "logger.h"
 #include "vscode_installs.h"
 
+#include <algorithm>
 #include <cwchar>
+#include <map>
 
 namespace {
 
@@ -170,4 +172,102 @@ void ConfirmAndCloseVSCodeWindows(HWND owner, const std::vector<HWND>& targets, 
         CloseVSCodeWindow(target, L"close-all");
     }
     Log(L"%ls close-all: sent WM_CLOSE to %d window(s)", source, (int)live.size());
+}
+
+namespace {
+
+// One CloseAndReopenVSCodeWindows call, waited on by its own timer.
+struct ReopenBatch {
+    std::vector<ReopenWindow> windows;
+    bool waitForVSCodeExit = false;
+    std::wstring reason;
+    std::vector<DWORD> vscodePids; // the Windows VS Code processes the windows belonged to
+    ULONGLONG closedAt = 0;
+    ULONGLONG allGoneAt = 0; // when the last window went, 0 until then
+};
+
+std::map<UINT_PTR, ReopenBatch> g_reopenBatches;
+
+const UINT kReopenPollMs = 250;
+const ULONGLONG kReopenCloseTimeoutMs = 60000; // VS Code may be waiting on an unsaved-changes prompt
+const ULONGLONG kReopenExitTimeoutMs = 20000;  // for VS Code itself to exit once its windows are gone
+
+bool IsProcessRunning(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false;
+    DWORD exitCode = 0;
+    bool running = GetExitCodeProcess(process, &exitCode) && exitCode == STILL_ACTIVE;
+    CloseHandle(process);
+    return running;
+}
+
+void CALLBACK ReopenTimerProc(HWND, UINT, UINT_PTR id, DWORD) {
+    auto it = g_reopenBatches.find(id);
+    if (it == g_reopenBatches.end()) {
+        KillTimer(nullptr, id);
+        return;
+    }
+    ReopenBatch& batch = it->second;
+    ULONGLONG now = GetTickCount64();
+    bool allGone = std::all_of(batch.windows.begin(), batch.windows.end(),
+                               [](const ReopenWindow& w) { return !IsWindow(w.target); });
+    if (!allGone && now - batch.closedAt < kReopenCloseTimeoutMs) return;
+    if (allGone && batch.waitForVSCodeExit) {
+        if (!batch.allGoneAt) batch.allGoneAt = now;
+        bool running = std::any_of(batch.vscodePids.begin(), batch.vscodePids.end(), IsProcessRunning);
+        if (running && now - batch.allGoneAt < kReopenExitTimeoutMs) return;
+        if (running) {
+            Log(L"%ls: VS Code is still running %llus after its windows closed -- reopening them in it anyway",
+                batch.reason.c_str(), (unsigned long long)(kReopenExitTimeoutMs / 1000));
+        }
+    }
+    KillTimer(nullptr, id);
+    ReopenBatch done = std::move(batch);
+    g_reopenBatches.erase(it);
+
+    for (const ReopenWindow& w : done.windows) {
+        if (IsWindow(w.target)) {
+            Log(L"%ls: [%ls] is still open %llus after it was asked to close (close cancelled?) -- not reopening it",
+                done.reason.c_str(), w.label.c_str(), (unsigned long long)(kReopenCloseTimeoutMs / 1000));
+        } else if (!w.reopen) {
+            Log(L"%ls: [%ls] closed; not reopening it -- its folder isn't known", done.reason.c_str(), w.label.c_str());
+        } else {
+            OpenNewVSCodeWindow(nullptr, w.folder, done.reason.c_str(), w.profile);
+        }
+    }
+}
+
+} // namespace
+
+void CloseAndReopenVSCodeWindows(const std::vector<ReopenWindow>& windows, bool waitForVSCodeExit,
+                                 const wchar_t* reason) {
+    ReopenBatch batch;
+    batch.waitForVSCodeExit = waitForVSCodeExit;
+    batch.reason = reason;
+    for (const ReopenWindow& w : windows) {
+        if (!w.target || !IsWindow(w.target)) continue;
+        batch.windows.push_back(w);
+        wchar_t cls[64] = {};
+        GetClassNameW(w.target, cls, 64);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(w.target, &pid);
+        // A WSLg window's process is WSL's, which outlives it.
+        if (pid && wcscmp(cls, kWslgWindowClass) != 0 &&
+            std::find(batch.vscodePids.begin(), batch.vscodePids.end(), pid) == batch.vscodePids.end()) {
+            batch.vscodePids.push_back(pid);
+        }
+        Log(L"%ls: closing [%ls] to reopen %ls as Claude profile [%ls]", reason, w.label.c_str(),
+            !w.reopen ? L"(not: folder unknown)" : w.folder.empty() ? L"an empty window" : w.folder.c_str(),
+            ClaudeProfileName(w.profile).c_str());
+    }
+    if (batch.windows.empty()) return;
+    for (const ReopenWindow& w : batch.windows) CloseVSCodeWindow(w.target, reason);
+    batch.closedAt = GetTickCount64();
+    UINT_PTR id = SetTimer(nullptr, 0, kReopenPollMs, ReopenTimerProc);
+    if (!id) {
+        LogWarn(L"%ls: couldn't start the timer to reopen %zu window(s), lastError=%lu", reason, batch.windows.size(),
+                GetLastError());
+        return;
+    }
+    g_reopenBatches[id] = std::move(batch);
 }
