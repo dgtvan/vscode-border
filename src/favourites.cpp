@@ -1,12 +1,8 @@
 #include "favourites.h"
 
-#include "claude_profile.h"
 #include "file_util.h"
-#include "focus_trace.h"
 #include "logger.h"
 #include "text_util.h"
-#include "vscode_cli.h"
-#include "wsl.h"
 
 #include <windows.h>
 
@@ -39,14 +35,13 @@ std::vector<FavouriteProject> LoadAll() {
         if (line.empty() || line[0] == ';' || line[0] == '#') continue;
 
         // "=" is the field delimiter (path=label per line), split on the
-        // *first* occurrence only -- see text_util.h. A favourite of a
-        // profile other than the default is prefixed "@<profile id>|": no
-        // absolute path starts with "@", and none contains "|".
-        std::wstring profile;
+        // *first* occurrence only -- see text_util.h. Files from when a
+        // favourite stored a Claude profile prefix non-default ones
+        // "@<profile id>|" (no absolute path starts with "@", and none
+        // contains "|"); the prefix is skipped, and the next save drops it.
         if (line[0] == '@') {
             size_t bar = line.find('|');
             if (bar == std::string::npos) continue;
-            profile = UnescapeTextLine(line.substr(1, bar - 1));
             line = line.substr(bar + 1);
         }
         size_t eq = line.find('=');
@@ -61,7 +56,7 @@ std::vector<FavouriteProject> LoadAll() {
                         [&](const FavouriteProject& f) { return ToLowerCopy(f.path) == key; })) {
             continue;
         }
-        result.push_back({label, path, profile});
+        result.push_back({label, path});
     }
     return result;
 }
@@ -69,32 +64,9 @@ std::vector<FavouriteProject> LoadAll() {
 void SaveAll(const std::vector<FavouriteProject>& all) {
     std::string out;
     for (const FavouriteProject& f : all) {
-        if (!f.profile.empty()) out += "@" + EscapeTextLine(f.profile) + "|";
         out += EscapeTextLine(f.path) + "=" + EscapeTextLine(f.label) + "\n";
     }
     WriteFileBytes(GetFavouritesFilePath(), out);
-}
-
-// Case-insensitive path comparison, tolerant of a trailing separator on
-// either side: favourites.ini holds whatever path the window reported when
-// the user saved it, while the tracked-window paths come back from VS
-// Code's own workspaceStorage records, and the two do not necessarily
-// agree about a trailing backslash.
-bool SamePath(const std::wstring& a, const std::wstring& b) {
-    auto trimmed = [](const std::wstring& p) {
-        size_t end = p.size();
-        while (end > 0 && (p[end - 1] == L'\\' || p[end - 1] == L'/')) end--;
-        return p.substr(0, end);
-    };
-    std::wstring ta = trimmed(a), tb = trimmed(b);
-    return !ta.empty() && ta.size() == tb.size() && _wcsicmp(ta.c_str(), tb.c_str()) == 0;
-}
-
-bool IsAlreadyOpen(const FavouriteProject& f, const std::vector<std::wstring>& openFolders) {
-    for (const std::wstring& open : openFolders) {
-        if (SamePath(f.path, open)) return true;
-    }
-    return false;
 }
 
 bool Matches(const FavouriteProject& f, const std::wstring& pathKey) {
@@ -125,27 +97,21 @@ bool IsFavourite(const std::wstring& path) {
                        [&](const FavouriteProject& f) { return Matches(f, key); });
 }
 
-void AddFavourite(const std::wstring& label, const std::wstring& path, const std::wstring& profile) {
+void AddFavourite(const std::wstring& label, const std::wstring& path) {
     EnsureLoaded();
     if (path.empty() || IsFavourite(path)) return;
-    g_favourites.push_back({label, path, profile});
+    g_favourites.push_back({label, path});
     SaveAll(g_favourites);
-    Log(L"favourites: added [%ls] (%ls) as Claude profile [%ls]", label.c_str(), path.c_str(),
-        ClaudeProfileName(profile).c_str());
+    Log(L"favourites: added [%ls] (%ls)", label.c_str(), path.c_str());
 }
 
-void RefreshFavourite(const std::wstring& path, const std::wstring& profile, const std::wstring& label) {
+void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label) {
     EnsureLoaded();
     std::wstring key = ToLowerCopy(path);
     for (FavouriteProject& f : g_favourites) {
         if (!Matches(f, key)) continue;
-        if (f.label == label && f.profile == profile) return;
-        if (!SameClaudeProfile(f.profile, profile)) {
-            Log(L"favourites: [%ls] is open as Claude profile [%ls] now -- it opens as that from here on",
-                f.path.c_str(), ClaudeProfileName(profile).c_str());
-        }
+        if (f.label == label) return;
         f.label = label;
-        f.profile = profile;
         SaveAll(g_favourites);
         return;
     }
@@ -160,58 +126,4 @@ void RemoveFavourite(const std::wstring& path) {
     g_favourites.erase(it, g_favourites.end());
     SaveAll(g_favourites);
     Log(L"favourites: removed %ls", path.c_str());
-}
-
-void OpenAllFavourites(HWND runningWindow, const std::vector<std::wstring>& alreadyOpenFolders, const wchar_t* reason) {
-    EnsureLoaded();
-    if (g_favourites.empty()) return;
-
-    // Decide what actually needs launching before resolving the shim or
-    // announcing anything, so a run where every favourite is already open
-    // does nothing at all and says so in one line.
-    std::vector<const FavouriteProject*> toOpen;
-    for (const FavouriteProject& f : g_favourites) {
-        if (IsAlreadyOpen(f, alreadyOpenFolders)) {
-            Log(L"favourites: [%ls] is already open -- not relaunching it (a redundant `code -n` would only "
-                L"re-activate that window, leaving the others highlighted in the taskbar)",
-                f.path.c_str());
-            continue;
-        }
-        toOpen.push_back(&f);
-    }
-    if (toOpen.empty()) {
-        Log(L"favourites: all %zu favourite(s) already open, nothing to launch", g_favourites.size());
-        return;
-    }
-
-    // The shim is only needed for Windows folders -- a WSL one (see wsl.h)
-    // opens in its distro's Linux VS Code.
-    auto usesOwnShim = [](const FavouriteProject* f) { return !ParseWslUncPath(f->path, nullptr, nullptr); };
-    std::wstring cmdPath;
-    if (std::any_of(toOpen.begin(), toOpen.end(), usesOwnShim) && !ResolveVSCodeCliShim(runningWindow, cmdPath)) {
-        size_t before = toOpen.size();
-        toOpen.erase(std::remove_if(toOpen.begin(), toOpen.end(), usesOwnShim), toOpen.end());
-        LogWarn(L"favourites: no VS Code CLI shim -- skipping %zu Windows favourite(s) in open-all (%ls)",
-                before - toOpen.size(), reason);
-        if (toOpen.empty()) return;
-    }
-
-    // Logged as one batch before the loop, not per favourite: the whole
-    // point of the record is that N windows are about to race each other
-    // for the foreground, which is a property of the batch (see
-    // focus_trace.h's reason 3), not of any single ShellExecuteW. Counts
-    // only what is actually being launched, so a run with nothing to do
-    // never opens a suspect period and so can never attribute someone
-    // alt-tabbing to this app.
-    NoteWindowLaunchRequest(reason, toOpen.size());
-    Log(L"favourites: open-all (%ls) launching %zu favourite(s)", reason, toOpen.size());
-
-    for (const FavouriteProject* f : toOpen) {
-        std::wstring distro, linuxPath;
-        if (ParseWslUncPath(f->path, &distro, &linuxPath)) {
-            LaunchInWsl(distro, LinuxVSCodeOpenCommand(distro, linuxPath));
-        } else if (RunVSCodeCli(cmdPath, L"-n \"" + f->path + L"\"", f->profile)) {
-            NoteClaudeProfileLaunch(f->path, f->profile);
-        }
-    }
 }

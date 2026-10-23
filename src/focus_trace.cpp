@@ -119,8 +119,8 @@ static size_t DistinctTargets(const std::deque<FocusAttempt>& q) {
 
 // Emits the storm warning plus the full contents of the burst, so the log
 // says which windows were involved and what asked for each -- that is what
-// distinguishes "hover activation swept the HUD" from "the favourites
-// Open All launched five windows" after the fact. Rate-limited to one
+// distinguishes "hover activation swept the HUD" from "five VS Code
+// windows were launched at once" after the fact. Rate-limited to one
 // warning per burst: a single sweep would otherwise warn again on every
 // item after the third.
 // `showGranted` exists because `granted` only means something for the
@@ -341,7 +341,7 @@ void NoteForegroundChange(HWND hwnd, bool isTrackedVSCodeWindow) {
     // Denied requests are deliberately still recorded: those do not move
     // the foreground, so a change arriving after one came from somewhere
     // else and is exactly what this detector is for. Changes with no
-    // request behind them -- the launch case (favourites Open All) -- are
+    // request behind them -- the window-launch case -- are
     // recorded too, so the burst is still dumped in full, but they no
     // longer warn on their own: see the evidence check further down.
     if (ours && g_lastRequestGranted) return;
@@ -380,7 +380,8 @@ void NoteForegroundChange(HWND hwnd, bool isTrackedVSCodeWindow) {
     // list of the windows that provably did *not* flash, which makes churn
     // on its own incapable of evidencing the symptom, however fast it is.
     //
-    // Left unchecked that warned on every Open All of several favourites:
+    // Left unchecked that warned on every launch of several favourites (the
+    // former Open All):
     // opening five windows had them take the foreground one after another,
     // all five granted, no request of ours involved and nothing denied
     // anywhere in the run -- and the app then reported the very windows it
@@ -403,8 +404,8 @@ void NoteForegroundChange(HWND hwnd, bool isTrackedVSCodeWindow) {
 
 void NoteWindowLaunchRequest(const wchar_t* reason, size_t count) {
     if (count == 0) return;
-    // Not a warning on its own -- opening several windows at once is a
-    // feature (favourites Open All). It is logged so the taskbar
+    // Not a warning on its own -- opening a VS Code window is a feature.
+    // It is logged so the taskbar
     // highlighting that naturally follows is attributable to it, since
     // those windows request the foreground themselves and nothing here
     // would otherwise appear in the log at all.

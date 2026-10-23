@@ -922,7 +922,7 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     else if (cmd == 2) ClearAlias(hud, state, index);
     else if (cmd == 3) {
         const ProjectListHudEntry& entry = state->entries[index];
-        AddFavourite(entry.label, entry.path, entry.profile);
+        AddFavourite(entry.label, entry.path);
     } else if (cmd == 4) {
         RemoveFavourite(state->entries[index].path);
     } else if (cmd == 5) {
@@ -947,9 +947,8 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // with its icon if claude_profile_1_icon is set), then the others in slot
 // order, each with its icon; without any it's a plain item opening the
 // window as the default. Then, after a separator, a "Favourites" submenu
-// holding "Open All" (every favourite not already open -- see
-// OpenAllFavourites for why open ones are skipped), then the saved favourite
-// projects (see favourites.h), each as its own submenu -- hovering a
+// holding the saved favourite projects (see favourites.h) sorted by label,
+// each as its own submenu -- hovering a
 // favourite's name expands it to "Open in New Window As" (a submenu of every
 // profile it could open as -- see vscode_cli.h's OpenNewVSCodeWindow; on an
 // open folder it just re-activates its window, whatever profile that runs;
@@ -965,32 +964,16 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     std::vector<FavouriteProject> favourites = LoadFavourites();
     const std::vector<std::wstring> profiles = OtherClaudeProfiles();
 
-    // Sorted by label; favourites with the same label then follow the
-    // "Start VS Code" submenu's profile order (the default, then the others
-    // in slot order, then any profile no longer configured, by id).
-    auto profileRank = [&](const std::wstring& profile) -> size_t {
-        if (profile.empty()) return 0;
-        for (size_t i = 0; i < profiles.size(); i++) {
-            if (SameClaudeProfile(profiles[i], profile)) return 1 + i;
-        }
-        return 1 + profiles.size();
-    };
     std::stable_sort(favourites.begin(), favourites.end(),
-                     [&](const FavouriteProject& a, const FavouriteProject& b) {
-        int byLabel = CompareStringEx(LOCALE_NAME_USER_DEFAULT, NORM_IGNORECASE | SORT_DIGITSASNUMBERS, a.label.c_str(),
-                                      -1, b.label.c_str(), -1, nullptr, nullptr, 0);
-        if (byLabel != CSTR_EQUAL) return byLabel == CSTR_LESS_THAN;
-        size_t ra = profileRank(a.profile), rb = profileRank(b.profile);
-        if (ra != rb) return ra < rb;
-        return CompareStringOrdinal(a.profile.c_str(), -1, b.profile.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+                     [](const FavouriteProject& a, const FavouriteProject& b) {
+        return CompareStringEx(LOCALE_NAME_USER_DEFAULT, NORM_IGNORECASE | SORT_DIGITSASNUMBERS, a.label.c_str(), -1,
+                               b.label.c_str(), -1, nullptr, nullptr, 0) == CSTR_LESS_THAN;
     });
 
-    // Command ids: Open All = 1; per favourite i, open = 2 + i*2, remove =
-    // 3 + i*2, open as profile slot j = kOpenAsBase + i*kOpenAsStride + j;
-    // start as profile slot j = kStartAsBase + j, well above any favourite's
-    // -- decoded back on return below. A profile slot is 0 for the default,
-    // 1 + i for profiles[i].
-    const UINT kOpenAllId = 1;
+    // Command ids: per favourite i, remove = 1 + i, open as profile slot j =
+    // kOpenAsBase + i*kOpenAsStride + j; start as profile slot j =
+    // kStartAsBase + j, well above any favourite's -- decoded back on return
+    // below. A profile slot is 0 for the default, 1 + i for profiles[i].
     const UINT kOpenAsBase = 0x1000, kOpenAsStride = 8; // stride > the 5 profile slots
     const UINT kStartAsBase = 0x8000;
     auto slotProfile = [&](size_t slot) { return slot == 0 ? std::wstring() : profiles[slot - 1]; };
@@ -1011,27 +994,14 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     if (favourites.empty()) {
         AppendMenuW(favMenu, MF_STRING | MF_GRAYED, 0, L"(No Favourites)");
     } else {
-        AppendMenuW(favMenu, MF_STRING, kOpenAllId, L"Open All");
-        AppendMenuW(favMenu, MF_SEPARATOR, 0, nullptr);
         for (size_t i = 0; i < favourites.size(); i++) {
-            UINT openId = (UINT)(2 + i * 2);
-            UINT removeId = (UINT)(3 + i * 2);
+            UINT removeId = (UINT)(1 + i);
             HMENU sub = CreatePopupMenu();
-            // The favourite's own profile gets openId; a WSL folder only
-            // opens as the default.
+            // A WSL folder only opens as the default.
             HMENU asMenu = CreatePopupMenu();
-            if (ParseWslUncPath(favourites[i].path, nullptr, nullptr)) {
-                AppendProfileMenuItem(asMenu, openId, L"");
-            } else {
-                bool ownListed = false;
-                for (size_t slot = 0; slot <= profiles.size(); slot++) {
-                    std::wstring profile = slotProfile(slot);
-                    bool own = SameClaudeProfile(profile, favourites[i].profile);
-                    ownListed = ownListed || own;
-                    AppendProfileMenuItem(asMenu, own ? openId : kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot,
-                                          profile);
-                }
-                if (!ownListed) AppendProfileMenuItem(asMenu, openId, favourites[i].profile);
+            size_t lastSlot = ParseWslUncPath(favourites[i].path, nullptr, nullptr) ? 0 : profiles.size();
+            for (size_t slot = 0; slot <= lastSlot; slot++) {
+                AppendProfileMenuItem(asMenu, kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, slotProfile(slot));
             }
             AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
@@ -1060,22 +1030,8 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
         OpenNewVSCodeWindow(AnyTrackedWindow(state), favourites[i].path, L"hud-favourite-open-as", slotProfile(slot));
         return;
     }
-    if (cmd == (int)kOpenAllId) {
-        // Open-ness comes from the HUD's own entries (see
-        // ProjectListHudEntry::path for which windows have no path).
-        std::vector<std::wstring> openFolders;
-        for (const ProjectListHudEntry& e : state->entries) {
-            if (!e.path.empty()) openFolders.push_back(e.path);
-        }
-        OpenAllFavourites(AnyTrackedWindow(state), openFolders, L"hud-favourites-open-all");
-        return;
-    }
-    size_t i = (size_t)(cmd - 2) / 2;
-    bool isOpen = (cmd - 2) % 2 == 0;
-    if (i >= favourites.size()) return;
-    const FavouriteProject& f = favourites[i];
-    if (!isOpen) RemoveFavourite(f.path);
-    else OpenNewVSCodeWindow(AnyTrackedWindow(state), f.path, L"hud-favourite-open", f.profile);
+    size_t i = (size_t)(cmd - 1);
+    if (i < favourites.size()) RemoveFavourite(favourites[i].path);
 }
 
 // Shared cleanup for ending a DragReorder, called both from a real
@@ -2502,16 +2458,15 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
 
     ApplyManualOrder(settled, state->manualOrder);
 
-    // Keep a favourite's stored label (and the profile it opens as) in sync
-    // with its live hub item whenever that project is actually open --
-    // otherwise the favourites
+    // Keep a favourite's stored label in sync with its live hub item
+    // whenever that project is actually open -- otherwise the favourites
     // menu (ShowNewWindowButtonMenu) would keep showing whatever
     // label happened to be captured back when "Add to Favourites" was
     // clicked, even after the hub item's own label later changes (e.g. the
     // window title reparses differently once VS Code picks up this app's
     // window.title setting, or the user sets/changes an alias).
     for (const ProjectListHudEntry& e : settled) {
-        if (!e.path.empty() && !e.loading) RefreshFavourite(e.path, e.profile, e.label);
+        if (!e.path.empty() && !e.loading) RefreshFavouriteLabel(e.path, e.label);
     }
 
     std::vector<ProjectListHudEntry> sorted = settled;

@@ -321,10 +321,8 @@ concluding anything about a third:
 1. **Auto-open activating windows that were already open.** Startup auto-open
    ran `code -n <path>` for every favourite without checking whether that
    folder was already open, and VS Code answers that by activating the
-   existing window. If it reappears, the check in
-   `OpenAllFavourites` is where to look: a favourite whose path
-   cannot be resolved is deliberately still launched, so a project VS Code
-   has never recorded in workspaceStorage can re-trigger it.
+   existing window. Both auto-open and the later Open All (which skipped
+   open folders) have since been removed, so this cause can't recur.
 2. **The churn detector treating success as evidence.** Even with genuinely
    new windows, the foreground-churn queue warned on every multi-favourite
    launch. Its entries are `EVENT_SYSTEM_FOREGROUND` events, which only fire

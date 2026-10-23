@@ -265,8 +265,7 @@ Clicking the fixed "+" square at the end of the project list HUD opens a
 menu. **Start VS Code** opens a brand-new, empty VS Code window -- with
 [Claude profiles](#claude-profiles) configured besides the default it's a
 submenu of which profile to open it as. Below it, past a divider, is a
-**Favourites** submenu: **Open All** first (opens every
-favourite not already open), then your saved favourite projects/folders
+**Favourites** submenu: your saved favourite projects/folders
 sorted by name, one submenu per favourite -- hover a favourite's name to expand it to
 **Open in New Window As** (a submenu of the Claude profiles to open it as;
 on an open folder it just brings its window forward, whatever profile that
@@ -281,11 +280,9 @@ Favourites** in its place. That only reaches a favourite while its window is
 open, though -- the "+" button's own menu is the way to remove one that
 isn't. A favourite is the folder, matched by its path (not label text),
 whatever [Claude profile](#claude-profiles) its window runs: the star shows
-for it in any profile. It opens as the profile the folder was last seen open
-as (**Open in New Window As** picks another). Favourites are stored in
-`favourites.ini` next to `config.ini`. Favourites are never opened
-automatically when the app starts -- use the "+" button's **Favourites >
-Open All** to open them all at once.
+for it in any profile, and it stores no profile -- **Open in New Window As**
+picks one each time. Favourites are stored in `favourites.ini` next to
+`config.ini`. Favourites are never opened automatically.
 
 ### AI status indicator
 
