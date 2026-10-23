@@ -84,16 +84,19 @@ void BlendClaudeProfileIcon(const std::wstring& id, UINT32* pixels, int surfaceW
 HBITMAP GetClaudeProfileMenuBitmap(const std::wstring& id);
 
 // The profile the VS Code window with folder `path` open (empty if unknown,
-// with `folderName` its leaf name) runs Claude Code as. Read from the
+// with `folderName` its leaf name, matched against the newest lock of that
+// name) runs Claude Code as, into `profile`; false, with `profile` the
+// default, when nothing says -- e.g. while a window's title is still
+// settling and its folder can't be told yet. Read from the
 // ide\*.lock files Claude Code's VS Code extension writes into its config
 // folder when it starts in a window -- VS Code's pid and the window's
 // folders -- counting only those whose VS Code is still running, the newest
 // for the folder. The profile this app opened the folder as (see
 // NoteClaudeProfileLaunch) wins over an older lock, which can be one left
-// by a window closed since; without either, the default. A window with no folder open is told apart only when
+// by a window closed since. A window with no folder open is told apart only when
 // every such window runs the same profile. Cheap: the lock files are
 // rescanned every few seconds at most.
-std::wstring ClaudeProfileOfWindow(const std::wstring& path, const std::wstring& folderName);
+bool ClaudeProfileOfWindow(const std::wstring& path, const std::wstring& folderName, std::wstring& profile);
 
 // Remembers that `folder` was just opened as profile `id`, for
 // ClaudeProfileOfWindow until the window's own lock file says.

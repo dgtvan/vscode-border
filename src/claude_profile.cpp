@@ -461,22 +461,17 @@ HBITMAP GetClaudeProfileMenuBitmap(const std::wstring& id) {
     return bmp;
 }
 
-std::wstring ClaudeProfileOfWindow(const std::wstring& path, const std::wstring& folderName) {
+bool ClaudeProfileOfWindow(const std::wstring& path, const std::wstring& folderName, std::wstring& profile) {
     RescanLocksIfDue();
+    profile.clear();
     std::wstring folder = TrimTrailingSeparators(path);
-    // By path; without one, by folder name -- but only when that names a
-    // single live window's folder.
+    // By path; without one, by folder name. Either way the newest lock wins.
     const LiveLock* best = nullptr;
-    const LiveLock* byName = nullptr;
-    int byNameCount = 0;
     for (const LiveLock& lock : g_liveLocks) {
         for (const std::wstring& f : lock.folders) {
-            if (!folder.empty() && SamePathText(f, folder)) {
-                if (!best || lock.written > best->written) best = &lock;
-            } else if (folder.empty() && !folderName.empty() && _wcsicmp(LeafName(f).c_str(), folderName.c_str()) == 0) {
-                byName = &lock;
-                byNameCount++;
-            }
+            bool match = !folder.empty() ? SamePathText(f, folder)
+                                         : !folderName.empty() && _wcsicmp(LeafName(f).c_str(), folderName.c_str()) == 0;
+            if (match && (!best || lock.written > best->written)) best = &lock;
         }
     }
     // The app's own launch of the folder, when newer than every lock for it:
@@ -486,9 +481,14 @@ std::wstring ClaudeProfileOfWindow(const std::wstring& path, const std::wstring&
     std::wstring key = folder;
     std::transform(key.begin(), key.end(), key.begin(), ::towlower);
     auto launch = folder.empty() ? g_launches.end() : g_launches.find(key);
-    if (launch != g_launches.end() && (!best || launch->second.at > best->written)) return launch->second.profile;
-    if (best) return best->profile;
-    if (byNameCount == 1) return byName->profile;
+    if (launch != g_launches.end() && (!best || launch->second.at > best->written)) {
+        profile = launch->second.profile;
+        return true;
+    }
+    if (best) {
+        profile = best->profile;
+        return true;
+    }
     if (folder.empty() && folderName.empty()) {
         // A window with no folder open: its lock lists none, so nothing
         // says which of them it is -- unless every such window runs the
@@ -496,12 +496,13 @@ std::wstring ClaudeProfileOfWindow(const std::wstring& path, const std::wstring&
         const std::wstring* bare = nullptr;
         for (const LiveLock& lock : g_liveLocks) {
             if (!lock.folders.empty()) continue;
-            if (bare && !SamePathText(*bare, lock.profile)) return L"";
+            if (bare && !SamePathText(*bare, lock.profile)) return false;
             bare = &lock.profile;
         }
-        return bare ? *bare : L"";
+        if (bare) profile = *bare;
+        return bare != nullptr;
     }
-    return L"";
+    return false;
 }
 
 void NoteClaudeProfileLaunch(const std::wstring& folder, const std::wstring& id) {

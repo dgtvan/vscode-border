@@ -240,11 +240,11 @@ static int ProjectListDragCandidate(const ProjectListHudState* state, int x) {
     return (int)state->itemRects.size() - 1;
 }
 
-// True if `entry`'s folder is a saved favourite for the profile its window
-// runs as (see favourites.h) -- shown as the star marker only; it has no
+// True if `entry`'s folder is a saved favourite, whatever profile its window
+// runs (see favourites.h) -- shown as the star marker only; it has no
 // effect on the item's position.
 static bool EntryIsFavourite(const ProjectListHudEntry& entry) {
-    return !entry.path.empty() && IsFavourite(entry.path, entry.profile);
+    return !entry.path.empty() && IsFavourite(entry.path);
 }
 
 static bool IsProjectListResizeEdge(const ProjectListHudState* state, int x) {
@@ -924,7 +924,7 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         const ProjectListHudEntry& entry = state->entries[index];
         AddFavourite(entry.label, entry.path, entry.profile);
     } else if (cmd == 4) {
-        RemoveFavourite(state->entries[index].path, state->entries[index].profile);
+        RemoveFavourite(state->entries[index].path);
     } else if (cmd == 5) {
         // A WSL folder as the Linux path it is inside the distro.
         std::wstring linuxPath;
@@ -965,10 +965,9 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     std::vector<FavouriteProject> favourites = LoadFavourites();
     const std::vector<std::wstring> profiles = OtherClaudeProfiles();
 
-    // Sorted by label, so one folder saved for several profiles sits
-    // together; those then follow the "Start VS Code" submenu's profile
-    // order (the default, then the others in slot order, then any profile
-    // no longer configured, by id).
+    // Sorted by label; favourites with the same label then follow the
+    // "Start VS Code" submenu's profile order (the default, then the others
+    // in slot order, then any profile no longer configured, by id).
     auto profileRank = [&](const std::wstring& profile) -> size_t {
         if (profile.empty()) return 0;
         for (size_t i = 0; i < profiles.size(); i++) {
@@ -1075,7 +1074,7 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     bool isOpen = (cmd - 2) % 2 == 0;
     if (i >= favourites.size()) return;
     const FavouriteProject& f = favourites[i];
-    if (!isOpen) RemoveFavourite(f.path, f.profile);
+    if (!isOpen) RemoveFavourite(f.path);
     else OpenNewVSCodeWindow(AnyTrackedWindow(state), f.path, L"hud-favourite-open", f.profile);
 }
 
@@ -2503,15 +2502,16 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
 
     ApplyManualOrder(settled, state->manualOrder);
 
-    // Keep a favourite's stored label in sync with its live hub item
-    // whenever that project is actually open -- otherwise the favourites
+    // Keep a favourite's stored label (and the profile it opens as) in sync
+    // with its live hub item whenever that project is actually open --
+    // otherwise the favourites
     // menu (ShowNewWindowButtonMenu) would keep showing whatever
     // label happened to be captured back when "Add to Favourites" was
     // clicked, even after the hub item's own label later changes (e.g. the
     // window title reparses differently once VS Code picks up this app's
     // window.title setting, or the user sets/changes an alias).
     for (const ProjectListHudEntry& e : settled) {
-        if (!e.path.empty()) RefreshFavouriteLabel(e.path, e.profile, e.label);
+        if (!e.path.empty() && !e.loading) RefreshFavourite(e.path, e.profile, e.label);
     }
 
     std::vector<ProjectListHudEntry> sorted = settled;

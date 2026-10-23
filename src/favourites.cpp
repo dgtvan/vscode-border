@@ -53,7 +53,15 @@ std::vector<FavouriteProject> LoadAll() {
         if (eq == std::string::npos) continue;
         std::wstring path = UnescapeTextLine(line.substr(0, eq));
         std::wstring label = UnescapeTextLine(line.substr(eq + 1));
-        if (!path.empty() && !label.empty()) result.push_back({label, path, profile});
+        if (path.empty() || label.empty()) continue;
+        // One favourite per folder: a file from when a folder could be a
+        // favourite once per profile keeps the first.
+        std::wstring key = ToLowerCopy(path);
+        if (std::any_of(result.begin(), result.end(),
+                        [&](const FavouriteProject& f) { return ToLowerCopy(f.path) == key; })) {
+            continue;
+        }
+        result.push_back({label, path, profile});
     }
     return result;
 }
@@ -89,8 +97,8 @@ bool IsAlreadyOpen(const FavouriteProject& f, const std::vector<std::wstring>& o
     return false;
 }
 
-bool Matches(const FavouriteProject& f, const std::wstring& pathKey, const std::wstring& profile) {
-    return ToLowerCopy(f.path) == pathKey && SameClaudeProfile(f.profile, profile);
+bool Matches(const FavouriteProject& f, const std::wstring& pathKey) {
+    return ToLowerCopy(f.path) == pathKey;
 }
 
 std::vector<FavouriteProject> g_favourites;
@@ -110,44 +118,48 @@ std::vector<FavouriteProject> LoadFavourites() {
     return g_favourites;
 }
 
-bool IsFavourite(const std::wstring& path, const std::wstring& profile) {
+bool IsFavourite(const std::wstring& path) {
     EnsureLoaded();
     std::wstring key = ToLowerCopy(path);
     return std::any_of(g_favourites.begin(), g_favourites.end(),
-                       [&](const FavouriteProject& f) { return Matches(f, key, profile); });
+                       [&](const FavouriteProject& f) { return Matches(f, key); });
 }
 
 void AddFavourite(const std::wstring& label, const std::wstring& path, const std::wstring& profile) {
     EnsureLoaded();
-    if (path.empty() || IsFavourite(path, profile)) return;
+    if (path.empty() || IsFavourite(path)) return;
     g_favourites.push_back({label, path, profile});
     SaveAll(g_favourites);
     Log(L"favourites: added [%ls] (%ls) as Claude profile [%ls]", label.c_str(), path.c_str(),
         ClaudeProfileName(profile).c_str());
 }
 
-void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& profile, const std::wstring& label) {
+void RefreshFavourite(const std::wstring& path, const std::wstring& profile, const std::wstring& label) {
     EnsureLoaded();
     std::wstring key = ToLowerCopy(path);
     for (FavouriteProject& f : g_favourites) {
-        if (!Matches(f, key, profile)) continue;
-        if (f.label != label) {
-            f.label = label;
-            SaveAll(g_favourites);
+        if (!Matches(f, key)) continue;
+        if (f.label == label && f.profile == profile) return;
+        if (!SameClaudeProfile(f.profile, profile)) {
+            Log(L"favourites: [%ls] is open as Claude profile [%ls] now -- it opens as that from here on",
+                f.path.c_str(), ClaudeProfileName(profile).c_str());
         }
+        f.label = label;
+        f.profile = profile;
+        SaveAll(g_favourites);
         return;
     }
 }
 
-void RemoveFavourite(const std::wstring& path, const std::wstring& profile) {
+void RemoveFavourite(const std::wstring& path) {
     EnsureLoaded();
     std::wstring key = ToLowerCopy(path);
     auto it = std::remove_if(g_favourites.begin(), g_favourites.end(),
-                             [&](const FavouriteProject& f) { return Matches(f, key, profile); });
+                             [&](const FavouriteProject& f) { return Matches(f, key); });
     if (it == g_favourites.end()) return;
     g_favourites.erase(it, g_favourites.end());
     SaveAll(g_favourites);
-    Log(L"favourites: removed %ls as Claude profile [%ls]", path.c_str(), ClaudeProfileName(profile).c_str());
+    Log(L"favourites: removed %ls", path.c_str());
 }
 
 void OpenAllFavourites(HWND runningWindow, const std::vector<std::wstring>& alreadyOpenFolders, const wchar_t* reason) {

@@ -520,12 +520,14 @@ static int ResizeMarginFor(HWND target, const TrackedWindow& tw) {
 
 // Works out which Claude profile the window runs (see claude_profile.h's
 // ClaudeProfileOfWindow), logging when that changes. A WSLg window's Linux
-// VS Code runs none of them.
+// VS Code runs none of them. With nothing to go on -- a title still
+// settling, say -- the profile already worked out stands, so the window's
+// icon and favourite don't flicker.
 static void UpdateWindowProfile(HWND target, TrackedWindow& tw) {
     std::wstring profile;
     if (tw.wslDistro.empty()) {
         std::wstring path = tw.folderName.empty() ? L"" : ResolveFolderPath(tw.folderName, tw.repoName);
-        profile = ClaudeProfileOfWindow(path, tw.folderName);
+        if (!ClaudeProfileOfWindow(path, tw.folderName, profile) && tw.profileKnown) return;
     }
     if (tw.profileKnown && profile == tw.profile) return;
     if (tw.profileKnown || !profile.empty()) {

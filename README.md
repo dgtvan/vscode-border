@@ -267,8 +267,7 @@ menu. **Start VS Code** opens a brand-new, empty VS Code window -- with
 submenu of which profile to open it as. Below it, past a divider, is a
 **Favourites** submenu: **Open All** first (opens every
 favourite not already open), then your saved favourite projects/folders
-sorted by name (the same folder saved for several profiles sits together),
-one submenu per favourite -- hover a favourite's name to expand it to
+sorted by name, one submenu per favourite -- hover a favourite's name to expand it to
 **Open in New Window As** (a submenu of the Claude profiles to open it as;
 on an open folder it just brings its window forward, whatever profile that
 runs; a WSL folder lists only the default) and **Remove from Favourites**.
@@ -280,10 +279,10 @@ rest of the [item context menu](#project-list-hud-item-context-menu) above).
 Once that folder is a favourite, the same item's menu offers **Remove from
 Favourites** in its place. That only reaches a favourite while its window is
 open, though -- the "+" button's own menu is the way to remove one that
-isn't. Favourites are matched by folder path and Claude profile, not label
-text -- the same folder can be a favourite once for each profile it's opened
-as, so adding it from a window of one profile doesn't mark it in another
-profile's window -- and stored in
+isn't. A favourite is the folder, matched by its path (not label text),
+whatever [Claude profile](#claude-profiles) its window runs: the star shows
+for it in any profile. It opens as the profile the folder was last seen open
+as (**Open in New Window As** picks another). Favourites are stored in
 `favourites.ini` next to `config.ini`. Favourites are never opened
 automatically when the app starts -- use the "+" button's **Favourites >
 Open All** to open them all at once.

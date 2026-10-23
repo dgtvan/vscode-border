@@ -8,8 +8,10 @@
 // One user-saved project/folder, offered from the project list HUD's "+"
 // new-window button's menu -- clicking it opens `path` in a
 // brand-new VS Code window (see vscode_cli.h's OpenNewVSCodeWindow) as
-// Claude profile `profile`. A favourite is the folder *and* the profile it
-// was saved from, so the same folder can be a favourite once per profile.
+// Claude profile `profile`. A favourite is the folder, whatever profile its
+// window runs -- VS Code keeps one window per folder -- and `profile` is
+// just what it opens as: the one it was last seen open as (see
+// RefreshFavourite).
 struct FavouriteProject {
     std::wstring label; // display text shown in the favourites menu -- the item's label (alias, if any)
                         // as of the last time this path was seen open as a hub item (see
@@ -23,27 +25,26 @@ struct FavouriteProject {
 // Loads the persisted favourites list, in the order they were added.
 std::vector<FavouriteProject> LoadFavourites();
 
-// True if `path` is already saved as a favourite for `profile` (path
-// case-insensitive; empty `profile` is the default).
-bool IsFavourite(const std::wstring& path, const std::wstring& profile);
+// True if `path` is saved as a favourite (case-insensitive).
+bool IsFavourite(const std::wstring& path);
 
-// Adds `path` (labelled `label`) as a favourite for `profile` and persists
-// immediately to favourites.ini next to config.ini. No-op if `path` is
-// empty or already a favourite for that profile.
+// Adds `path` (labelled `label`, opening as Claude profile `profile`) as a
+// favourite and persists immediately to favourites.ini next to config.ini.
+// No-op if `path` is empty or already a favourite.
 void AddFavourite(const std::wstring& label, const std::wstring& path, const std::wstring& profile);
 
-// Removes `profile`'s favourite at `path` (case-insensitive match) and
-// persists immediately. No-op if not present.
-void RemoveFavourite(const std::wstring& path, const std::wstring& profile);
+// Removes the favourite at `path` (case-insensitive match) and persists
+// immediately. No-op if not present.
+void RemoveFavourite(const std::wstring& path);
 
-// Updates the stored label for `profile`'s favourite at `path` (case-insensitive
-// match) to `label` and persists immediately, if it differs from what's
-// currently stored. No-op if `path` isn't a favourite or the label already
-// matches. Lets a favourite's menu entry track its live hub item's current
-// label (title reparse, alias change, ...) instead of staying frozen at
-// whatever label was captured when it was added -- see FavouriteProject::
-// label's comment.
-void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& profile, const std::wstring& label);
+// Updates the stored label and profile of the favourite at `path`
+// (case-insensitive match) to those of its open window, persisting
+// immediately if either differs. No-op if `path` isn't a favourite. Lets a
+// favourite's menu entry track its live hub item's current label (title
+// reparse, alias change, ...) instead of staying frozen at whatever label
+// was captured when it was added -- see FavouriteProject::label's comment
+// -- and open as the profile the folder was last used with.
+void RefreshFavourite(const std::wstring& path, const std::wstring& profile, const std::wstring& label);
 
 // Opens every saved favourite whose folder isn't already open, each in its
 // own new VS Code window as its own profile. Called from the hub "+"
