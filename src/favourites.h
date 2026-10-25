@@ -14,6 +14,9 @@ struct FavouriteProject {
                         // RefreshFavouriteLabel), not necessarily its live value if the project isn't
                         // currently open
     std::wstring path;  // absolute folder path passed to the VS Code CLI shim
+    std::wstring aliasKey; // the hub item's alias key (see label_alias.h) as of the same moment as `label`,
+                           // so its alias can be set from the favourites menu while the folder isn't open;
+                           // empty for a favourite saved before this was recorded and not seen open since
 };
 
 // Loads the persisted favourites list, in the order they were added.
@@ -22,19 +25,19 @@ std::vector<FavouriteProject> LoadFavourites();
 // True if `path` is saved as a favourite (case-insensitive).
 bool IsFavourite(const std::wstring& path);
 
-// Adds `path` (labelled `label`) as a favourite and persists immediately to
-// favourites.ini next to config.ini. No-op if `path` is empty or already a
-// favourite.
-void AddFavourite(const std::wstring& label, const std::wstring& path);
+// Adds `path` (labelled `label`, alias key `aliasKey`) as a favourite and
+// persists immediately to favourites.ini next to config.ini. No-op if `path`
+// is empty or already a favourite.
+void AddFavourite(const std::wstring& label, const std::wstring& path, const std::wstring& aliasKey);
 
 // Removes the favourite at `path` (case-insensitive match) and persists
 // immediately. No-op if not present.
 void RemoveFavourite(const std::wstring& path);
 
-// Updates the stored label of the favourite at `path` (case-insensitive
-// match) to `label`, persisting immediately if it differs. No-op if `path`
-// isn't a favourite. Lets a favourite's menu entry track its live hub item's
-// current label (title reparse, alias change, ...) instead of staying frozen
-// at whatever label was captured when it was added -- see
+// Updates the stored label and alias key of the favourite at `path`
+// (case-insensitive match), persisting immediately if either differs. No-op
+// if `path` isn't a favourite. Lets a favourite's menu entry track its live
+// hub item's current label (title reparse, alias change, ...) instead of
+// staying frozen at whatever label was captured when it was added -- see
 // FavouriteProject::label's comment.
-void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label);
+void RefreshFavouriteLabel(const std::wstring& path, const std::wstring& label, const std::wstring& aliasKey);

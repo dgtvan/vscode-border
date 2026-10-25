@@ -74,6 +74,17 @@ std::wstring ResolveAlias(const std::wstring& key, const std::wstring& fallback)
     return it != aliases.end() ? it->second : fallback;
 }
 
+std::wstring FindAliasKey(const std::wstring& alias) {
+    EnsureLoaded();
+    std::wstring found;
+    for (const auto& entry : g_aliases) {
+        if (entry.second != alias) continue;
+        if (!found.empty()) return L"";
+        found = entry.first;
+    }
+    return found;
+}
+
 void SetAlias(const std::wstring& key, const std::wstring& alias) {
     EnsureLoaded();
     bool session = IsSessionAliasKey(key);

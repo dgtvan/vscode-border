@@ -132,11 +132,13 @@ struct ProjectListHudState {
     std::wstring scenarioKey; // current monitor scenario (see monitor_scenario.h) -- tracked so a
                               // WM_DISPLAYCHANGE can tell whether the active monitor set actually
                               // changed, and so a completed drag knows which scenario to save under
-    HWND editControl = nullptr; // non-null while inline-editing an item's alias (see BeginAliasEdit)
+    HWND editControl = nullptr; // non-null while editing an alias (see BeginAliasEditBox)
     HFONT editFont = nullptr;
-    int editIndex = -1;
+    std::wstring editAliasKey;      // the key that alias edit sets
+    int editIndex = -1;             // the hub item being edited, -1 for a favourite
+    std::wstring editFavouritePath; // the favourite being edited, empty for a hub item
     bool contextMenuOpen = false; // true for the duration of TrackPopupMenu's modal loop -- see
-                                   // UpdateProjectListHud's guard for why this (and editIndex >= 0)
+                                   // UpdateProjectListHud's guard for why this (and editControl)
                                    // needs to suppress resyncs while set
     bool pulseTimerActive = false; // mirrors whether kClaudePulseTimerId is currently running
     bool docked = false; // registered as a bottom-edge AppBar, i.e. the hub is on -- see SetProjectListHudDocked
@@ -642,30 +644,47 @@ static std::wstring TrimWhitespace(const std::wstring& s) {
     return s.substr(a, b - a + 1);
 }
 
+// Sets (or, with an empty `alias`, clears) the alias for a favourite not
+// necessarily open, and records the resulting label on the favourite right
+// away rather than waiting for its folder to be seen open. A hub item for
+// the same key picks the alias up on its next sync (see tracking.cpp).
+static void SetFavouriteAlias(const std::wstring& path, const std::wstring& aliasKey, const std::wstring& alias) {
+    SetAlias(aliasKey, alias);
+    RefreshFavouriteLabel(path, alias.empty() ? aliasKey : alias, aliasKey);
+}
+
 // Ends the in-progress alias edit (if any): on commit, saves the trimmed
-// text as the new alias for that item's aliasKey (an empty result removes
-// the alias, reverting to the raw label) and updates the entry's displayed
-// text immediately. Guarding on editIndex/editControl up front, and
-// clearing them *before* DestroyWindow, makes this safe to call
+// text as the new alias for editAliasKey (an empty result removes the
+// alias, reverting to the raw label) and updates the edited hub item's or
+// favourite's displayed text immediately. Guarding on editControl up front,
+// and clearing it *before* DestroyWindow, makes this safe to call
 // re-entrantly -- DestroyWindow on a focused window synchronously fires
 // WM_KILLFOCUS, which would otherwise call back into this function while
 // it's still unwinding.
 static void EndAliasEdit(HWND hud, ProjectListHudState* state, bool commit) {
-    if (!state || state->editIndex < 0 || !state->editControl) return;
+    if (!state || !state->editControl) return;
     int index = state->editIndex;
+    std::wstring aliasKey = state->editAliasKey;
+    std::wstring favouritePath = state->editFavouritePath;
     HWND edit = state->editControl;
     HFONT font = state->editFont;
     state->editIndex = -1;
+    state->editAliasKey.clear();
+    state->editFavouritePath.clear();
     state->editControl = nullptr;
     state->editFont = nullptr;
 
-    if (commit && index < (int)state->entries.size()) {
+    if (commit) {
         wchar_t buf[256] = {};
         GetWindowTextW(edit, buf, 255);
         std::wstring newAlias = TrimWhitespace(buf);
-        const ProjectListHudEntry& entry = state->entries[index];
-        SetAlias(entry.aliasKey, newAlias);
-        state->entries[index].label = newAlias.empty() ? entry.rawLabel : newAlias;
+        if (!favouritePath.empty()) {
+            SetFavouriteAlias(favouritePath, aliasKey, newAlias);
+            Log(L"favourites: alias for [%ls] set to [%ls]", aliasKey.c_str(), newAlias.c_str());
+        } else if (index >= 0 && index < (int)state->entries.size() && state->entries[index].aliasKey == aliasKey) {
+            SetAlias(aliasKey, newAlias);
+            state->entries[index].label = newAlias.empty() ? state->entries[index].rawLabel : newAlias;
+        }
     }
 
     DestroyWindow(edit);
@@ -689,13 +708,14 @@ static LRESULT CALLBACK AliasEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam
     return CallWindowProcW(origProc, hwnd, msg, wParam, lParam);
 }
 
-// Turns item `index` into an inline text box (prefilled with its current
-// display text) so the user can type a new alias -- Enter/focus-loss
-// commits, Escape cancels. See EndAliasEdit for how the result is applied.
+// Opens a text box at `screenRect` (prefilled with `text`) so the user can
+// type a new alias for `aliasKey` -- Enter/focus-loss commits, Escape
+// cancels. See EndAliasEdit for how the result is applied to hub item
+// `index` or, when `favouritePath` is set, that favourite.
 //
 // The edit box is a genuine top-level window OWNED by (not a WS_CHILD of)
-// the HUD, positioned in screen coordinates over the item -- not a child
-// window in HUD client coordinates. A WS_CHILD control does not reliably
+// the HUD, positioned in screen coordinates -- not a child window in HUD
+// client coordinates. A WS_CHILD control does not reliably
 // repaint on top of a parent that paints itself via UpdateLayeredWindow
 // (as the HUD does, for its per-pixel-alpha chips): it still receives
 // keyboard input, but typed characters don't visibly appear until
@@ -703,19 +723,14 @@ static LRESULT CALLBACK AliasEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam
 // top-level window composites normally regardless, sidestepping that
 // entirely. GetParent() on an owned popup still returns the owner, so
 // AliasEditSubclassProc's lookup of the HUD's state is unaffected.
-static void BeginAliasEdit(HWND hud, ProjectListHudState* state, int index) {
-    if (!state || index < 0 || index >= (int)state->itemRects.size()) return;
+static void BeginAliasEditBox(HWND hud, ProjectListHudState* state, const RECT& screenRect, const std::wstring& text,
+                              const std::wstring& aliasKey, int index, const std::wstring& favouritePath) {
     EndAliasEdit(hud, state, false); // defensive: cancel any stray edit already in progress
 
-    const RECT& item = state->itemRects[index];
-    int screenX = state->x + item.left;
-    int screenY = state->y + item.top;
-    int width = item.right - item.left;
-    int height = item.bottom - item.top;
-
-    HWND edit = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"EDIT", state->entries[index].label.c_str(),
+    HWND edit = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"EDIT", text.c_str(),
                                  WS_POPUP | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                 screenX, screenY, width, height,
+                                 screenRect.left, screenRect.top, screenRect.right - screenRect.left,
+                                 screenRect.bottom - screenRect.top,
                                  hud, nullptr, (HINSTANCE)GetWindowLongPtrW(hud, GWLP_HINSTANCE), nullptr);
     if (!edit) return;
 
@@ -730,7 +745,35 @@ static void BeginAliasEdit(HWND hud, ProjectListHudState* state, int index) {
 
     state->editControl = edit;
     state->editFont = font;
+    state->editAliasKey = aliasKey;
     state->editIndex = index;
+    state->editFavouritePath = favouritePath;
+}
+
+// Turns item `index` into an inline alias text box over the item itself
+// (see BeginAliasEditBox).
+static void BeginAliasEdit(HWND hud, ProjectListHudState* state, int index) {
+    if (!state || index < 0 || index >= (int)state->itemRects.size() || index >= (int)state->entries.size()) return;
+    const RECT& item = state->itemRects[index];
+    RECT screenRect = {state->x + item.left, state->y + item.top, state->x + item.right, state->y + item.bottom};
+    const ProjectListHudEntry& entry = state->entries[index];
+    BeginAliasEditBox(hud, state, screenRect, entry.label, entry.aliasKey, index, L"");
+}
+
+// Opens an alias text box for favourite `path` (which may not be open as a
+// hub item), just above the "+" button whose menu it was picked from, as
+// wide as a hub item.
+static void BeginFavouriteAliasEdit(HWND hud, ProjectListHudState* state, const std::wstring& path,
+                                    const std::wstring& label, const std::wstring& aliasKey) {
+    const RECT& button = state->actionButtonRects[HudActionNewWindow];
+    int width = state->itemRects.empty() ? 0 : (int)(state->itemRects[0].right - state->itemRects[0].left);
+    width = std::max(width, state->fontSize * 16);
+    int height = std::max((int)(button.bottom - button.top), state->rowHeight);
+    int right = state->x + button.right;
+    int bottom = state->y + button.top - 4;
+    RECT screenRect = {std::max(state->x, right - width), bottom - height, 0, bottom};
+    screenRect.right = screenRect.left + width;
+    BeginAliasEditBox(hud, state, screenRect, label, aliasKey, -1, path);
 }
 
 // Clears whatever alias is set for item `index`, reverting its displayed
@@ -906,7 +949,7 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     else if (cmd == 2) ClearAlias(hud, state, index);
     else if (cmd == 3) {
         const ProjectListHudEntry& entry = state->entries[index];
-        AddFavourite(entry.label, entry.path);
+        AddFavourite(entry.label, entry.path, entry.aliasKey);
     } else if (cmd == 4) {
         RemoveFavourite(state->entries[index].path);
     } else if (cmd == 5) {
@@ -932,8 +975,10 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // each as its own submenu -- hovering a
 // favourite's name expands it to "Open in New Window As" (a submenu of every
 // profile it could open as -- see vscode_cli.h's OpenNewVSCodeWindow; on an
-// open folder it just re-activates its window, whatever profile that runs)
-// and "Remove from Favourites". A plain
+// open folder it just re-activates its window, whatever profile that runs),
+// "Set Alias..." / "Clear Alias" (as on a hub item, but with the edit box
+// above the "+" button, since the folder may not be open) and "Remove from
+// Favourites". A plain
 // Win32 popup menu item can't both carry its own click action and expand a
 // submenu on hover, so nesting "open" one level down (rather than a bare
 // top-level click) is what buys room for "remove" to live right next to it,
@@ -945,16 +990,31 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     std::vector<FavouriteProject> favourites = LoadFavourites();
     const std::vector<std::wstring> profiles = OtherClaudeProfiles();
 
+    // Show each favourite by its live alias, so one set from here (or from
+    // label_aliases.ini) shows without waiting for the folder to be opened.
+    // A favourite with no recorded alias key (see FavouriteProject::aliasKey)
+    // has its label taken as the alias of whichever key has it, else as the
+    // raw label -- the only two things it can have been recorded as.
+    for (FavouriteProject& f : favourites) {
+        if (f.aliasKey.empty()) {
+            std::wstring key = FindAliasKey(f.label);
+            f.aliasKey = key.empty() ? f.label : key;
+        }
+        f.label = ResolveAlias(f.aliasKey, f.aliasKey);
+    }
+
     std::stable_sort(favourites.begin(), favourites.end(),
                      [](const FavouriteProject& a, const FavouriteProject& b) {
         return CompareStringEx(LOCALE_NAME_USER_DEFAULT, NORM_IGNORECASE | SORT_DIGITSASNUMBERS, a.label.c_str(), -1,
                                b.label.c_str(), -1, nullptr, nullptr, 0) == CSTR_LESS_THAN;
     });
 
-    // Command ids: per favourite i, remove = 1 + i, open as profile slot j =
-    // kOpenAsBase + i*kOpenAsStride + j; start as profile slot j =
+    // Command ids: per favourite i, remove = 1 + i, set alias =
+    // kSetAliasBase + i, clear alias = kClearAliasBase + i, open as profile
+    // slot j = kOpenAsBase + i*kOpenAsStride + j; start as profile slot j =
     // kStartAsBase + j, well above any favourite's -- decoded back on return
     // below. A profile slot is 0 for the default, 1 + i for profiles[i].
+    const UINT kSetAliasBase = 0x400, kClearAliasBase = 0x800;
     const UINT kOpenAsBase = 0x1000, kOpenAsStride = 8; // stride > the 5 profile slots
     const UINT kStartAsBase = 0x8000;
     auto slotProfile = [&](size_t slot) { return slot == 0 ? std::wstring() : profiles[slot - 1]; };
@@ -984,6 +1044,11 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
             }
             AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(sub, MF_STRING, kSetAliasBase + (UINT)i, L"Set Alias...");
+            if (favourites[i].label != favourites[i].aliasKey) {
+                AppendMenuW(sub, MF_STRING, kClearAliasBase + (UINT)i, L"Clear Alias");
+            }
+            AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(sub, MF_STRING, removeId, L"Remove from Favourites");
             AppendMenuW(favMenu, MF_POPUP, (UINT_PTR)sub, favourites[i].label.c_str());
         }
@@ -1007,6 +1072,19 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
         size_t slot = (size_t)(cmd - (int)kOpenAsBase) % kOpenAsStride;
         if (i >= favourites.size() || slot > profiles.size()) return;
         OpenNewVSCodeWindow(AnyTrackedWindow(state), favourites[i].path, L"hud-favourite-open-as", slotProfile(slot));
+        return;
+    }
+    if (cmd >= (int)kSetAliasBase) {
+        bool clear = cmd >= (int)kClearAliasBase;
+        size_t i = (size_t)(cmd - (int)(clear ? kClearAliasBase : kSetAliasBase));
+        if (i >= favourites.size()) return;
+        const FavouriteProject& f = favourites[i];
+        if (clear) {
+            Log(L"favourites: cleared alias [%ls] of [%ls]", f.label.c_str(), f.aliasKey.c_str());
+            SetFavouriteAlias(f.path, f.aliasKey, L"");
+        } else {
+            BeginFavouriteAliasEdit(hud, state, f.path, f.label, f.aliasKey);
+        }
         return;
     }
     size_t i = (size_t)(cmd - 1);
@@ -2398,7 +2476,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     // an in-progress drag's own live reordering. Skip the sync entirely
     // until whichever is active finishes; nothing here needs to be
     // live-updated while the user's attention is on any of them anyway.
-    if (state->contextMenuOpen || state->editIndex >= 0 || state->dragMode != ProjectListHudState::DragNone) {
+    if (state->contextMenuOpen || state->editControl || state->dragMode != ProjectListHudState::DragNone) {
         return;
     }
     // No reserved band (the AppBar couldn't be registered -- see
@@ -2434,7 +2512,7 @@ void UpdateProjectListHud(HWND hud, const std::vector<ProjectListHudEntry>& entr
     // window title reparses differently once VS Code picks up this app's
     // window.title setting, or the user sets/changes an alias).
     for (const ProjectListHudEntry& e : settled) {
-        if (!e.path.empty() && !e.loading) RefreshFavouriteLabel(e.path, e.label);
+        if (!e.path.empty() && !e.loading) RefreshFavouriteLabel(e.path, e.label, e.aliasKey);
     }
 
     std::vector<ProjectListHudEntry> sorted = settled;

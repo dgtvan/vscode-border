@@ -29,6 +29,11 @@ bool IsSessionAliasKey(const std::wstring& key);
 // `fallback` (the raw label) unchanged if none is set.
 std::wstring ResolveAlias(const std::wstring& key, const std::wstring& fallback);
 
+// The persisted key whose alias is `alias`, or empty if none or more than
+// one has it -- the reverse of ResolveAlias, for text recorded without its
+// key (see favourites.h's FavouriteProject::aliasKey).
+std::wstring FindAliasKey(const std::wstring& alias);
+
 // Sets (or, if `alias` is empty after trimming, removes) the alias for
 // `key`, and updates the in-memory cache so ResolveAlias reflects it right
 // away. A non-session key is also persisted immediately to

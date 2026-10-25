@@ -269,7 +269,10 @@ submenu of which profile to open it as. Below it, past a divider, is a
 sorted by name, one submenu per favourite -- hover a favourite's name to expand it to
 **Open in New Window As** (a submenu of the Claude profiles to open it as;
 on an open folder it just brings its window forward, whatever profile that
-runs) and **Remove from Favourites**.
+runs), **Set Alias...** / **Clear Alias** (the same
+[aliases](#project-list-hud-aliases) as on a HUD item, so a favourite can be
+renamed without opening it -- the edit box appears just above the "+"
+button) and **Remove from Favourites**.
 
 To add a favourite, right-click any regular item (or its border label
 chip) and choose **Add to Favourites** -- this saves the window's currently
@@ -281,8 +284,10 @@ open, though -- the "+" button's own menu is the way to remove one that
 isn't. A favourite is the folder, matched by its path (not label text),
 whatever [Claude profile](#claude-profiles) its window runs: the star shows
 for it in any profile, and it stores no profile -- **Open in New Window As**
-picks one each time. Favourites are stored in `favourites.ini` next to
-`config.ini`. Favourites are never opened automatically.
+picks one each time. A favourite's alias is keyed by the label its window
+showed when last seen open (for a git repo that includes the branch), so it
+applies again as long as the folder opens to the same label. Favourites are
+stored in `favourites.ini` next to `config.ini`. Favourites are never opened automatically.
 
 ### AI status indicator
 
