@@ -188,7 +188,7 @@ the end until you place them. The order is matched by label text (same
 caveat as aliases: two windows sharing an identical label are kept
 adjacent to each other, not independently ordered, and a `(no folder)`
 window keeps its place only while it stays open). An item can be dropped
-anywhere in the list, and a [favourite](#project-list-hud-favourites) is
+anywhere in the list, and a [favourite](#project-list-hud-favourites-and-recent-folders) is
 ordered like any other item -- being one only adds its star, it doesn't
 move it. The order lasts until the app exits and isn't saved -- no project
 is reopened at startup, so there would be nothing for a saved order to
@@ -221,7 +221,7 @@ favourites, close.
   [aliases](#project-list-hud-aliases) below.
 - **Add to Favourites** / **Remove from Favourites** save or drop that
   folder from the "+" button's favourites menu -- see
-  [favourites](#project-list-hud-favourites) below.
+  [favourites](#project-list-hud-favourites-and-recent-folders) below.
 
 The directory and favourites groups act on the folder the window actually
 has open -- a worktree or a subdirectory of a repo, not the repo's root --
@@ -259,12 +259,13 @@ is never saved to `label_aliases.ini`, since there's nothing to recognize
 the window by after it closes or the app restarts. Opening a folder in that
 window switches it over to the folder's own alias, if any.
 
-### Project list HUD favourites
+### Project list HUD favourites and recent folders
 
 Clicking the fixed "+" square at the end of the project list HUD opens a
 menu. **Start VS Code** opens a brand-new, empty VS Code window -- with
 [Claude profiles](#claude-profiles) configured besides the default it's a
-submenu of which profile to open it as. Below it, past a divider, is a
+submenu of which profile to open it as. Below it, past a divider, is
+**Recent** (see below), then past another divider a
 **Favourites** submenu: your saved favourite projects/folders
 sorted by name, one submenu per favourite -- hover a favourite's name to expand it to
 **Open in New Window As** (a submenu of the Claude profiles to open it as;
@@ -288,6 +289,15 @@ picks one each time. A favourite's alias is keyed by the label its window
 showed when last seen open (for a git repo that includes the branch), so it
 applies again as long as the folder opens to the same label. Favourites are
 stored in `favourites.ini` next to `config.ini`. Favourites are never opened automatically.
+
+The **Recent** submenu lists the last 10 folders VS Code
+opened (stable and Insiders together), most recent first, whether they're
+open right now or a favourite or not; folders that no longer exist are left
+out. It comes from VS Code's own records (`workspaceStorage`), so it also
+covers folders opened before the app was running. Each one has the same
+submenu as a favourite, with **Add to Favourites** when it isn't one yet.
+Its name and alias follow the same label a window with that folder open
+would show -- for a git checkout, the repo and the branch it's on now.
 
 ### AI status indicator
 

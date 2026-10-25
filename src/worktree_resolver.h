@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 // Given a git repo name as shown by VS Code's ${activeRepositoryName} (which,
 // inside a git worktree checkout, is actually the *worktree's* folder name,
@@ -28,6 +29,20 @@ std::wstring ResolveMainRepoName(const std::wstring& repoName);
 // recorded, or a multi-root workspace, which workspace.json doesn't expose
 // as a single folder path).
 std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& repoName);
+
+// Up to `max` folders VS Code has recorded in workspaceStorage that still
+// exist, most recently used first (by when VS Code last wrote each one's
+// storage -- see LastUsedTime in the definition), one per folder across
+// stable and Insiders. Scans from disk on every call, so it's current
+// whenever a menu asks.
+std::vector<std::wstring> RecentFolders(size_t max);
+
+// The alias key a window with `folder` open would get (see tracking.cpp's
+// ApplyLabelForTitle), worked out without a window: "<repo> - <branch>" from
+// the git checkout `folder` is in (its root's name, worktree-substituted as
+// ResolveMainRepoName does, and the branch in its HEAD -- the first 8
+// characters of the commit when detached), else `folder`'s own name.
+std::wstring FolderAliasKey(const std::wstring& folder);
 
 // Rescans from disk right away. Wired up to the tray's "Reload Config"
 // action so newly created worktrees can be picked up without restarting

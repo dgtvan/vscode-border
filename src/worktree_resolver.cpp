@@ -179,20 +179,24 @@ static void ScanUserDataDir(const std::wstring& userDir) {
     LogDiag(L"worktree resolver: scanned %d workspaceStorage entries under [%ls]", entryCount, userDir.c_str());
 }
 
-static void BuildCache() {
-    g_cache.clear();
-    g_pathCache.clear();
-
+// The stable and Insiders VS Code user data folders, whether or not they
+// exist; empty if %APPDATA% isn't available.
+static std::vector<std::wstring> VSCodeUserDirs() {
     wchar_t appData[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) {
         Log(L"worktree resolver: %%APPDATA%% not available");
-        return;
+        return {};
     }
-
     std::wstring base(appData);
-    ScanUserDataDir(base + L"\\Code\\User");
-    ScanUserDataDir(base + L"\\Code - Insiders\\User");
+    return {base + L"\\Code\\User", base + L"\\Code - Insiders\\User"};
+}
+
+static void BuildCache() {
+    g_cache.clear();
+    g_pathCache.clear();
+
+    for (const std::wstring& userDir : VSCodeUserDirs()) ScanUserDataDir(userDir);
 
     Log(L"worktree resolver: cache built, %zu folder name(s), %zu worktree(s) mapped", g_pathCache.size(),
         g_cache.size());
@@ -329,6 +333,89 @@ std::wstring ResolveFolderPath(const std::wstring& name, const std::wstring& rep
     LogDiag(L"worktree resolver: %zu folders named [%ls] (repo=[%ls]) -> [%ls] exists=%d inRepo=%d",
             candidates.size(), name.c_str(), repoName.c_str(), best->path.c_str(), bestExists, bestInRepo);
     return best->path;
+}
+
+std::vector<std::wstring> RecentFolders(size_t max) {
+    std::vector<std::pair<ULONGLONG, FolderCandidate>> found;
+    for (const std::wstring& userDir : VSCodeUserDirs()) {
+        ForEachStorageDir(userDir, [&](const std::wstring& storageDir) {
+            FolderCandidate c;
+            std::string uri;
+            if (!ReadRecordedFolder(storageDir, c.path, uri) || c.path.empty()) return;
+            c.storageDir = storageDir;
+            found.push_back({LastUsedTime(c), c});
+        });
+    }
+    std::stable_sort(found.begin(), found.end(),
+                     [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    std::vector<std::wstring> result;
+    std::vector<std::wstring> seen; // lowercased, alongside `result`
+    for (const auto& f : found) {
+        if (result.size() >= max) break;
+        std::wstring key = ToLowerCopy(f.second.path);
+        if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
+        if (!IsExistingDirectory(f.second.path)) continue;
+        seen.push_back(key);
+        result.push_back(f.second.path);
+    }
+    return result;
+}
+
+static std::wstring LeafName(const std::wstring& path) {
+    size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+static std::string TrimLine(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+std::wstring FolderAliasKey(const std::wstring& folder) {
+    // The checkout's root: the nearest folder (from `folder` up) with a
+    // ".git" -- a directory in a normal clone, a "gitdir: <path>" file in a
+    // worktree or submodule.
+    std::wstring root = folder, gitDir;
+    while (!root.empty()) {
+        std::wstring dotGit = root + L"\\.git";
+        DWORD attrs = GetFileAttributesW(dotGit.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES) {
+            if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+                gitDir = dotGit;
+            } else {
+                std::string line = TrimLine(ReadFileBytes(dotGit));
+                const std::string prefix = "gitdir:";
+                if (line.compare(0, prefix.size(), prefix) == 0) {
+                    gitDir = Utf8ToWide(TrimLine(line.substr(prefix.size())));
+                    std::replace(gitDir.begin(), gitDir.end(), L'/', L'\\');
+                    bool absolute = (gitDir.size() > 1 && gitDir[1] == L':') || gitDir.compare(0, 2, L"\\\\") == 0;
+                    if (!gitDir.empty() && !absolute) gitDir = root + L"\\" + gitDir;
+                }
+            }
+            break;
+        }
+        size_t slash = root.find_last_of(L"\\/");
+        if (slash == std::wstring::npos) break;
+        root.erase(slash);
+    }
+    if (gitDir.empty()) return LeafName(folder);
+
+    std::string head = TrimLine(ReadFileBytes(gitDir + L"\\HEAD"));
+    std::wstring branch;
+    const std::string refPrefix = "ref: refs/heads/";
+    if (head.compare(0, refPrefix.size(), refPrefix) == 0) {
+        branch = Utf8ToWide(head.substr(refPrefix.size()));
+    } else if (head.size() >= 8 && head.compare(0, 4, "ref:") != 0) {
+        branch = Utf8ToWide(head.substr(0, 8));
+    }
+    if (branch.empty()) return LeafName(folder);
+
+    std::wstring repo = LeafName(root);
+    std::wstring mainRepo = ResolveMainRepoName(repo);
+    return (mainRepo.empty() ? repo : mainRepo) + L" - " + branch;
 }
 
 void RefreshWorktreeCache() {

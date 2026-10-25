@@ -10,6 +10,7 @@
 #include "taskbar_backdrop.h"
 #include "vscode_cli.h"
 #include "window_discovery.h"
+#include "worktree_resolver.h"
 
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -136,7 +137,7 @@ struct ProjectListHudState {
     HFONT editFont = nullptr;
     std::wstring editAliasKey;      // the key that alias edit sets
     int editIndex = -1;             // the hub item being edited, -1 for a favourite
-    std::wstring editFavouritePath; // the favourite being edited, empty for a hub item
+    std::wstring editFavouritePath; // the favourite or recent folder being edited, empty for a hub item
     bool contextMenuOpen = false; // true for the duration of TrackPopupMenu's modal loop -- see
                                    // UpdateProjectListHud's guard for why this (and editControl)
                                    // needs to suppress resyncs while set
@@ -970,23 +971,26 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // submenu of which profile to open the new window as -- the default (bolded,
 // with its icon if claude_profile_1_icon is set), then the others in slot
 // order, each with its icon; without any it's a plain item opening the
-// window as the default. Then, after a separator, a "Favourites" submenu
-// holding the saved favourite projects (see favourites.h) sorted by label,
-// each as its own submenu -- hovering a
-// favourite's name expands it to "Open in New Window As" (a submenu of every
-// profile it could open as -- see vscode_cli.h's OpenNewVSCodeWindow; on an
-// open folder it just re-activates its window, whatever profile that runs),
-// "Set Alias..." / "Clear Alias" (as on a hub item, but with the edit box
-// above the "+" button, since the folder may not be open) and "Remove from
-// Favourites". A plain
+// window as the default. Then, after a separator, a "Recent" submenu
+// holding the last kRecentFolderCount folders VS Code opened that still
+// exist (see worktree_resolver.h's RecentFolders), most recent first -- open
+// or not, favourite or not -- and, after another separator, a "Favourites"
+// submenu holding the saved favourite projects (see favourites.h) sorted by
+// label. Each project is its own
+// submenu -- hovering its name expands it to "Open in New Window As" (a
+// submenu of every profile it could open as -- see vscode_cli.h's
+// OpenNewVSCodeWindow; on an open folder it just re-activates its window,
+// whatever profile that runs), "Set Alias..." / "Clear Alias" (as on a hub
+// item, but with the edit box above the "+" button, since the folder may not
+// be open) and "Add to Favourites" / "Remove from Favourites". A plain
 // Win32 popup menu item can't both carry its own click action and expand a
 // submenu on hover, so nesting "open" one level down (rather than a bare
-// top-level click) is what buys room for "remove" to live right next to it,
-// without a separate top-level "Remove Favourite" list to keep in sync
-// with this one. This is the only way to open (or remove) a favourite that
+// top-level click) is what buys room for the other actions to live right
+// next to it. This is the only way to open (or remove) a favourite that
 // isn't currently open as a hub item -- ShowItemContextMenu's own "Remove
 // from Favourites" only reaches a favourite while it's a live entry.
 static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
+    const size_t kRecentFolderCount = 10;
     std::vector<FavouriteProject> favourites = LoadFavourites();
     const std::vector<std::wstring> profiles = OtherClaudeProfiles();
 
@@ -1009,10 +1013,31 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
                                b.label.c_str(), -1, nullptr, nullptr, 0) == CSTR_LESS_THAN;
     });
 
-    // Command ids: per favourite i, remove = 1 + i, set alias =
+    // Favourites first, then recent folders: `projects` is what every
+    // per-project command id below indexes. A recent folder's alias key is
+    // its open hub item's, else its favourite's, else worked out from the
+    // folder (FolderAliasKey), so an alias set on any of them is the same one.
+    std::vector<FavouriteProject> projects = favourites;
+    const size_t favouriteCount = projects.size();
+    for (const std::wstring& path : RecentFolders(kRecentFolderCount)) {
+        std::wstring aliasKey;
+        for (const ProjectListHudEntry& e : state->entries) {
+            if (!e.loading && _wcsicmp(e.path.c_str(), path.c_str()) == 0) {
+                aliasKey = e.aliasKey;
+                break;
+            }
+        }
+        for (size_t i = 0; aliasKey.empty() && i < favouriteCount; i++) {
+            if (_wcsicmp(projects[i].path.c_str(), path.c_str()) == 0) aliasKey = projects[i].aliasKey;
+        }
+        if (aliasKey.empty()) aliasKey = FolderAliasKey(path);
+        projects.push_back({ResolveAlias(aliasKey, aliasKey), path, aliasKey});
+    }
+
+    // Command ids: per project i, toggle favourite = 1 + i, set alias =
     // kSetAliasBase + i, clear alias = kClearAliasBase + i, open as profile
     // slot j = kOpenAsBase + i*kOpenAsStride + j; start as profile slot j =
-    // kStartAsBase + j, well above any favourite's -- decoded back on return
+    // kStartAsBase + j, well above any project's -- decoded back on return
     // below. A profile slot is 0 for the default, 1 + i for profiles[i].
     const UINT kSetAliasBase = 0x400, kClearAliasBase = 0x800;
     const UINT kOpenAsBase = 0x1000, kOpenAsStride = 8; // stride > the 5 profile slots
@@ -1031,12 +1056,11 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
-    HMENU favMenu = CreatePopupMenu();
-    if (favourites.empty()) {
-        AppendMenuW(favMenu, MF_STRING | MF_GRAYED, 0, L"(No Favourites)");
-    } else {
-        for (size_t i = 0; i < favourites.size(); i++) {
-            UINT removeId = (UINT)(1 + i);
+    auto appendProjects = [&](size_t first, size_t last, const wchar_t* title, const wchar_t* emptyText) {
+        HMENU listMenu = CreatePopupMenu();
+        if (first == last) AppendMenuW(listMenu, MF_STRING | MF_GRAYED, 0, emptyText);
+        for (size_t i = first; i < last; i++) {
+            const FavouriteProject& p = projects[i];
             HMENU sub = CreatePopupMenu();
             HMENU asMenu = CreatePopupMenu();
             for (size_t slot = 0; slot <= profiles.size(); slot++) {
@@ -1045,21 +1069,23 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
             AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(sub, MF_STRING, kSetAliasBase + (UINT)i, L"Set Alias...");
-            if (favourites[i].label != favourites[i].aliasKey) {
-                AppendMenuW(sub, MF_STRING, kClearAliasBase + (UINT)i, L"Clear Alias");
-            }
+            if (p.label != p.aliasKey) AppendMenuW(sub, MF_STRING, kClearAliasBase + (UINT)i, L"Clear Alias");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(sub, MF_STRING, removeId, L"Remove from Favourites");
-            AppendMenuW(favMenu, MF_POPUP, (UINT_PTR)sub, favourites[i].label.c_str());
+            AppendMenuW(sub, MF_STRING, (UINT)(1 + i),
+                        IsFavourite(p.path) ? L"Remove from Favourites" : L"Add to Favourites");
+            AppendMenuW(listMenu, MF_POPUP, (UINT_PTR)sub, p.label.c_str());
         }
-    }
-    AppendMenuW(menu, MF_POPUP, (UINT_PTR)favMenu, L"Favourites");
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)listMenu, title);
+    };
+    appendProjects(favouriteCount, projects.size(), L"Recent", L"(No Recent Folders)");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    appendProjects(0, favouriteCount, L"Favourites", L"(No Favourites)");
 
     RequestForeground(hud, FocusTargetKind::OwnUi, L"new-window-button-menu");
     state->contextMenuOpen = true; // see UpdateProjectListHud's guard
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
     state->contextMenuOpen = false;
-    DestroyMenu(menu); // recursively destroys the Start VS Code, Favourites, per-favourite and open-as submenus too
+    DestroyMenu(menu); // recursively destroys the Start VS Code, Favourites, Recent, per-project and open-as submenus too
 
     if (cmd <= 0) return;
     if (cmd >= (int)kStartAsBase) {
@@ -1070,25 +1096,28 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     if (cmd >= (int)kOpenAsBase) {
         size_t i = (size_t)(cmd - (int)kOpenAsBase) / kOpenAsStride;
         size_t slot = (size_t)(cmd - (int)kOpenAsBase) % kOpenAsStride;
-        if (i >= favourites.size() || slot > profiles.size()) return;
-        OpenNewVSCodeWindow(AnyTrackedWindow(state), favourites[i].path, L"hud-favourite-open-as", slotProfile(slot));
+        if (i >= projects.size() || slot > profiles.size()) return;
+        OpenNewVSCodeWindow(AnyTrackedWindow(state), projects[i].path,
+                            i < favouriteCount ? L"hud-favourite-open-as" : L"hud-recent-open-as", slotProfile(slot));
         return;
     }
     if (cmd >= (int)kSetAliasBase) {
         bool clear = cmd >= (int)kClearAliasBase;
         size_t i = (size_t)(cmd - (int)(clear ? kClearAliasBase : kSetAliasBase));
-        if (i >= favourites.size()) return;
-        const FavouriteProject& f = favourites[i];
+        if (i >= projects.size()) return;
+        const FavouriteProject& p = projects[i];
         if (clear) {
-            Log(L"favourites: cleared alias [%ls] of [%ls]", f.label.c_str(), f.aliasKey.c_str());
-            SetFavouriteAlias(f.path, f.aliasKey, L"");
+            Log(L"favourites: cleared alias [%ls] of [%ls]", p.label.c_str(), p.aliasKey.c_str());
+            SetFavouriteAlias(p.path, p.aliasKey, L"");
         } else {
-            BeginFavouriteAliasEdit(hud, state, f.path, f.label, f.aliasKey);
+            BeginFavouriteAliasEdit(hud, state, p.path, p.label, p.aliasKey);
         }
         return;
     }
     size_t i = (size_t)(cmd - 1);
-    if (i < favourites.size()) RemoveFavourite(favourites[i].path);
+    if (i >= projects.size()) return;
+    if (IsFavourite(projects[i].path)) RemoveFavourite(projects[i].path);
+    else AddFavourite(projects[i].label, projects[i].path, projects[i].aliasKey);
 }
 
 // Shared cleanup for ending a DragReorder, called both from a real
