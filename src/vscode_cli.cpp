@@ -1,6 +1,7 @@
 #include "vscode_cli.h"
 
 #include "claude_profile.h"
+#include "dpi_util.h"
 #include "focus_trace.h"
 #include "logger.h"
 #include "vscode_installs.h"
@@ -134,6 +135,42 @@ bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const w
 
 void CloseVSCodeWindow(HWND target) {
     if (target && IsWindow(target)) PostMessageW(target, WM_CLOSE, 0, 0);
+}
+
+void FitVSCodeWindowToScreen(HWND target) {
+    if (!target || !IsWindow(target)) return;
+    // This app is DPI-unaware: on a scaled monitor its own view of the work
+    // area and of VS Code's (per-monitor aware) window is virtualized.
+    PhysicalPixelsScope physical;
+    // Picked before restoring: a maximized window's restore position may be
+    // on another monitor. For a minimized one this reads its pre-minimize
+    // position.
+    HMONITOR mon = MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = {sizeof(mi)};
+    if (!GetMonitorInfoW(mon, &mi)) {
+        Log(L"[WARN] fit to screen: GetMonitorInfoW failed, lastError=%lu", GetLastError());
+        return;
+    }
+    if (IsIconic(target) || IsZoomed(target)) ShowWindow(target, SW_RESTORE);
+
+    const RECT& work = mi.rcWork;
+    int workW = work.right - work.left, workH = work.bottom - work.top;
+    int w = workW * 3 / 4, h = workH * 3 / 4;
+    RECT want = {work.left + (workW - w) / 2, work.top + (workH - h) / 2, 0, 0};
+    want.right = want.left + w;
+    want.bottom = want.top + h;
+    // Moving a window mostly onto a monitor with a different scale than the
+    // one it was on makes VS Code rescale itself to the new DPI, changing the
+    // size just set -- set it once more, now that the scale stays put.
+    RECT got = {};
+    for (int attempt = 0; attempt < 2; attempt++) {
+        SetWindowPos(target, nullptr, want.left, want.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        GetWindowRect(target, &got);
+        if (EqualRect(&got, &want)) break;
+    }
+    Log(L"fit to screen: %ls work=(%ld,%ld)-(%ld,%ld) want=(%ld,%ld)-(%ld,%ld) got=(%ld,%ld)-(%ld,%ld)",
+        DescribeMonitor(mon).c_str(), work.left, work.top, work.right, work.bottom, want.left, want.top, want.right,
+        want.bottom, got.left, got.top, got.right, got.bottom);
 }
 
 void ConfirmAndCloseVSCodeWindows(HWND owner, const std::vector<HWND>& targets, const wchar_t* source) {

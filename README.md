@@ -136,7 +136,7 @@ can find and switch between windows at a glance. It includes minimized
 windows, so it doubles as a restore list. Enable it with
 `show_project_list=true`. A plain right-click on an item opens a context
 menu (**Reopen As**, **Copy Directory Path** / **Open Directory in File
-Explorer** for the window's folder, **Set Alias**, **Add to Favourites** and **Close Window**
+Explorer** for the window's folder, **Fit to Screen**, **Set Alias**, **Add to Favourites** and **Close Window**
 -- see below).
 
 ![Project list HUD showing three open windows and a "+" button to open a new one](assets/hub.png)
@@ -217,6 +217,11 @@ favourites, close.
   window. If the folder no longer exists (a worktree deleted while its
   window stayed open, say) nothing opens -- Explorer would otherwise
   silently show its Home view instead.
+- **Fit to Screen** brings the window back onto its monitor when it has
+  ended up bigger than the screen or partly off it (after plugging in or
+  unplugging a monitor, say): it un-maximizes it, sizes it to 75% of the
+  screen's width and height (not counting the taskbar) and centers it, on
+  whichever monitor most of the window is on.
 - **Set Alias...** / **Clear Alias** rename how the window displays -- see
   [aliases](#project-list-hud-aliases) below.
 - **Add to Favourites** / **Remove from Favourites** save or drop that

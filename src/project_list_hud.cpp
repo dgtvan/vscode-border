@@ -848,7 +848,7 @@ static void AppendProfileMenuItem(HMENU m, UINT id, const std::wstring& profile)
 }
 
 static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
-    // Groups top to bottom: reopen, directory, alias, favourites, close. No path means VS
+    // Groups top to bottom: reopen, directory, window, alias, favourites, close. No path means VS
     // Code hasn't recorded this window's folder in its own workspaceStorage
     // (e.g. a multi-root workspace) -- nothing to copy/open in Explorer or
     // for a favourite to reopen later, so the directory and favourites
@@ -903,6 +903,9 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         AppendMenuW(menu, itemFlags, 6, L"Open Directory in File Explorer");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
+    // Enabled while loading, like Close Window: it needs only the window.
+    AppendMenuW(menu, MF_STRING, 8, L"Fit to Screen");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, itemFlags, 1, L"Set Alias...");
     if (hasAlias || loading) AppendMenuW(menu, itemFlags, 2, L"Clear Alias");
     if (hasPath || loading) {
@@ -942,7 +945,8 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     if (cmd > 0 && index >= 0 && index < (int)state->entries.size()) {
         static const wchar_t* const kActions[] = {L"", L"Set Alias", L"Clear Alias", L"Add to Favourites",
                                                   L"Remove from Favourites", L"Copy Directory Path",
-                                                  L"Open Directory in File Explorer", L"Close Window"};
+                                                  L"Open Directory in File Explorer", L"Close Window",
+                                                  L"Fit to Screen"};
         Log(L"hud item menu: [%ls] -> %ls", state->entries[index].label.c_str(),
             cmd < (int)(sizeof(kActions) / sizeof(kActions[0])) ? kActions[cmd] : L"?");
     }
@@ -963,6 +967,10 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         HWND target = state->entries[index].target;
         CloseVSCodeWindow(target);
         Log(L"hud item close: sent WM_CLOSE to [%ls]", state->entries[index].label.c_str());
+    } else if (cmd == 8 && index >= 0 && index < (int)state->entries.size()) {
+        HWND target = state->entries[index].target;
+        FitVSCodeWindowToScreen(target);
+        RequestForeground(target, FocusTargetKind::ExternalWindow, L"hud-item-fit-to-screen");
     }
 }
 

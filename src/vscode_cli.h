@@ -50,6 +50,12 @@ bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const w
 // so VS Code still gets to prompt about unsaved changes.
 void CloseVSCodeWindow(HWND target);
 
+// Restores `target` if it's minimized or maximized, then sizes it to 75% of
+// the width and height of the work area of the monitor it's mostly on and
+// centers it there -- for a window that has ended up bigger than, or partly
+// off, its screen. Logs where it lands.
+void FitVSCodeWindowToScreen(HWND target);
+
 // A VS Code window to close and open again (see CloseAndReopenVSCodeWindows).
 struct ReopenWindow {
     HWND target = nullptr;
