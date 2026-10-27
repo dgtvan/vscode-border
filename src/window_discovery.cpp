@@ -1,4 +1,5 @@
 #include "window_discovery.h"
+#include "dpi_util.h"
 #include "logger.h"
 
 #include <dwmapi.h>
@@ -50,12 +51,44 @@ bool IsCandidateTopLevelWindow(HWND hwnd) {
     return true;
 }
 
+namespace {
+
+bool GetPhysicalWindowRect(HWND hwnd, RECT& out) {
+    if (!PhysicalPixelsAvailable()) return false;
+    PhysicalPixelsScope phys;
+    return GetWindowRect(hwnd, &out) != 0;
+}
+
+LONG MapEdge(LONG v, LONG fromStart, LONG fromSize, LONG toStart, LONG toSize) {
+    return toStart + MulDiv(v - fromStart, toSize, fromSize);
+}
+
+} // namespace
+
 // GetWindowRect includes Windows' invisible resize hit-test margin, which
 // is a few pixels larger than the window's actual visible edge -- using it
 // would leave a visible gap between the window and the border. The DWM
 // extended frame bounds give the true visible bounds instead.
 bool GetVisibleWindowRect(HWND hwnd, RECT& out) {
     if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &out, sizeof(RECT)))) {
+        // The frame bounds are always physical pixels, but this process is
+        // DPI-unaware, so on a scaled monitor every other rect it uses
+        // (including where it places the overlay) is DPI-virtualized. Map
+        // the frame into that space through the window rect, which we can
+        // read both ways; on a 100% monitor the two are identical.
+        RECT appWin, physWin;
+        if (GetWindowRect(hwnd, &appWin) && GetPhysicalWindowRect(hwnd, physWin) && !EqualRect(&appWin, &physWin)) {
+            LONG physW = physWin.right - physWin.left, physH = physWin.bottom - physWin.top;
+            LONG appW = appWin.right - appWin.left, appH = appWin.bottom - appWin.top;
+            if (physW > 0 && physH > 0) {
+                RECT phys = out;
+                out.left = MapEdge(phys.left, physWin.left, physW, appWin.left, appW);
+                out.right = MapEdge(phys.right, physWin.left, physW, appWin.left, appW);
+                out.top = MapEdge(phys.top, physWin.top, physH, appWin.top, appH);
+                out.bottom = MapEdge(phys.bottom, physWin.top, physH, appWin.top, appH);
+            }
+        }
+
         // Even the extended frame bounds still leave a 1-2px gap on Windows
         // 11: its rounded window corners and drop-shadow anti-aliasing eat
         // into the reported edge, so the window's actually-opaque pixels

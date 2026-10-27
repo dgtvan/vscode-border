@@ -1,6 +1,7 @@
 #include "diagnostic_snapshot.h"
 
 #include "config.h"
+#include "dpi_util.h"
 #include "file_util.h"
 #include "focus_trace.h"
 #include "logger.h"
@@ -31,7 +32,6 @@ namespace {
 // ---------------------------------------------------------------------------
 
 typedef HANDLE DpiContext;
-const DpiContext kPerMonitorAwareV2 = (DpiContext)(LONG_PTR)-4; // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
 
 struct DpiApi {
     DpiContext(WINAPI* setThreadContext)(DpiContext) = nullptr;
@@ -83,23 +83,6 @@ const wchar_t* WindowAwareness(HWND hwnd) {
 
 UINT WindowDpi(HWND hwnd) { return Dpi().getDpiForWindow ? Dpi().getDpiForWindow(hwnd) : 0; }
 
-// While alive, this thread sees physical pixels (per-monitor-v2), the way
-// the screen is actually laid out. Outside one, it sees whatever the app
-// normally sees. A no-op (physical == app view) on Windows versions without
-// per-thread DPI contexts -- the report says so up front.
-class PhysicalPixelsScope {
-public:
-    PhysicalPixelsScope() {
-        if (Dpi().setThreadContext) prev_ = Dpi().setThreadContext(kPerMonitorAwareV2);
-    }
-    ~PhysicalPixelsScope() {
-        if (prev_) Dpi().setThreadContext(prev_);
-    }
-
-private:
-    DpiContext prev_ = nullptr;
-};
-
 // ---------------------------------------------------------------------------
 // Report text
 // ---------------------------------------------------------------------------
@@ -120,18 +103,36 @@ public:
         Line(L"%ls", name);
         text_ += L"==================================================================\r\n";
     }
-    const std::wstring& Text() const { return text_; }
+    // Something wrong worth a reader's attention. Collected as the report is
+    // written, then listed together near the top (see MarkProblemsHere), so
+    // a broken border isn't buried in a long, mostly healthy report.
+    void Problem(const wchar_t* fmt, ...) {
+        wchar_t buf[1024];
+        va_list args;
+        va_start(args, fmt);
+        _vsnwprintf_s(buf, 1024, _TRUNCATE, fmt, args);
+        va_end(args);
+        problems_.push_back(buf);
+    }
+    void MarkProblemsHere() { problemsAt_ = text_.size(); }
+    std::wstring Text() const {
+        const wchar_t* rule = L"==================================================================\r\n";
+        std::wstring list = L"\r\n" + std::wstring(rule);
+        list += L"PROBLEMS FOUND: " + std::to_wstring(problems_.size()) + L"\r\n" + rule;
+        if (problems_.empty()) list += L"  (none)\r\n";
+        for (const std::wstring& p : problems_) list += L"  - " + p + L"\r\n";
+        std::wstring out = text_;
+        out.insert(problemsAt_ == std::wstring::npos ? out.size() : problemsAt_, list);
+        return out;
+    }
 
 private:
     std::wstring text_;
+    std::vector<std::wstring> problems_;
+    size_t problemsAt_ = std::wstring::npos;
 };
 
-std::wstring RectStr(const RECT& r) {
-    wchar_t buf[96];
-    _snwprintf_s(buf, 96, _TRUNCATE, L"(%ld,%ld)-(%ld,%ld) %ldx%ld", r.left, r.top, r.right, r.bottom,
-                 r.right - r.left, r.bottom - r.top);
-    return buf;
-}
+std::wstring RectStr(const RECT& r) { return RectToString(r); }
 
 std::string WideToUtf8(const std::wstring& s) {
     if (s.empty()) return std::string();
@@ -151,6 +152,19 @@ std::wstring TitleOf(HWND hwnd, int maxChars = 200) {
     std::vector<wchar_t> buf(maxChars + 1, L'\0');
     GetWindowTextW(hwnd, buf.data(), maxChars + 1);
     return buf.data();
+}
+
+// True while the lock screen (or a UAC prompt) owns the screen: the input
+// desktop is then Winlogon's, which this process can't open, so the
+// screenshot shows that instead of any window or border.
+bool IsInputDesktopHidden() {
+    HDESK desk = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+    if (!desk) return true;
+    wchar_t name[64] = {};
+    bool isDefault = GetUserObjectInformationW(desk, UOI_NAME, name, sizeof(name), nullptr) &&
+                     _wcsicmp(name, L"Default") == 0;
+    CloseDesktop(desk);
+    return !isDefault;
 }
 
 bool IsCloaked(HWND hwnd) {
@@ -278,7 +292,10 @@ void WriteHeader(Report& rep, const std::wstring& snapshotDir, bool screenshotSa
     rep.Line(L"windows: %lu.%lu build %lu", os.dwMajorVersion, os.dwMinorVersion, os.dwBuildNumber);
     rep.Line(L"uptime: %llu s", (unsigned long long)(GetTickCount64() / 1000));
     rep.Line(L"snapshot folder: %ls", snapshotDir.c_str());
-    rep.Line(L"screenshot: %ls", screenshotSaved ? L"screen.png (virtual desktop, physical pixels)" : L"FAILED");
+    rep.Line(L"screenshot: %ls%ls", screenshotSaved ? L"screen.png (virtual desktop, physical pixels)" : L"FAILED",
+             IsInputDesktopHidden() ? L"  <-- screen LOCKED (or a UAC prompt): it shows that, not the desktop, so "
+                                      L"pixel samples are not checked"
+                                    : L"");
     rep.Line(L"borders/hub hidden via tray toggle: %ls%ls", AreOverlaysHidden() ? L"YES" : L"no",
              AreOverlaysHidden() ? L"  <-- borders are not on screen, so the screenshot and pixel samples "
                                    L"can't show them; geometry below is still what the app would draw"
@@ -290,6 +307,9 @@ void WriteHeader(Report& rep, const std::wstring& snapshotDir, bool screenshotSa
     rep.Line(L"Rects are listed twice where it matters: [app] = as this process sees them (it declares no DPI");
     rep.Line(L"awareness, so on a scaled monitor these may be DPI-virtualized), [phys] = physical pixels, the");
     rep.Line(L"coordinate space of screen.png. DWM frame bounds are physical in both views by design.");
+    rep.MarkProblemsHere();
+    if (HasWarnings()) rep.Problem(L"this run logged [WARN] lines -- grep the session log for them");
+    if (!screenshotSaved) rep.Problem(L"screenshot failed, so no pixel samples");
 }
 
 void WriteConfigSummary(Report& rep) {
@@ -506,30 +526,22 @@ HWND CoveringWindow(const std::vector<ZWindow>& zOrder, HWND overlay, POINT pt) 
     return nullptr;
 }
 
-// One pixel from the middle of each side of the overlay's border band,
-// read out of the screenshot, with the border's color expected there. The
-// overlay is DPI-unaware, so on a scaled monitor DWM stretches its
-// `thickness`-px band by the monitor's scale -- the sample is taken at the
-// middle of the band as stretched.
-void WritePixelSamples(Report& rep, const ScreenCapture& cap, const std::vector<ZWindow>& zOrder, HWND overlay,
-                       const RECT& physOverlay, int bandPx, COLORREF expected) {
-    int in = bandPx / 2;
-    int midX = (physOverlay.left + physOverlay.right) / 2;
-    int midY = (physOverlay.top + physOverlay.bottom) / 2;
-    struct Side {
-        const wchar_t* name;
-        int x, y;
-    } sides[] = {
-        {L"top", midX, physOverlay.top + in},
-        {L"bottom", midX, physOverlay.bottom - 1 - in},
-        {L"left", physOverlay.left + in, midY},
-        {L"right", physOverlay.right - 1 - in, midY},
-    };
+struct PixelSample {
+    const wchar_t* name;
+    int x, y;
+};
+
+// Reads each point out of the screenshot and compares it with the border's
+// color. Returns how many were neither covered by another window nor the
+// right color.
+int WritePixelSamples(Report& rep, const ScreenCapture& cap, const std::vector<ZWindow>& zOrder, HWND overlay,
+                      const std::vector<PixelSample>& samples, COLORREF expected) {
     bool exact = g_config.opacity >= 255;
-    for (const Side& s : sides) {
+    int mismatches = 0;
+    for (const PixelSample& s : samples) {
         COLORREF got = 0;
         if (!cap.Sample(s.x, s.y, got)) {
-            rep.Line(L"      pixel %-6ls at (%d,%d): off-screen / not captured", s.name, s.x, s.y);
+            rep.Line(L"      pixel %-11ls at (%d,%d): off-screen / not captured", s.name, s.x, s.y);
             continue;
         }
         int diff = std::max({std::abs((int)GetRValue(got) - (int)GetRValue(expected)),
@@ -546,13 +558,45 @@ void WritePixelSamples(Report& rep, const ScreenCapture& cap, const std::vector<
             verdict = buf;
         } else if (!exact) {
             verdict = L"(opacity<255, blended -- compare by eye)";
+        } else if (diff <= 8) {
+            verdict = L"MATCH";
         } else {
-            verdict = diff <= 8 ? L"MATCH" : L"MISMATCH";
+            verdict = L"MISMATCH";
+            mismatches++;
         }
-        rep.Line(L"      pixel %-6ls at (%d,%d): got #%02X%02X%02X expected #%02X%02X%02X %ls", s.name, s.x, s.y,
+        rep.Line(L"      pixel %-11ls at (%d,%d): got #%02X%02X%02X expected #%02X%02X%02X %ls", s.name, s.x, s.y,
                  GetRValue(got), GetGValue(got), GetBValue(got), GetRValue(expected), GetGValue(expected),
                  GetBValue(expected), verdict.c_str());
     }
+    return mismatches;
+}
+
+// One pixel from the middle of each side of the overlay's border band. The
+// overlay is DPI-unaware, so on a scaled monitor DWM stretches its
+// `thickness`-px band by the monitor's scale -- the sample is taken at the
+// middle of the band as stretched.
+std::vector<PixelSample> BorderBandSamples(const RECT& physOverlay, int bandPx) {
+    int in = bandPx / 2;
+    int midX = (physOverlay.left + physOverlay.right) / 2;
+    int midY = (physOverlay.top + physOverlay.bottom) / 2;
+    return {{L"band top", midX, physOverlay.top + in},
+            {L"band bottom", midX, physOverlay.bottom - 1 - in},
+            {L"band left", physOverlay.left + in, midY},
+            {L"band right", physOverlay.right - 1 - in, midY}};
+}
+
+// The outermost pixel of the window's visible frame on each side. The
+// border overlaps the frame there (see GetVisibleWindowRect), so it is
+// border-colored wherever the border really hugs the window -- unlike the
+// band samples, this still says something when the overlay itself is in
+// the wrong place.
+std::vector<PixelSample> WindowEdgeSamples(const RECT& physFrame) {
+    int midX = (physFrame.left + physFrame.right) / 2;
+    int midY = (physFrame.top + physFrame.bottom) / 2;
+    return {{L"edge top", midX, physFrame.top},
+            {L"edge bottom", midX, physFrame.bottom - 1},
+            {L"edge left", physFrame.left, midY},
+            {L"edge right", physFrame.right - 1, midY}};
 }
 
 void WriteTrackedWindows(Report& rep, const std::vector<TrackedWindowDiag>& tracked, const ScreenCapture* cap,
@@ -574,6 +618,7 @@ void WriteTrackedWindows(Report& rep, const std::vector<TrackedWindowDiag>& trac
                  RectStr(d.lastKnownRect).c_str());
         if (!IsWindow(w)) {
             rep.Line(L"  TARGET IS DEAD (IsWindow=0)");
+            rep.Problem(L"tracked window %p no longer exists", w);
             continue;
         }
         WINDOWPLACEMENT wp = {};
@@ -599,21 +644,24 @@ void WriteTrackedWindows(Report& rep, const std::vector<TrackedWindowDiag>& trac
         InflateRect(&expected, t, t);
 
         // [phys] view: where things really are on screen / in screen.png.
-        RECT physWin = {}, physOverlay = {}, physFrame = {};
-        {
-            PhysicalPixelsScope phys;
-            GetWindowRect(w, &physWin);
-            if (d.overlay) GetWindowRect(d.overlay, &physOverlay);
-            if (!DwmFrameBounds(w, physFrame)) physFrame = physWin;
-        }
+        OverlayPlacement place = MeasureOverlayPlacement(w, d.overlay, t);
+        const RECT& physWin = place.physWindow;
+        const RECT& physFrame = place.physFrame;
+        const RECT& physOverlay = place.physOverlay;
+        wchar_t who[300];
+        _snwprintf_s(who, 300, _TRUNCATE, L"[%ls] %p", d.label.c_str(), w);
 
         rep.Line(L"  [app]  window=%ls client=%ls", RectStr(appWin).c_str(), RectStr(appClient).c_str());
         rep.Line(L"  [app]  visibleRect(used for border)=%ls%ls", RectStr(appVisible).c_str(),
                  haveVisible ? L"" : L" (GetVisibleWindowRect FAILED)");
+        if (!haveVisible) rep.Problem(L"%ls: GetVisibleWindowRect failed", who);
         rep.Line(L"  [phys] window=%ls dwmFrame=%ls", RectStr(physWin).c_str(), RectStr(physFrame).c_str());
         rep.Line(L"  [app]  overlay=%ls visible=%d", RectStr(appOverlay).c_str(),
                  d.overlay && IsWindowVisible(d.overlay) ? 1 : 0);
         rep.Line(L"  [phys] overlay=%ls", RectStr(physOverlay).c_str());
+        rep.Line(L"  scale app->phys: x%.3f y%.3f (1.000 = not virtualized)",
+                 appWin.right > appWin.left ? (double)(physWin.right - physWin.left) / (appWin.right - appWin.left) : 0.0,
+                 appWin.bottom > appWin.top ? (double)(physWin.bottom - physWin.top) / (appWin.bottom - appWin.top) : 0.0);
 
         // SyncOverlay deliberately hides the overlay for these -- nothing
         // on screen to compare against, and their rects are parked
@@ -624,19 +672,18 @@ void WriteTrackedWindows(Report& rep, const std::vector<TrackedWindowDiag>& trac
             continue;
         }
 
-        UINT monitorDpi = 96, unused = 0;
-        if (overlayMonitor && Dpi().getDpiForMonitor)
-            Dpi().getDpiForMonitor(overlayMonitor, 0 /* MDT_EFFECTIVE_DPI */, &monitorDpi, &unused);
-        // GetVisibleWindowRect pulls the DWM frame in by 2px before the
-        // border is inflated around it, so only thickness-2 sits outside.
-        int expectedGap = MulDiv(t - 2, monitorDpi, 96);
+        bool matches = EqualRect(&expected, &appOverlay) != 0;
         rep.Line(L"  [app]  overlay vs expected (visibleRect inflated by thickness=%d) %ls -> %ls", t,
-                 RectStr(expected).c_str(), EqualRect(&expected, &appOverlay) ? L"matches" : L"DIFFERS");
-        rep.Line(L"  [phys] overlay edge outside dwmFrame per side: left=%ld top=%ld right=%ld bottom=%ld "
-                 L"(expect %d = (thickness-2) x %u%% scale)",
-                 physFrame.left - physOverlay.left, physFrame.top - physOverlay.top,
-                 physOverlay.right - physFrame.right, physOverlay.bottom - physFrame.bottom, expectedGap,
-                 monitorDpi * 100 / 96);
+                 RectStr(expected).c_str(), matches ? L"matches" : L"DIFFERS");
+        if (!matches)
+            rep.Problem(L"%ls: overlay is at %ls, not where the app last put it %ls", who, RectStr(appOverlay).c_str(),
+                        RectStr(expected).c_str());
+        rep.Line(L"  [phys] overlay edge outside dwmFrame per side: %ls%ls", DescribeGaps(place).c_str(),
+                 place.misplaced ? L" -> MISPLACED on screen" : L"");
+        if (place.misplaced) rep.Problem(L"%ls: border MISPLACED on screen, %ls", who, DescribeGaps(place).c_str());
+        if (place.overlayMonitor != place.targetMonitor)
+            rep.Problem(L"%ls: window is on %ls but its border is on %ls", who,
+                        DescribeMonitor(place.targetMonitor).c_str(), DescribeMonitor(place.overlayMonitor).c_str());
 
         HWND above = GetWindow(w, GW_HWNDPREV);
         if (above == d.overlay) {
@@ -645,15 +692,20 @@ void WriteTrackedWindows(Report& rep, const std::vector<TrackedWindowDiag>& trac
             wchar_t aboveDesc[400] = {};
             DescribeWindowForLog(above, aboveDesc, 400);
             rep.Line(L"  z-order: window directly above target is NOT its overlay: %ls", aboveDesc);
+            rep.Problem(L"%ls: overlay is not directly above its window", who);
         }
         if (d.overlay) {
             LONG_PTR ex = GetWindowLongPtrW(d.overlay, GWL_EXSTYLE);
             rep.Line(L"  overlay %p exstyle=0x%Ix topmost=%d", d.overlay, (ULONG_PTR)ex, (ex & WS_EX_TOPMOST) ? 1 : 0);
         }
 
-        if (cap && d.overlay)
-            WritePixelSamples(rep, *cap, zOrder, d.overlay, physOverlay, std::max(1, MulDiv(t, monitorDpi, 96)),
-                              d.color);
+        if (cap && d.overlay) {
+            int bad = WritePixelSamples(rep, *cap, zOrder, d.overlay,
+                                        BorderBandSamples(physOverlay, std::max(1, MulDiv(t, place.monitorDpi, 96))),
+                                        d.color);
+            bad += WritePixelSamples(rep, *cap, zOrder, d.overlay, WindowEdgeSamples(physFrame), d.color);
+            if (bad && !IsInputDesktopHidden()) rep.Problem(L"%ls: %d pixel sample(s) not the border color (see its pixel lines)", who, bad);
+        }
     }
 }
 
@@ -676,6 +728,7 @@ void WriteOwnWindows(Report& rep, const std::vector<HWND>& zOrder, const std::ve
         if (cls == kOverlayClassName) {
             note = knownOverlays.count(hwnd) ? L" (overlay of a tracked window)"
                                              : L" (overlay NOT owned by any tracked window -- ORPHAN)";
+            if (!knownOverlays.count(hwnd)) rep.Problem(L"orphan overlay %p (no tracked window owns it)", hwnd);
         }
         RECT appRc = {}, physRc = {};
         GetWindowRect(hwnd, &appRc);
@@ -709,6 +762,8 @@ void WriteUntrackedVSCodeWindows(Report& rep, const std::vector<HWND>& zOrder,
         rep.Line(L"  %p %ls class=%ls candidate=%d cloaked=%d [phys]%ls title=[%ls]", hwnd, exe.c_str(),
                  ClassOf(hwnd).c_str(), IsCandidateTopLevelWindow(hwnd) ? 1 : 0, IsCloaked(hwnd) ? 1 : 0,
                  RectStr(physRc).c_str(), TitleOf(hwnd).c_str());
+        if (IsCandidateTopLevelWindow(hwnd) && !IsCloaked(hwnd))
+            rep.Problem(L"visible VS Code window %p has no border (not tracked)", hwnd);
         shown++;
     }
     if (!shown) rep.Line(L"  (none)");

@@ -4,6 +4,7 @@
 #include "ai_provider.h"
 #include "claude_usage.h"
 #include "config.h"
+#include "dpi_util.h"
 #include "focus_trace.h"
 #include "label_alias.h"
 #include "logger.h"
@@ -14,6 +15,8 @@
 #include "worktree_resolver.h"
 #include "vscode_installs.h"
 #include "vscode_settings.h"
+
+#include <dwmapi.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -97,6 +100,16 @@ struct TrackedWindow {
                                           // folder at all -- false only for a bare "File > New Window"
                                           // with nothing open, which will never gain one -- see
                                           // IsWindowLoading
+    // CheckOverlayPlacement state: the monitor (and its scale) and monitor
+    // layout the window's placement was last logged for, and how many
+    // rescans in a row have found the border misplaced around an unmoved
+    // window.
+    HMONITOR placementMonitor = nullptr;
+    UINT placementDpi = 0;
+    int placementLayoutGen = -1;
+    RECT placementFrame = {};
+    int misplacedStreak = 0;
+    bool warnedMisplaced = false;
 };
 
 static long long g_nextTrackSeq = 0;
@@ -741,7 +754,87 @@ void TrackingInit(HINSTANCE hInstance, HWND ownerWnd) {
     SetFocusStormSnapshotHook(LogTrackedWindowsSnapshot);
 }
 
+// Bumped by LogMonitorLayoutIfChanged, so every window's placement is
+// logged again after monitors are plugged in, unplugged or rescaled.
+static int g_monitorLayoutGen = 0;
+
+// Logs the monitor layout (both coordinate views, with each monitor's
+// scale) at startup and whenever it changes. Polled from the rescan rather
+// than driven by WM_DISPLAYCHANGE: the app's own window is message-only and
+// never receives that broadcast.
+static void LogMonitorLayoutIfChanged() {
+    static std::wstring last;
+    std::wstring layout = DescribeMonitorLayout();
+    if (layout == last) return;
+    Log(L"monitor layout %ls:", last.empty() ? L"at startup" : L"changed");
+    size_t start = 0;
+    while (start <= layout.size()) {
+        size_t end = layout.find(L'\n', start);
+        if (end == std::wstring::npos) end = layout.size();
+        Log(L"  monitor %ls", layout.substr(start, end - start).c_str());
+        start = end + 1;
+    }
+    last = layout;
+    g_monitorLayoutGen++;
+}
+
+// Checks where the border really is on screen (physical pixels) against
+// the window's visible frame -- the check that would have caught borders
+// drawn ~1.5x too big on a 150% monitor, which looked right in every rect
+// the app itself could see. Logs the placement whenever the window lands on
+// a different monitor or scale, or the layout changes; warns once when the
+// border stays misplaced around a window that isn't moving (a drag can
+// briefly outrun the border), and logs again once it's back in place.
+static void CheckOverlayPlacement(HWND target, TrackedWindow& tw) {
+    if (!tw.overlay || g_overlaysHidden || IsIconic(target) || !IsWindowVisible(target) ||
+        !IsWindowVisible(tw.overlay))
+        return;
+    BOOL cloaked = FALSE;
+    if (SUCCEEDED(DwmGetWindowAttribute(target, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) return;
+
+    OverlayPlacement p = MeasureOverlayPlacement(target, tw.overlay, g_config.thickness);
+    auto describe = [&]() {
+        RECT appWin = {}, appVisible = {}, appOverlay = {};
+        GetWindowRect(target, &appWin);
+        GetVisibleWindowRect(target, appVisible);
+        GetWindowRect(tw.overlay, &appOverlay);
+        wchar_t buf[1200];
+        _snwprintf_s(buf, 1200, _TRUNCATE,
+                     L"hwnd=%p [%ls] window on %ls, border on %ls: gaps %ls | phys window=%ls frame=%ls overlay=%ls"
+                     L" | app window=%ls visibleRect=%ls overlay=%ls",
+                     target, tw.label.c_str(), DescribeMonitor(p.targetMonitor).c_str(),
+                     DescribeMonitor(p.overlayMonitor).c_str(), DescribeGaps(p).c_str(),
+                     RectToString(p.physWindow).c_str(), RectToString(p.physFrame).c_str(),
+                     RectToString(p.physOverlay).c_str(), RectToString(appWin).c_str(),
+                     RectToString(appVisible).c_str(), RectToString(appOverlay).c_str());
+        return std::wstring(buf);
+    };
+
+    UINT dpi = MonitorEffectiveDpi(p.targetMonitor);
+    if (p.targetMonitor != tw.placementMonitor || dpi != tw.placementDpi ||
+        tw.placementLayoutGen != g_monitorLayoutGen) {
+        Log(L"placement: %ls", describe().c_str());
+        tw.placementMonitor = p.targetMonitor;
+        tw.placementDpi = dpi;
+        tw.placementLayoutGen = g_monitorLayoutGen;
+    }
+
+    if (!p.misplaced) {
+        if (tw.warnedMisplaced) Log(L"placement: border back in place: %ls", describe().c_str());
+        tw.misplacedStreak = 0;
+        tw.warnedMisplaced = false;
+        return;
+    }
+    tw.misplacedStreak = EqualRect(&p.physFrame, &tw.placementFrame) ? tw.misplacedStreak + 1 : 1;
+    tw.placementFrame = p.physFrame;
+    if (tw.misplacedStreak >= 2 && !tw.warnedMisplaced) {
+        LogWarn(L"placement: border MISPLACED on screen: %ls", describe().c_str());
+        tw.warnedMisplaced = true;
+    }
+}
+
 void RescanAllWindows() {
+    LogMonitorLayoutIfChanged();
     EnumWindows(EnumWindowsProc, 0);
 
     std::vector<HWND> stale;
@@ -752,7 +845,10 @@ void RescanAllWindows() {
     }
     for (HWND hwnd : stale) UntrackWindow(hwnd);
 
-    for (auto& kv : g_tracked) SyncOverlay(kv.first, kv.second);
+    for (auto& kv : g_tracked) {
+        SyncOverlay(kv.first, kv.second);
+        CheckOverlayPlacement(kv.first, kv.second);
+    }
     // SyncOverlay already syncs the hub per tracked window, but this rescan
     // (called at startup and on the rescan timer) is also the only thing
     // that runs when *nothing* is tracked -- and the hub is shown even

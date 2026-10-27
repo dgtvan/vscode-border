@@ -58,6 +58,18 @@ leaves a visible gap between the window and the border. `DwmGetWindowAttribute(h
 DWMWA_EXTENDED_FRAME_BOUNDS, ...)` gives the true visible bounds instead,
 confirmed by measuring both and comparing to the overlay's actual rect.
 
+Those bounds are always in physical pixels, while the app declares no DPI
+awareness, so on a scaled monitor (e.g. 150%) every other rect it sees --
+and the position it gives the overlay -- is DPI-virtualized. Used as-is,
+the border lands far right of and below the window and ~1.5x too big.
+`GetVisibleWindowRect` maps the frame into the app's space through the
+window rect, read once normally and once under a per-monitor-v2 thread
+context; on a 100% monitor the two match and nothing changes. Every rescan
+also measures each border's real on-screen position against the window
+(`CheckOverlayPlacement` in `tracking.cpp`, via `dpi_util`) and logs a
+`[WARN]` if it stays off; snapshots flag the same as `MISPLACED on screen`.
+See `bugs/2026-10-27-border-misplaced-on-scaled-monitor.md`.
+
 ## Window detection: which events, and why more than one
 
 A VS Code window is tracked when it passes `IsCandidateTopLevelWindow`
