@@ -848,7 +848,7 @@ static void AppendProfileMenuItem(HMENU m, UINT id, const std::wstring& profile)
 }
 
 static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
-    // Groups top to bottom: directory, reopen, alias, favourites, close. No path means VS
+    // Groups top to bottom: reopen, directory, alias, favourites, close. No path means VS
     // Code hasn't recorded this window's folder in its own workspaceStorage
     // (e.g. a multi-root workspace) -- nothing to copy/open in Explorer or
     // for a favourite to reopen later, so the directory and favourites
@@ -877,11 +877,6 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 
     HMENU menu = CreatePopupMenu();
     UINT itemFlags = MF_STRING | (loading ? MF_GRAYED : 0);
-    if (hasPath || loading) {
-        AppendMenuW(menu, itemFlags, 5, L"Copy Directory Path");
-        AppendMenuW(menu, itemFlags, 6, L"Open Directory in File Explorer");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    }
     // Reopen As ids: kReopenAsBase + profile slot (0 for the default, 1 + i
     // for profiles[i]).
     const UINT kReopenAsBase = 0x100;
@@ -902,6 +897,11 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
         } else {
             DestroyMenu(reopenMenu);
         }
+    }
+    if (hasPath || loading) {
+        AppendMenuW(menu, itemFlags, 5, L"Copy Directory Path");
+        AppendMenuW(menu, itemFlags, 6, L"Open Directory in File Explorer");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
     AppendMenuW(menu, itemFlags, 1, L"Set Alias...");
     if (hasAlias || loading) AppendMenuW(menu, itemFlags, 2, L"Clear Alias");
@@ -980,7 +980,8 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 // submenu -- hovering its name expands it to "Open in New Window As" (a
 // submenu of every profile it could open as -- see vscode_cli.h's
 // OpenNewVSCodeWindow; on an open folder it just re-activates its window,
-// whatever profile that runs), "Set Alias..." / "Clear Alias" (as on a hub
+// whatever profile that runs), "Copy Directory Path" / "Open Directory in
+// File Explorer" (as on a hub item), "Set Alias..." / "Clear Alias" (as on a hub
 // item, but with the edit box above the "+" button, since the folder may not
 // be open) and "Add to Favourites" / "Remove from Favourites". A plain
 // Win32 popup menu item can't both carry its own click action and expand a
@@ -1035,12 +1036,14 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     }
 
     // Command ids: per project i, toggle favourite = 1 + i, set alias =
-    // kSetAliasBase + i, clear alias = kClearAliasBase + i, open as profile
+    // kSetAliasBase + i, clear alias = kClearAliasBase + i, copy path =
+    // kCopyPathBase + i, open in Explorer = kExplorerBase + i, open as profile
     // slot j = kOpenAsBase + i*kOpenAsStride + j; start as profile slot j =
     // kStartAsBase + j, well above any project's -- decoded back on return
     // below. A profile slot is 0 for the default, 1 + i for profiles[i].
     const UINT kSetAliasBase = 0x400, kClearAliasBase = 0x800;
-    const UINT kOpenAsBase = 0x1000, kOpenAsStride = 8; // stride > the 5 profile slots
+    const UINT kCopyPathBase = 0xC00, kExplorerBase = 0x1000;
+    const UINT kOpenAsBase = 0x2000, kOpenAsStride = 8; // stride > the 5 profile slots
     const UINT kStartAsBase = 0x8000;
     auto slotProfile = [&](size_t slot) { return slot == 0 ? std::wstring() : profiles[slot - 1]; };
     HMENU menu = CreatePopupMenu();
@@ -1067,6 +1070,9 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
                 AppendProfileMenuItem(asMenu, kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, slotProfile(slot));
             }
             AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
+            AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(sub, MF_STRING, kCopyPathBase + (UINT)i, L"Copy Directory Path");
+            AppendMenuW(sub, MF_STRING, kExplorerBase + (UINT)i, L"Open Directory in File Explorer");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(sub, MF_STRING, kSetAliasBase + (UINT)i, L"Set Alias...");
             if (p.label != p.aliasKey) AppendMenuW(sub, MF_STRING, kClearAliasBase + (UINT)i, L"Clear Alias");
@@ -1099,6 +1105,16 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
         if (i >= projects.size() || slot > profiles.size()) return;
         OpenNewVSCodeWindow(AnyTrackedWindow(state), projects[i].path,
                             i < favouriteCount ? L"hud-favourite-open-as" : L"hud-recent-open-as", slotProfile(slot));
+        return;
+    }
+    if (cmd >= (int)kCopyPathBase) {
+        bool explorer = cmd >= (int)kExplorerBase;
+        size_t i = (size_t)(cmd - (int)(explorer ? kExplorerBase : kCopyPathBase));
+        if (i >= projects.size()) return;
+        Log(L"%ls: [%ls] -> %ls", i < favouriteCount ? L"favourites" : L"recent", projects[i].label.c_str(),
+            explorer ? L"Open Directory in File Explorer" : L"Copy Directory Path");
+        if (explorer) OpenPathInExplorer(projects[i].path);
+        else CopyPathToClipboard(hud, projects[i].path);
         return;
     }
     if (cmd >= (int)kSetAliasBase) {

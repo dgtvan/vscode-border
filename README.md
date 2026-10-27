@@ -135,8 +135,8 @@ the taskbar -- using the same labels and colors as the border chips, so you
 can find and switch between windows at a glance. It includes minimized
 windows, so it doubles as a restore list. Enable it with
 `show_project_list=true`. A plain right-click on an item opens a context
-menu (**Copy Directory Path** / **Open Directory in File Explorer** for the
-window's folder, **Reopen As**, **Set Alias**, **Add to Favourites** and **Close Window**
+menu (**Reopen As**, **Copy Directory Path** / **Open Directory in File
+Explorer** for the window's folder, **Set Alias**, **Add to Favourites** and **Close Window**
 -- see below).
 
 ![Project list HUD showing three open windows and a "+" button to open a new one](assets/hub.png)
@@ -198,17 +198,11 @@ apply to.
 
 Right-clicking a HUD item (or its border label chip -- both act on the same
 window) opens a menu of everything you can do with that window's project,
-grouped top to bottom: directory actions, reopen, alias actions,
+grouped top to bottom: reopen, directory actions, alias actions,
 favourites, close.
 
 ![Context menu on a HUD item, showing the directory, alias and favourites groups](assets/item-menu.png)
 
-- **Copy Directory Path** puts the window's open folder on the clipboard as
-  plain text.
-- **Open Directory in File Explorer** opens that folder in a new Explorer
-  window. If the folder no longer exists (a worktree deleted while its
-  window stayed open, say) nothing opens -- Explorer would otherwise
-  silently show its Home view instead.
 - **Reopen As** is a submenu of the other [Claude profiles](#claude-profiles)
   (every configured one but the window's own): picking one closes the
   window (VS Code still asks about unsaved changes) and, once it's gone,
@@ -217,6 +211,12 @@ favourites, close.
   one forward. If the window is still open a minute later (the close was
   cancelled), nothing is reopened. Not shown with no other profile
   configured.
+- **Copy Directory Path** puts the window's open folder on the clipboard as
+  plain text.
+- **Open Directory in File Explorer** opens that folder in a new Explorer
+  window. If the folder no longer exists (a worktree deleted while its
+  window stayed open, say) nothing opens -- Explorer would otherwise
+  silently show its Home view instead.
 - **Set Alias...** / **Clear Alias** rename how the window displays -- see
   [aliases](#project-list-hud-aliases) below.
 - **Add to Favourites** / **Remove from Favourites** save or drop that
@@ -270,7 +270,8 @@ submenu of which profile to open it as. Below it, past a divider, is
 sorted by name, one submenu per favourite -- hover a favourite's name to expand it to
 **Open in New Window As** (a submenu of the Claude profiles to open it as;
 on an open folder it just brings its window forward, whatever profile that
-runs), **Set Alias...** / **Clear Alias** (the same
+runs), **Copy Directory Path** / **Open Directory in File Explorer** (as
+on a HUD item), **Set Alias...** / **Clear Alias** (the same
 [aliases](#project-list-hud-aliases) as on a HUD item, so a favourite can be
 renamed without opening it -- the edit box appears just above the "+"
 button) and **Remove from Favourites**.
