@@ -381,6 +381,24 @@ long long ReadLoginExpiry(const std::wstring& dir) {
     return expiresAtMs;
 }
 
+// True if the login file in config folder `dir` holds a Claude.ai login
+// token (claudeAiOauth.accessToken).
+bool HasLoginToken(const std::wstring& dir) {
+    std::string content;
+    DWORD err = 0;
+    if (!ReadSharedFile(CredentialsPath(dir), content, err) ||
+        JsonScan::FindRootObjectOpenBrace(content) == std::string::npos) {
+        return false;
+    }
+    JsonScan::Span root = JsonScan::EnsureRootObject(content);
+    JsonScan::Span oauth = ObjectValue(content, root.start, root.end, "claudeAiOauth");
+    std::string token = oauth.found ? Unquote(RawValue(content, oauth.start, oauth.end, "accessToken")) : "";
+    SecureZeroMemory(&content[0], content.size());
+    bool has = !token.empty();
+    if (has) SecureZeroMemory(&token[0], token.size());
+    return has;
+}
+
 FetchResult FetchClaudeUsageOnce(const std::wstring& dir);
 
 // One fetch for the profile with config folder `dir` and environment
@@ -401,7 +419,15 @@ FetchResult FetchClaudeUsage(const std::wstring& dir, const std::wstring& enviro
     }
     long long now = ReadLoginExpiry(dir);
     if (now <= expiredAt || now / 1000 <= UnixNow()) {
-        r.error += L" -- running Claude Code (" + exe + L") to renew it didn't" + (said.empty() ? L"" : L"; it said: " + said);
+        // Claude Code removes the token when the renewal itself is refused,
+        // and says nothing about it in -p's output.
+        if (!HasLoginToken(dir)) {
+            r.error += L" -- running Claude Code (" + exe + L") to renew it signed this profile out instead (the "
+                       L"renewal was refused) -- sign in with /login in Claude Code as this profile";
+        } else {
+            r.error += L" -- running Claude Code (" + exe + L") to renew it didn't" +
+                       (said.empty() ? L"" : L"; it said: " + said);
+        }
         return r;
     }
     FetchResult renewed = FetchClaudeUsageOnce(dir);
@@ -430,7 +456,9 @@ FetchResult FetchClaudeUsageOnce(const std::wstring& dir) {
     JsonScan::Span oauth = ObjectValue(content, root.start, root.end, "claudeAiOauth");
     std::string token = oauth.found ? Unquote(RawValue(content, oauth.start, oauth.end, "accessToken")) : "";
     if (token.empty()) {
-        r.error = FormatError(L"%ls has no Claude.ai login token (claudeAiOauth.accessToken)", path.c_str());
+        r.error = FormatError(L"%ls has no Claude.ai login token (claudeAiOauth.accessToken) -- sign in with "
+                              L"/login in Claude Code as this profile",
+                              path.c_str());
         return r;
     }
     long long expiresAtMs = _atoi64(RawValue(content, oauth.start, oauth.end, "expiresAt").c_str());
