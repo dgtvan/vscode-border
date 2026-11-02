@@ -54,6 +54,14 @@ enum class FocusTargetKind {
 // makes a log line attributable to one call site.
 bool RequestForeground(HWND target, FocusTargetKind kind, const wchar_t* reason);
 
+// The same, for a target that may be minimized: restores it first and lets
+// the restore's own (asynchronous) activation have a chance to take the
+// foreground before any SetForegroundWindow is made, because a request in
+// that gap is refused however it is asked -- and warned about as a lost
+// click that was in fact about to land. Returns false only for a dead
+// window; a deferred request's outcome is reported in the log, not here.
+bool RequestForegroundRestoringIfMinimized(HWND target, FocusTargetKind kind, const wchar_t* reason);
+
 // Records an observed foreground change (from the EVENT_SYSTEM_FOREGROUND
 // hook -- desktop-wide, so this sees switches this app didn't cause too).
 // Attributes each one to this app or to something else by proximity to the

@@ -248,6 +248,55 @@ static void CancelTaskbarFlashNowAndAfterSettling(HWND target) {
     if (id) g_flashStopTimers[id] = target;
 }
 
+// A minimized target is the one case where a denial means nothing, and the
+// reason the deferred path below exists. Restoring another process's window
+// activates it -- but asynchronously: ShowWindow returns long before that
+// activation reaches the foreground. A SetForegroundWindow in that gap is
+// refused (this app is not foreground, and the target is not yet either),
+// so the app warned that a click had been lost at the exact moment it was
+// about to land: the very next line in the log was the target arriving as
+// the foreground, with the click's own reason tag on it. See
+// bugs/2026-11-02-focus-denied-on-minimized-restore.md.
+//
+// So restore, give that activation the same settle delay the flash-cancel
+// uses, and only ask for the foreground if the window did not come forward
+// on its own. Note that this is not a retry of a refused request, which
+// this file deliberately never does -- at that point no request has been
+// made at all.
+static const UINT kRestoreSettleDelayMs = kFlashStopSettleDelayMs;
+
+struct PendingRestoreActivation {
+    HWND target = nullptr;
+    FocusTargetKind kind = FocusTargetKind::ExternalWindow;
+    const wchar_t* reason = L"";
+    DWORD tick = 0;
+};
+static std::unordered_map<UINT_PTR, PendingRestoreActivation> g_restoreTimers;
+
+static void CALLBACK RestoreSettleTimerProc(HWND, UINT, UINT_PTR idEvent, DWORD) {
+    KillTimer(nullptr, idEvent);
+    auto it = g_restoreTimers.find(idEvent);
+    if (it == g_restoreTimers.end()) return;
+    PendingRestoreActivation p = it->second;
+    g_restoreTimers.erase(it);
+    if (!p.target || !IsWindow(p.target)) return;
+
+    if (GetForegroundWindow() == p.target) {
+        Log(L"focus request reason=[%ls] granted by the restore itself within %ums -- the minimized target came "
+            L"forward on its own, so no SetForegroundWindow was needed, hwnd=%p",
+            p.reason, kRestoreSettleDelayMs, p.target);
+        // Recorded with the tick of the restore, not of this callback, so a
+        // sweep across several minimized items still groups as one burst.
+        PruneOlderThanWindow(g_attempts, p.tick, kRequestBurstWindowMs);
+        g_attempts.push_back({p.tick, p.target, true, p.reason});
+        return;
+    }
+    Log(L"focus request reason=[%ls] -- the minimized target had not taken the foreground %ums after its restore, "
+        L"asking for it now",
+        p.reason, kRestoreSettleDelayMs);
+    RequestForeground(p.target, p.kind, p.reason);
+}
+
 bool RequestForeground(HWND target, FocusTargetKind kind, const wchar_t* reason) {
     DWORD now = GetTickCount();
     HWND before = GetForegroundWindow();
@@ -311,6 +360,39 @@ bool RequestForeground(HWND target, FocusTargetKind kind, const wchar_t* reason)
                            kRequestBurstWindowMs, true);
     }
     return ok != 0;
+}
+
+bool RequestForegroundRestoringIfMinimized(HWND target, FocusTargetKind kind, const wchar_t* reason) {
+    if (!target || !IsWindow(target)) return false;
+    if (!IsIconic(target)) return RequestForeground(target, kind, reason);
+
+    DWORD now = GetTickCount();
+    ShowWindow(target, SW_RESTORE);
+
+    // Attribution for the foreground change the restore is about to
+    // produce, set up front because that change arrives within
+    // milliseconds -- long before the settle pass below confirms it.
+    // Without this the trace calls it `source=external (not this app)` and
+    // files it in the churn queue as a window fighting for the foreground,
+    // when it is this app's own gesture succeeding.
+    g_lastRequestTick = now;
+    g_lastRequestReason = reason;
+    g_lastRequestGranted = true;
+    if (kind == FocusTargetKind::ExternalWindow) OpenSuspectPeriod(now, kSuspectAfterRequestMs, reason);
+
+    wchar_t targetDesc[400] = {};
+    DescribeWindowForLog(target, targetDesc, 400);
+    Log(L"focus request reason=[%ls] kind=%ls deferred: restored a minimized target, waiting %ums to see whether "
+        L"its own activation takes the foreground before asking. target: %ls",
+        reason, kind == FocusTargetKind::ExternalWindow ? L"external" : L"own-ui", kRestoreSettleDelayMs,
+        targetDesc);
+
+    UINT_PTR id = SetTimer(nullptr, 0, kRestoreSettleDelayMs, RestoreSettleTimerProc);
+    // No timer means no second chance to ask, so ask now rather than
+    // silently dropping the activation.
+    if (!id) return RequestForeground(target, kind, reason);
+    g_restoreTimers[id] = {target, kind, reason, now};
+    return true;
 }
 
 void NoteForegroundChange(HWND hwnd, bool isTrackedVSCodeWindow) {

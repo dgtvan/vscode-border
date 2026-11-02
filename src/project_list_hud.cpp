@@ -586,8 +586,7 @@ static void ActivateProjectListItem(ProjectListHudState* state, int index, const
     bool minimized = IsIconic(target) != 0;
     Log(L"hud activate reason=[%ls] index=%d label=[%ls]%ls", reason, index,
         state->entries[index].label.c_str(), minimized ? L" -- restoring minimized target first" : L"");
-    if (minimized) ShowWindow(target, SW_RESTORE);
-    RequestForeground(target, FocusTargetKind::ExternalWindow, reason);
+    RequestForegroundRestoringIfMinimized(target, FocusTargetKind::ExternalWindow, reason);
 }
 
 // The running VS Code window the CLI shim is derived from (see
@@ -633,8 +632,8 @@ static void EndProjectListHoverFocus(ProjectListHudState* state, bool restorePre
     state->previousForeground = nullptr;
 
     if (restorePrevious && previous && IsWindow(previous)) {
-        if (IsIconic(previous)) ShowWindow(previous, SW_RESTORE);
-        RequestForeground(previous, FocusTargetKind::ExternalWindow, L"hud-hover-restore-previous");
+        RequestForegroundRestoringIfMinimized(previous, FocusTargetKind::ExternalWindow,
+                                              L"hud-hover-restore-previous");
     }
 }
 

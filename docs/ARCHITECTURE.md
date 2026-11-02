@@ -375,6 +375,25 @@ and for the flyout case it would not work anyway (below). The click is
 dropped; only the misleading pulse is taken back. The `[WARN]` stays,
 because a click that silently did nothing is still worth knowing about.
 
+### A minimized target is restored, then given time to come forward
+
+Restoring a window owned by another process activates it -- but asynchronously:
+`ShowWindow(SW_RESTORE)` returns long before that activation reaches the
+foreground. The hub used to restore a minimized target and ask for the
+foreground in the next statement, in a gap where neither this app nor the
+target was foreground, so the request was refused and warned about as a lost
+click one line before the log showed the window arriving. One of 41 hub
+activations in the run that found it, and the only `focus denied` in the log
+at all -- see `bugs/2026-11-02-focus-denied-on-minimized-restore.md`.
+
+`RequestForegroundRestoringIfMinimized` handles that case: restore, take
+attribution for the foreground change the restore is about to cause (so it
+reads `source=hud-click` rather than `external`, and is not filed as churn),
+then after the same 250 ms settle delay either record that the restore
+granted it by itself or make the ordinary request and warn if *that* is
+refused. No request is made before the settle pass, so this is not the retry
+the previous section rules out.
+
 ### A click past a taskbar flyout
 
 Cancelling the pulse left the click itself lost, and in practice that was

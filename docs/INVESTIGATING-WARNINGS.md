@@ -255,6 +255,17 @@ so the surrounding log lines are the evidence, not any file on disk.
   removing whatever made the request unwinnable -- see "A click past a
   taskbar flyout" in `docs/ARCHITECTURE.md`.
 
+  One shape is **not** this: a target that was minimized. The line above a
+  `hud-click` denial says `-- restoring minimized target first` in that case,
+  and the restore's own activation lands a moment later, so the window does
+  come forward and nothing is lost. That path no longer asks for the
+  foreground in the racy gap at all (`RequestForegroundRestoringIfMinimized`,
+  fixed 2026-11-02), and a healthy instance now logs `deferred: restored a
+  minimized target ...` followed by `granted by the restore itself within
+  250ms`. A `focus denied` on a minimized target reaching the log *after*
+  that fix is a real denial -- the restore did not activate the window --
+  and gets the treatment below.
+
   The triggers seen in practice were shell panels holding the foreground
   when a HUD click landed: the taskbar's thumbnail flyout
   (`XamlExplorerHostIslandWindow`, opened by clicking VS Code's grouped
