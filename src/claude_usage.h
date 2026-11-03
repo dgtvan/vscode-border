@@ -34,6 +34,7 @@ struct ClaudeUsageSnapshot {
     ClaudeUsageLimit session, weekly; // from the last successful fetch
     long long fetchedAt = 0;          // Unix seconds of that fetch
     std::wstring error;               // why the latest attempt failed, empty if it succeeded
+    bool transientError = false;      // that failure was the API being unreachable, after retries
     long long errorAt = 0;
 };
 
@@ -46,7 +47,9 @@ void SyncClaudeUsageMonitor(HWND notifyWnd, UINT notifyMsg);
 void StopClaudeUsageMonitor();
 
 // Main thread, on `notifyMsg`: logs what changed since the last call -- a
-// failure as a warning, once per distinct error, and its recovery.
+// failure as a warning, once per distinct error, and its recovery. The API
+// being unreachable warns only once it has outlived a refresh, since a
+// momentary blip fixes itself by the next one.
 void ProcessClaudeUsageResults();
 
 // One snapshot per monitored Claude profile: the default first, then the

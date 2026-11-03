@@ -119,6 +119,7 @@ struct FetchResult {
     bool ok = false;
     ClaudeUsageLimit session, weekly;
     std::wstring error;
+    bool transientError = false; // the API couldn't be reached, see TransientWinHttpError
     std::wstring note; // something worth logging that isn't a failure (a renewed login)
 };
 
@@ -198,8 +199,11 @@ std::wstring FormatError(const wchar_t* fmt, ...) {
 }
 
 // GET https://api.anthropic.com/api/oauth/usage with `token`; true with
-// the body in `body` on HTTP 200.
-bool HttpGetUsage(const std::string& token, std::string& body, std::wstring& error) {
+// the body in `body` on HTTP 200. `reachError` is set to the WinHTTP error
+// when the request never got an answer, and left 0 for every other failure
+// (a bad token, an unexpected body), so only the former is retried.
+bool HttpGetUsageOnce(const std::string& token, std::string& body, std::wstring& error, DWORD& reachError) {
+    reachError = 0;
     HINTERNET session = WinHttpOpen(L"vscode-border", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                     WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) {
@@ -220,7 +224,8 @@ bool HttpGetUsage(const std::string& token, std::string& body, std::wstring& err
     SecureZeroMemory(&headers[0], headers.size() * sizeof(wchar_t));
     bool ok = false;
     if (!sent) {
-        error = FormatError(L"couldn't reach api.anthropic.com (WinHTTP error %lu)", GetLastError());
+        reachError = GetLastError();
+        error = FormatError(L"couldn't reach api.anthropic.com (WinHTTP error %lu)", reachError);
     } else {
         DWORD status = 0, size = sizeof(status);
         WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
@@ -251,6 +256,44 @@ bool HttpGetUsage(const std::string& token, std::string& body, std::wstring& err
     if (connect) WinHttpCloseHandle(connect);
     WinHttpCloseHandle(session);
     return ok;
+}
+
+// Whether a WinHTTP failure is a momentary one worth trying again: DNS,
+// connect, timeout and dropped-connection errors, which is what a laptop
+// waking up, a VPN reconnecting or a Wi-Fi blip look like. A TLS or proxy
+// refusal is an answer, not a blip, so it isn't in here.
+bool TransientWinHttpError(DWORD error) {
+    switch (error) {
+        case ERROR_WINHTTP_TIMEOUT:
+        case ERROR_WINHTTP_NAME_NOT_RESOLVED:
+        case ERROR_WINHTTP_CANNOT_CONNECT:
+        case ERROR_WINHTTP_CONNECTION_ERROR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+const int kReachAttempts = 3;
+const DWORD kReachRetryMs = 3000;
+
+// HttpGetUsageOnce, retrying a request that never reached the API up to
+// kReachAttempts times. `transient` says the API stayed unreachable, so the
+// caller can treat it as a blip rather than an answer. Returns early if
+// `stop` fires, so quitting doesn't wait out the retries.
+bool HttpGetUsage(HANDLE stop, const std::string& token, std::string& body, std::wstring& error, bool& transient) {
+    transient = false;
+    for (int attempt = 1;; attempt++) {
+        DWORD reachError = 0;
+        if (HttpGetUsageOnce(token, body, error, reachError)) return true;
+        if (!TransientWinHttpError(reachError)) return false;
+        transient = true;
+        if (attempt >= kReachAttempts || WaitForSingleObject(stop, kReachRetryMs) == WAIT_OBJECT_0) {
+            error += FormatError(L", %d attempt(s) over %d seconds", attempt,
+                                 (attempt - 1) * (int)(kReachRetryMs / 1000));
+            return false;
+        }
+    }
 }
 
 // The Claude Code executable: on PATH (the native installer's
@@ -399,15 +442,16 @@ bool HasLoginToken(const std::wstring& dir) {
     return has;
 }
 
-FetchResult FetchClaudeUsageOnce(const std::wstring& dir);
+FetchResult FetchClaudeUsageOnce(HANDLE stop, const std::wstring& dir);
 
 // One fetch for the profile with config folder `dir` and environment
 // `environment`. When the login has expired, has Claude Code renew it (see
 // RunClaudeCodeToRenewLogin) and fetches again -- once per expired token
 // (`renewTriedFor`, the expiresAt last tried), so a renewal that doesn't
 // work isn't retried every fetch. Doesn't log: it runs on a worker thread.
-FetchResult FetchClaudeUsage(const std::wstring& dir, const std::wstring& environment, long long& renewTriedFor) {
-    FetchResult r = FetchClaudeUsageOnce(dir);
+FetchResult FetchClaudeUsage(HANDLE stop, const std::wstring& dir, const std::wstring& environment,
+                            long long& renewTriedFor) {
+    FetchResult r = FetchClaudeUsageOnce(stop, dir);
     long long expiredAt = r.ok ? 0 : ReadLoginExpiry(dir);
     if (r.ok || expiredAt <= 0 || expiredAt / 1000 > UnixNow() || expiredAt == renewTriedFor) return r;
     renewTriedFor = expiredAt;
@@ -430,13 +474,13 @@ FetchResult FetchClaudeUsage(const std::wstring& dir, const std::wstring& enviro
         }
         return r;
     }
-    FetchResult renewed = FetchClaudeUsageOnce(dir);
+    FetchResult renewed = FetchClaudeUsageOnce(stop, dir);
     renewed.note = L"renewed the expired login (it had expired at " + FormatLocalTime(expiredAt / 1000) +
                    L") by running Claude Code: " + exe;
     return renewed;
 }
 
-FetchResult FetchClaudeUsageOnce(const std::wstring& dir) {
+FetchResult FetchClaudeUsageOnce(HANDLE stop, const std::wstring& dir) {
     FetchResult r;
     std::wstring path = CredentialsPath(dir);
     std::string content;
@@ -470,7 +514,7 @@ FetchResult FetchClaudeUsageOnce(const std::wstring& dir) {
     }
 
     std::string body;
-    bool ok = HttpGetUsage(token, body, r.error);
+    bool ok = HttpGetUsage(stop, token, body, r.error, r.transientError);
     SecureZeroMemory(&token[0], token.size());
     if (!ok) return r;
 
@@ -510,6 +554,7 @@ struct Worker {
     unsigned loggedSeq = 0;
     std::wstring loggedError;
     bool loggedOk = false;
+    int failures = 0; // consecutive failed fetches, reset by a success
 };
 
 SRWLOCK g_lock = SRWLOCK_INIT;
@@ -526,8 +571,10 @@ void Report(Worker& w, const FetchResult& r) {
         w.snapshot.weekly = r.weekly;
         w.snapshot.fetchedAt = now;
         w.snapshot.error.clear();
+        w.snapshot.transientError = false;
     } else {
         w.snapshot.error = r.error;
+        w.snapshot.transientError = r.transientError;
         w.snapshot.errorAt = now;
     }
     w.seq++;
@@ -543,7 +590,7 @@ DWORD WINAPI WorkerThread(LPVOID param) {
     long long renewTriedFor = 0;
     bool failed = false;
     do {
-        FetchResult r = FetchClaudeUsage(w.configDir, w.environment, renewTriedFor);
+        FetchResult r = FetchClaudeUsage(w.stopEvent, w.configDir, w.environment, renewTriedFor);
         failed = !r.ok;
         Report(w, r);
     } while (!WaitForNextFetch(w.stopEvent, intervalMs, failed, w.configDir));
@@ -604,6 +651,7 @@ void SyncClaudeUsageMonitor(HWND notifyWnd, UINT notifyMsg) {
             w->snapshot = old->snapshot;
             w->loggedError = old->loggedError;
             w->loggedOk = old->loggedOk;
+            w->failures = old->failures;
         }
         w->stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         w->thread = CreateThread(nullptr, 0, WorkerThread, new std::shared_ptr<Worker>(w), 0, nullptr);
@@ -636,8 +684,20 @@ void ProcessClaudeUsageResults() {
         if (seq == w->loggedSeq) continue;
         w->loggedSeq = seq;
         if (!s.error.empty()) {
-            if (s.error != w->loggedError) {
-                LogWarn(L"claude_usage: can't read Claude usage for %ls: %ls", who.c_str(), s.error.c_str());
+            w->failures++;
+            // An unreachable API is almost always a blip -- a dropped Wi-Fi
+            // link, a VPN reconnecting -- that the next refresh gets past on
+            // its own, and the fetch has already retried within this one. So
+            // it only warns (and badges the tray) once it has survived a
+            // whole refresh interval; every other failure is an answer and
+            // warns the first time it is seen.
+            bool warn = s.transientError ? w->failures == 2 : s.error != w->loggedError;
+            if (warn) {
+                LogWarn(L"claude_usage: can't read Claude usage for %ls: %ls%ls", who.c_str(), s.error.c_str(),
+                        s.transientError ? L" -- still unreachable a refresh later" : L"");
+            } else if (w->failures == 1) {
+                LogDiag(L"claude_usage: couldn't read Claude usage for %ls: %ls -- trying again at the next refresh",
+                        who.c_str(), s.error.c_str());
             } else {
                 LogDiag(L"claude_usage: still can't read Claude usage for %ls: %ls", who.c_str(), s.error.c_str());
             }
@@ -645,6 +705,7 @@ void ProcessClaudeUsageResults() {
             w->loggedOk = false;
             continue;
         }
+        w->failures = 0;
         bool first = !w->loggedOk;
         (first ? Log : LogDiag)(L"claude_usage: %ls%ls: session %.0f%% (resets %ls), weekly %.0f%% (resets %ls)",
                                 who.c_str(), w->loggedError.empty() ? L"" : L" readable again", s.session.percent,
