@@ -37,3 +37,17 @@ CodexRolloutMeta ParseCodexRolloutMeta(const std::string& head);
 // since the nested objects inside a half-line can otherwise read as a
 // complete event of their own.
 std::wstring ParseCodexRolloutStatus(const std::string& region, bool startsMidLine);
+
+// The `timestamp` of the newest complete line in `region` ("" when it holds
+// none), as Codex writes it: `2026-11-04T08:02:45.989Z`. This, not the
+// rollout's last-write time, is how fresh the file is: Windows leaves the
+// directory entry's timestamp behind while a handle keeps appending, and
+// Codex holds its rollout open, so a live rollout's recorded time can be
+// over an hour stale while its size and contents are current (measured --
+// see docs/CODEX-AI-STATUS.md).
+std::string ParseCodexRolloutActivity(const std::string& region, bool startsMidLine);
+
+// Whether `timestamp` (as above) is more than `minutes` old by the system
+// clock. False for a timestamp that can't be read, so an unreadable one
+// never passes for silence.
+bool IsCodexTimestampStale(const std::string& timestamp, unsigned minutes);

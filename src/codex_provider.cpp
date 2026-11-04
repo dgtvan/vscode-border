@@ -41,7 +41,7 @@ const DWORD kMaxTailBytes = 4 * 1024 * 1024;
 // happen: a real local rollout ends on a completed assistant message with
 // its task_started never closed, and has sat that way for hours. Without
 // this, that session would read as "working" for good.
-const DWORD kWorkingSilenceMinutes = 10;
+const unsigned kWorkingSilenceMinutes = 10;
 
 std::string ReadRange(const std::wstring& path, ULONGLONG offset, DWORD maxBytes) {
     // Full sharing, including write: a live session has this file open and
@@ -64,24 +64,15 @@ std::string ReadRange(const std::wstring& path, ULONGLONG offset, DWORD maxBytes
     return buf;
 }
 
-bool FileInfo(const std::wstring& path, ULONGLONG& size, FILETIME& lastWrite) {
+// How big the rollout is now. Only the size is taken from the directory
+// entry: its last-write time is not maintained while Codex keeps the file
+// open, so it says nothing about how fresh the contents are (see
+// ParseCodexRolloutActivity).
+bool FileSize(const std::wstring& path, ULONGLONG& size) {
     WIN32_FILE_ATTRIBUTE_DATA data;
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return false;
     size = ((ULONGLONG)data.nFileSizeHigh << 32) | data.nFileSizeLow;
-    lastWrite = data.ftLastWriteTime;
     return true;
-}
-
-bool IsOlderThanMinutes(const FILETIME& ft, DWORD minutes) {
-    FILETIME now;
-    GetSystemTimeAsFileTime(&now);
-    ULARGE_INTEGER a, b;
-    a.LowPart = ft.dwLowDateTime;
-    a.HighPart = ft.dwHighDateTime;
-    b.LowPart = now.dwLowDateTime;
-    b.HighPart = now.dwHighDateTime;
-    if (b.QuadPart <= a.QuadPart) return false;
-    return (b.QuadPart - a.QuadPart) > (ULONGLONG)minutes * 60ULL * 10000000ULL;
 }
 
 // The content span (between the braces) of one line's root object, or false
@@ -214,6 +205,41 @@ std::wstring ParseCodexRolloutStatus(const std::string& region, bool startsMidLi
     return status;
 }
 
+std::string ParseCodexRolloutActivity(const std::string& region, bool startsMidLine) {
+    size_t floor = 0;
+    if (startsMidLine) {
+        size_t newline = region.find('\n');
+        if (newline == std::string::npos) return "";
+        floor = newline + 1;
+    }
+
+    std::string timestamp;
+    ForEachLineBackwards(region, floor, [&](const std::string& line) {
+        size_t objStart = 0, objEnd = 0;
+        if (!LineObject(line, objStart, objEnd)) return false;
+        timestamp = StringField(line, objStart, objEnd, "timestamp");
+        return !timestamp.empty();
+    });
+    return timestamp;
+}
+
+bool IsCodexTimestampStale(const std::string& timestamp, unsigned minutes) {
+    SYSTEMTIME st = {};
+    if (sscanf(timestamp.c_str(), "%hu-%hu-%huT%hu:%hu:%hu", &st.wYear, &st.wMonth, &st.wDay, &st.wHour, &st.wMinute,
+               &st.wSecond) != 6)
+        return false;
+    FILETIME then, now;
+    if (!SystemTimeToFileTime(&st, &then)) return false;
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER a, b;
+    a.LowPart = then.dwLowDateTime;
+    a.HighPart = then.dwHighDateTime;
+    b.LowPart = now.dwLowDateTime;
+    b.HighPart = now.dwHighDateTime;
+    if (b.QuadPart <= a.QuadPart) return false; // clock skew, or a rollout written just now
+    return (b.QuadPart - a.QuadPart) > (ULONGLONG)minutes * 60ULL * 10000000ULL;
+}
+
 void CodexProvider::SyncInstallation(bool /*enabled*/) {
     // Nothing to install or remove: this provider only reads what Codex
     // already writes for itself. Codex does have a Claude-Code-shaped hook
@@ -236,6 +262,7 @@ struct SessionState {
     std::wstring cwd;
     ULONGLONG scannedTo = 0; // bytes consumed; always lands just past a newline
     std::wstring status;     // newest turn boundary seen so far
+    std::string activity;    // newest event timestamp seen so far, as Codex wrote it
     bool loggedSilent = false;
 };
 std::map<std::wstring, SessionState> g_sessions; // rollout path -> state
@@ -389,17 +416,20 @@ void CollectSession(const std::wstring& codexHome, const std::wstring& id, const
     if (state.skip || state.cwd.empty()) return;
 
     ULONGLONG size = 0;
-    FILETIME lastWrite = {};
-    if (!FileInfo(path, size, lastWrite) || size == 0) return;
+    if (!FileSize(path, size) || size == 0) return;
 
     if (size < state.scannedTo) { // replaced or rewritten -- start over
         state.scannedTo = 0;
         state.status.clear();
+        state.activity.clear();
     }
     if (state.scannedTo == 0) {
         for (DWORD window : {kInitialTailBytes, kMaxTailBytes}) {
             ULONGLONG offset = size > window ? size - window : 0;
-            std::wstring status = ParseCodexRolloutStatus(ReadRange(path, offset, window), offset > 0);
+            std::string region = ReadRange(path, offset, window);
+            std::string activity = ParseCodexRolloutActivity(region, offset > 0);
+            if (!activity.empty()) state.activity = activity;
+            std::wstring status = ParseCodexRolloutStatus(region, offset > 0);
             if (!status.empty()) {
                 state.status = status;
                 break;
@@ -412,7 +442,10 @@ void CollectSession(const std::wstring& codexHome, const std::wstring& id, const
         std::string region = ReadRange(path, state.scannedTo, toRead);
         size_t lastNewline = region.find_last_of('\n');
         if (lastNewline != std::string::npos) {
-            std::wstring status = ParseCodexRolloutStatus(region.substr(0, lastNewline + 1), false);
+            std::string whole = region.substr(0, lastNewline + 1);
+            std::string activity = ParseCodexRolloutActivity(whole, false);
+            if (!activity.empty()) state.activity = activity;
+            std::wstring status = ParseCodexRolloutStatus(whole, false);
             if (!status.empty()) state.status = status;
             state.scannedTo += lastNewline + 1;
         }
@@ -420,12 +453,12 @@ void CollectSession(const std::wstring& codexHome, const std::wstring& id, const
     if (state.status.empty()) return;
 
     std::wstring status = state.status;
-    if (status == L"working" && IsOlderThanMinutes(lastWrite, kWorkingSilenceMinutes)) {
+    if (status == L"working" && IsCodexTimestampStale(state.activity, kWorkingSilenceMinutes)) {
         if (!state.loggedSilent) {
             state.loggedSilent = true;
-            Log(L"codex_provider: %ls's turn never reported finishing and its rollout has been silent for over %lu "
-                L"minutes -- reporting it as waiting",
-                id.c_str(), kWorkingSilenceMinutes);
+            Log(L"codex_provider: %ls's turn never reported finishing and its newest rollout event is older than %u "
+                L"minutes (%hs) -- reporting it as waiting",
+                id.c_str(), kWorkingSilenceMinutes, state.activity.c_str());
         }
         status = L"waiting";
     } else {

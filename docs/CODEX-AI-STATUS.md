@@ -124,11 +124,34 @@ One real rollout ends on a completed assistant message with its
 `task_started` never closed -- 21 `task_started` against 20
 `task_complete` for that thread -- and stayed that way for hours.
 A running turn appends to its rollout constantly (reasoning items, token
-counts, one line per completed item), so a `task_started` whose file has
-not been written to for over 10 minutes is reported as Waiting instead.
+counts, one line per completed item), so a `task_started` whose rollout has
+had no new event for over 10 minutes is reported as Waiting instead.
 The cost of that rule is a turn blocked for longer than 10 minutes on a
 single silent step (a long build, or the approval prompt above) reading as
 Waiting.
+
+How old the newest event is comes from the `timestamp` the event itself
+carries, not from the rollout's last-write time. **A live rollout's
+last-write time is not maintained.** Windows leaves the directory entry's
+timestamp behind while a handle keeps appending, and Codex holds its
+rollout open, so the recorded time can be far behind the contents while the
+recorded size stays current. Measured across the seven live rollouts on one
+machine at 08:10:52Z:
+
+| rollout | recorded last write | newest event inside | size: directory vs. handle |
+| --- | --- | --- | --- |
+| A | 06:27:04Z | 08:02:45Z | 2,919,889 = 2,919,889 |
+| B | 02:32:13Z | 04:04:49Z | 386,212 = 386,212 |
+| C | 03:31:16Z | 04:06:42Z | 489,630 = 489,630 |
+| D (4 others) | equal to the newest event | | equal |
+
+So the three rollouts that had been appended to since their directory entry
+was last updated were up to 95 minutes "silent" by their last-write time
+while holding events from minutes ago. Judging silence by that time
+reported every running turn as Waiting once it had run long enough, which
+is the one thing the rule exists to avoid saying wrongly. The size is
+trustworthy (the directory entry and an open handle agree in every case
+measured), so the incremental reads still use it.
 
 ### Subagents
 

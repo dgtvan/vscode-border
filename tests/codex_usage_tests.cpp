@@ -409,6 +409,29 @@ void SetLastWriteMinutesAgo(const std::wstring& path, int minutes) {
     CloseHandle(h);
 }
 
+// An ISO-8601 UTC timestamp in Codex's own format, `minutes` in the past.
+std::string UtcStampMinutesAgo(int minutes) {
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER t;
+    t.LowPart = now.dwLowDateTime;
+    t.HighPart = now.dwHighDateTime;
+    t.QuadPart -= (ULONGLONG)minutes * 60ULL * 10000000ULL;
+    FILETIME then;
+    then.dwLowDateTime = t.LowPart;
+    then.dwHighDateTime = t.HighPart;
+    SYSTEMTIME st;
+    FileTimeToSystemTime(&then, &st);
+    char out[64];
+    sprintf(out, "%04u-%02u-%02uT%02u:%02u:%02u.000Z", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    return out;
+}
+
+std::string EventLineAt(const std::string& type, const std::string& timestamp) {
+    return "{\"timestamp\":\"" + timestamp + "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"" + type +
+           "\",\"turn_id\":\"01a1a41e-4d50-77e1-8772-98eebf9a6573\"}}\n";
+}
+
 // A session_meta line in the shape real rollouts use: a Windows cwd with
 // escaped backslashes, and the system prompt that makes the line long.
 std::string MetaLine(const std::string& id, const std::string& cwd, const std::string& source) {
@@ -417,10 +440,7 @@ std::string MetaLine(const std::string& id, const std::string& cwd, const std::s
            ",\"base_instructions\":{\"text\":\"a long system prompt\"}}}\n";
 }
 
-std::string EventLine(const std::string& type) {
-    return "{\"timestamp\":\"2026-11-04T01:14:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"" + type +
-           "\",\"turn_id\":\"01a1a41e-4d50-77e1-8772-98eebf9a6573\"}}\n";
-}
+std::string EventLine(const std::string& type) { return EventLineAt(type, UtcStampMinutesAgo(0)); }
 
 void CodexStatusTests(const std::wstring& root) {
     CodexRolloutMeta meta = ParseCodexRolloutMeta(MetaLine("abc", "D:\\\\Work\\\\example-service", "\"vscode\""));
@@ -509,10 +529,34 @@ void CodexStatusTests(const std::wstring& root) {
     statuses = provider.LoadStatuses();
     Check(statuses.size() == 1 && statuses[0].status == L"working", "a new turn in a live session reads as working");
 
-    SetLastWriteMinutesAgo(livePath, 30);
+    // Windows does not maintain a file's last-write time while a handle
+    // keeps appending to it, and Codex holds its rollout open: a live
+    // rollout's recorded time can be over an hour behind its contents. So
+    // an unfinished turn counts as silent by its own newest event's
+    // timestamp, and a fresh event keeps it working however old the file
+    // looks.
+    SetLastWriteMinutesAgo(livePath, 90);
+    statuses = provider.LoadStatuses();
+    Check(statuses.size() == 1 && statuses[0].status == L"working",
+          "a running turn stays working when only the file's recorded time is stale");
+
+    WriteFileBytes(livePath, MetaLine(live, "D:\\\\Work\\\\example-service", "\"vscode\"") +
+                                 EventLineAt("task_started", UtcStampMinutesAgo(30)));
     statuses = provider.LoadStatuses();
     Check(statuses.size() == 1 && statuses[0].status == L"waiting",
-          "a turn that stopped being written to is no longer working");
+          "a turn whose newest event is long past is no longer working");
+
+    Check(!IsCodexTimestampStale(UtcStampMinutesAgo(2), 10) &&
+              IsCodexTimestampStale(UtcStampMinutesAgo(45), 10) &&
+              !IsCodexTimestampStale("", 10) && !IsCodexTimestampStale("not-a-timestamp", 10) &&
+              !IsCodexTimestampStale(UtcStampMinutesAgo(-5), 10),
+          "staleness reads the event timestamp, and an unreadable one is never stale");
+    Check(ParseCodexRolloutActivity(EventLineAt("task_started", "2026-11-04T01:02:03.000Z") +
+                                        EventLineAt("token_count", "2026-11-04T01:02:09.500Z"),
+                                    false) == "2026-11-04T01:02:09.500Z" &&
+              ParseCodexRolloutActivity("{\"timestamp\":\"2026-11-04T01:02:09.500Z\"", false).empty() &&
+              ParseCodexRolloutActivity(EventLineAt("task_started", "2026-11-04T01:02:03.000Z"), true).empty(),
+          "the newest complete line's timestamp is how fresh a rollout is");
 
     DeleteFileW(liveLock.c_str());
     Check(provider.LoadStatuses().empty(), "a closed thread's last status is not left on the window");
