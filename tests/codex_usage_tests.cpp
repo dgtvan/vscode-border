@@ -6,6 +6,8 @@
 #include "codex_usage_client.h"
 #include "codex_usage_protocol.h"
 #include "codex_provider.h"
+#include "vscode_profiles.h"
+#include "json_scan.h"
 #include "file_util.h"
 #include "profile_icon.h"
 #include "text_util.h"
@@ -534,6 +536,88 @@ void CodexStatusTests(const std::wstring& root) {
     RemoveDirectoryW(locks.c_str());
     RemoveDirectoryW(home.c_str());
 }
+
+// --- VS Code's own window profiles (src/vscode_profiles.*) ---
+
+// storage.json as VS Code writes it: the profiles it knows by location id,
+// and which one each folder was last opened with. Folder keys are file URIs
+// with the drive colon percent-encoded.
+const char* kStorage = R"({
+  "windowsState": {"openedWindows": []},
+  "userDataProfiles": [
+    {"location": "3140f0a2", "name": "Codex"},
+    {"location": "builtin/agents", "name": "Agents", "useDefaultFlags": {"extensions": true}}
+  ],
+  "profileAssociations": {
+    "workspaces": {
+      "file:///d%3A/Work/example-service": "3140f0a2",
+      "file:///d%3A/Work/other-service": "__default__profile__",
+      "file:///d%3A/Work/example-service.worktrees/TICKET-1234-example-feature": "builtin/agents"
+    },
+    "emptyWindows": {"1793761108469": "3140f0a2"}
+  }
+})";
+
+void VSCodeProfileTests() {
+    Check(FileUriToPath("file:///d%3A/Work/example-service") == L"d:\\Work\\example-service" &&
+              FileUriToPath("file:///c%3A/Users/a%20b/x") == L"c:\\Users\\a b\\x" &&
+              FileUriToPath("vscode-remote://wsl+ubuntu/home/x").empty(),
+          "a recorded folder URI decodes to its Windows path");
+
+    Check(ParseVSCodeProfileForFolder(kStorage, L"d:\\Work\\example-service") == L"Codex" &&
+              ParseVSCodeProfileForFolder(kStorage, L"D:\\WORK\\EXAMPLE-SERVICE\\") == L"Codex" &&
+              ParseVSCodeProfileForFolder(kStorage,
+                                          L"d:\\Work\\example-service.worktrees\\TICKET-1234-example-feature") ==
+                  L"Agents",
+          "a folder resolves to the VS Code profile it is associated with");
+    Check(ParseVSCodeProfileForFolder(kStorage, L"d:\\Work\\other-service").empty() &&
+              ParseVSCodeProfileForFolder(kStorage, L"d:\\Work\\never-opened").empty() &&
+              ParseVSCodeProfileForFolder(kStorage, L"").empty(),
+          "the default profile and an unknown folder resolve to nothing");
+    std::vector<std::wstring> names = ParseVSCodeProfileNames(kStorage);
+    Check(names.size() == 2 && std::find(names.begin(), names.end(), L"Codex") != names.end() &&
+              std::find(names.begin(), names.end(), L"Agents") != names.end(),
+          "the profiles VS Code knows are listed by name");
+    Check(ParseVSCodeProfileForFolder("", L"d:\\Work\\example-service").empty() &&
+              ParseVSCodeProfileForFolder("{\"profileAssociations\":{}}", L"d:\\Work\\example-service").empty() &&
+              ParseVSCodeProfileForFolder("{\"userDataProfiles\":[{\"location\":\"x\"}],\"profileAssociations\":"
+                                          "{\"workspaces\":{\"file:///d%3A/Work/example-service\":\"x\"}}}",
+                                          L"d:\\Work\\example-service")
+                  .empty(),
+          "missing, empty or nameless VS Code state reports no profile");
+
+    // A folder's own association must be read from the workspaces object
+    // itself, not from a same-named key nested somewhere else in the file.
+    const char* nested = R"({
+      "userDataProfiles": [{"location": "p1", "name": "Codex"}],
+      "backupWorkspaces": {"workspaces": {"file:///d%3A/Work/decoy": "p1"}},
+      "profileAssociations": {"workspaces": {"file:///d%3A/Work/real": "p1"}}
+    })";
+    Check(ParseVSCodeProfileForFolder(nested, L"d:\\Work\\real") == L"Codex" &&
+              ParseVSCodeProfileForFolder(nested, L"d:\\Work\\decoy").empty(),
+          "only profileAssociations decides a folder's profile");
+
+    std::string members = R"({"a": {"nested": 1}, "b": [1, 2], "c": "x"})";
+    std::vector<JsonScan::KeyEntry> found = JsonScan::FindObjectMembers(members, 1, members.size() - 1);
+    Check(found.size() == 3 && JsonScan::KeyName(members, found[0]) == "a" &&
+              JsonScan::KeyName(members, found[1]) == "b" && JsonScan::KeyName(members, found[2]) == "c",
+          "object members are enumerated without descending into them");
+
+    std::vector<Profile> saved = g_config.profiles;
+    Profile profile;
+    profile.type = ProfileType::Codex;
+    profile.name = L"Codex";
+    profile.configDir = L"C:\\accounts\\codex";
+    profile.slot = 3;
+    profile.vscodeProfile = L"no-such-vscode-profile-border-test";
+    g_config.profiles = {profile};
+    Check(ProfileWindowArguments(ProfileId(profile)).empty(),
+          "a VS Code profile name VS Code doesn't have is never passed to --profile");
+    g_config.profiles[0].vscodeProfile.clear();
+    Check(ProfileWindowArguments(ProfileId(g_config.profiles[0])).empty(),
+          "an account with no VS Code profile launches without --profile");
+    g_config.profiles = saved;
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -550,6 +634,7 @@ int wmain(int argc, wchar_t** argv) {
     WindowProfileTests(dir);
     ClientTests(dir, dir + L"\\codex_usage_tests.exe");
     CodexStatusTests(dir);
+    VSCodeProfileTests();
     auto icon = RenderProfileIcon(L"Example", L"", kProfileIconSize);
     Check(icon.size() == kProfileIconSize * kProfileIconSize &&
           std::any_of(icon.begin(), icon.end(), [](UINT32 pixel) { return pixel != 0; }), "shared profile badge rendering");

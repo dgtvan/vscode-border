@@ -542,6 +542,7 @@ profile_1_icon=
 profile_1_color=
 profile_1_ring_badge=true
 profile_1_usage_enabled=true
+profile_1_vscode_profile=Claude Personal
 
 profile_2_type=Codex
 profile_2_name=Codex Personal
@@ -550,6 +551,7 @@ profile_2_icon=
 profile_2_color=172B36
 profile_2_ring_badge=true
 profile_2_usage_enabled=true
+profile_2_vscode_profile=Codex Personal
 ```
 
 - **Type and path:** type is case-insensitive. `None`, an empty type, or an
@@ -565,6 +567,13 @@ profile_2_usage_enabled=true
   so an inherited account cannot choose the window's assistant. Other
   extensions stay enabled. The selected assistant must be installed and
   enabled in the VS Code profile. Terminal CLI commands remain available.
+  Both of those only hold for the window being opened -- see
+  [One assistant per window](#one-assistant-per-window).
+- **VS Code profile:** `_vscode_profile` names a VS Code profile to open this
+  account's windows with (`code --profile`), which is the only setting that
+  keeps the account in place afterwards. A name VS Code doesn't have is
+  ignored with a warning, since opening with it would create an empty
+  profile.
 - **Changing windows:** Reopen As closes the old window normally, then opens
   its folder under the selected profile. VS Code still prompts for unsaved
   changes; cancelling the close cancels reopening. Opening an already-open
@@ -581,10 +590,53 @@ profile_2_usage_enabled=true
 - **Window identity:** app-managed selections, including None and empty
   windows, are saved in `window_profiles.ini` with window/process identity
   and restored when vscode-border restarts. A closed window is forgotten.
-  Without an app launch record, Claude IDE lock files provide best-effort
-  folder matching. External Codex windows cannot reliably be assigned an
-  account; the app does not assume the first configured profile. Restart All
-  warns about windows whose folder or selected account cannot be recovered.
+  Without an app launch record, the folder's VS Code profile decides, when
+  it maps to a configured account (`_vscode_profile`); failing that, Claude
+  IDE lock files provide best-effort folder matching. A Codex window with
+  neither cannot reliably be assigned an account; the app does not assume the
+  first configured profile. Restart All warns about windows whose folder or
+  selected account cannot be recovered.
+
+#### One assistant per window
+
+Neither the environment nor the disabled extension survives on its own. VS
+Code's `--disable-extension` is, in its own help, "not persisted and ...
+effective only when the command opens a new window", so it is gone as soon as
+the window reloads -- which opening a folder in it does. And a window VS Code
+opens by itself (**File > Open Folder**, a worktree picker, **New Window**)
+gets the VS Code process's environment, not the one this app passed for the
+window it was opened from, so `CLAUDE_CONFIG_DIR` falls back to whatever the
+user account sets. Both mean such a window can run a different account than
+the window it came from -- including the one whose terminal you then type
+`claude` in.
+
+A VS Code profile does survive both: it carries its own enabled extensions
+and its own settings, and VS Code hands it to windows it opens itself. So to
+pin one assistant to a window, give each account a VS Code profile
+(`_vscode_profile`) and set up that profile once in VS Code:
+
+- Enable only that account's assistant extension in it, and mark the
+  extensions that have nothing to do with either "Apply to all profiles" so
+  they stay available everywhere.
+- Put the account folders in the profile's own settings, pointing the other
+  assistant's variable at an empty folder so its CLI finds no login rather
+  than silently using the account configured in another slot:
+
+```jsonc
+// settings for the VS Code profile of a Codex account
+"terminal.integrated.env.windows": {
+  "CODEX_HOME": "C:\\Users\\you\\.codex",
+  "CLAUDE_CONFIG_DIR": "C:\\Users\\you\\.no-claude"
+}
+```
+
+VS Code remembers which profile each folder was last opened with, which is
+also what lets this app recognize a window it did not open. That record holds
+one profile per folder, so the same folder cannot be open under two accounts
+at once: opening it as the second account re-points the folder, and the next
+window VS Code opens for it by itself runs that account. The app warns when a
+window's folder is pinned to an account other than the one the window is
+running, and **Reopen As** pins it back.
 
 **Existing configurations migrate automatically.** When only old
 `claude_profile_<N>_*` / `codex_profile_<N>_*` keys are present, the app
@@ -789,6 +841,10 @@ to pick up worktrees created after the app started.
   registrations in every Claude profile's `settings.json`, reads the per-session status files
   `claude_status_hook.ps1` writes, and auto-expires ones whose recorded pid is no longer a live
   `claude.exe` process (see "Known limitations" above).
+- `src/vscode_profiles.*` -- reads VS Code's own profile records (`storage.json`:
+  `userDataProfiles`, `profileAssociations`) to tell which VS Code profile a folder was last
+  opened with, and whether a configured `_vscode_profile` name exists (see "One assistant per
+  window" above).
 - `src/codex_provider.*` -- Codex's `AiProvider` implementation: installs nothing, and reads each
   Codex profile's live thread locks and session rollouts (see "Codex status" above and
   `docs/CODEX-AI-STATUS.md`).

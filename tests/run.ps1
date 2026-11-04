@@ -4,7 +4,7 @@ $repoDir = Split-Path $PSScriptRoot -Parent
 $buildRoot = [IO.Path]::GetFullPath((Join-Path $repoDir 'bin'))
 $testOutDir = Join-Path $buildRoot ('test-run-' + [Guid]::NewGuid().ToString('N'))
 $compiler = (Get-Command g++.exe -ErrorAction Stop).Source
-$sourceNames = @('config', 'codex_usage', 'codex_usage_client', 'codex_usage_protocol', 'codex_provider',
+$sourceNames = @('config', 'codex_usage', 'codex_usage_client', 'codex_usage_protocol', 'codex_provider', 'vscode_profiles',
                  'file_util', 'json_scan', 'text_util', 'logger', 'layered_rendering', 'profile_icon', 'assistant_profile', 'window_profile', 'profile_config', 'usage_rings',
                  'claude_usage', 'usage_format', 'vscode_cli', 'vscode_installs', 'focus_trace', 'dpi_util')
 $testSources = $sourceNames | ForEach-Object { Join-Path $repoDir "src\$_.cpp" }

@@ -2,6 +2,9 @@
 
 #include <windows.h>
 
+#include <cctype>
+#include <cstdlib>
+
 std::string WideToUtf8(const std::wstring& w) {
     if (w.empty()) return std::string();
     int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -44,4 +47,21 @@ std::wstring UnescapeTextLine(const std::string& s) {
         out += s[i];
     }
     return Utf8ToWide(out);
+}
+
+std::wstring FileUriToPath(const std::string& uri) {
+    const std::string prefix = "file:///";
+    if (uri.compare(0, prefix.size(), prefix) != 0) return L"";
+    std::string decoded;
+    decoded.reserve(uri.size() - prefix.size());
+    for (size_t i = prefix.size(); i < uri.size(); i++) {
+        if (uri[i] == '%' && i + 2 < uri.size() && isxdigit((unsigned char)uri[i + 1]) &&
+            isxdigit((unsigned char)uri[i + 2])) {
+            decoded.push_back((char)strtol(uri.substr(i + 1, 2).c_str(), nullptr, 16));
+            i += 2;
+            continue;
+        }
+        decoded.push_back(uri[i] == '/' ? '\\' : uri[i]);
+    }
+    return Utf8ToWide(decoded);
 }

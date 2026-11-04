@@ -88,7 +88,8 @@ void ReadProfileConfig(const std::string& content, Config& cfg) {
         std::string field = end && *end == '_' ? end + 1 : "";
         if (end == start || slot < 1 || slot > kMaxProfiles ||
             (field != "type" && field != "name" && field != "profile_path" && field != "icon" &&
-             field != "color" && field != "ring_badge" && field != "usage_enabled"))
+             field != "color" && field != "ring_badge" && field != "usage_enabled" &&
+             field != "vscode_profile"))
             LogWarn(L"config: unknown profile key [%hs]", entry.first.c_str());
     }
     for (int i = 1; i <= kMaxProfiles; ++i) {
@@ -115,6 +116,7 @@ void ReadProfileConfig(const std::string& content, Config& cfg) {
         p.slot = i;
         p.name = Utf8ToWide(fields[prefix + "name"]);
         p.icon = Utf8ToWide(fields[prefix + "icon"]);
+        p.vscodeProfile = Utf8ToWide(fields[prefix + "vscode_profile"]);
         p.ringBadge = DefaultEnabled(fields[prefix + "ring_badge"]);
         p.usageEnabled = DefaultEnabled(fields[prefix + "usage_enabled"]);
         p.isDefault = Same(p.configDir, DefaultProviderPath(p.type));
@@ -126,7 +128,8 @@ void ReadProfileConfig(const std::string& content, Config& cfg) {
                 p.color = RGB((n >> 16) & 255, (n >> 8) & 255, n & 255);
             } else LogWarn(L"config: profile_%d_color isn't RRGGBB; ignoring it", i);
         }
-        Log(L"config: profile %d: type=%ls folder=[%ls] usage=%d", i, ProfileTypeName(p.type), p.configDir.c_str(), p.usageEnabled);
+        Log(L"config: profile %d: type=%ls folder=[%ls] usage=%d vscode_profile=[%ls]", i, ProfileTypeName(p.type),
+            p.configDir.c_str(), p.usageEnabled, p.vscodeProfile.c_str());
         cfg.profiles.push_back(p);
     }
 }

@@ -32,36 +32,6 @@ static std::wstring ToLowerCopy(const std::wstring& s) {
     return out;
 }
 
-static std::string PercentDecode(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); i++) {
-        if (s[i] == '%' && i + 2 < s.size() && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) {
-            out.push_back((char)strtol(s.substr(i + 1, 2).c_str(), nullptr, 16));
-            i += 2;
-        } else {
-            out.push_back(s[i]);
-        }
-    }
-    return out;
-}
-
-// Converts a "file:///d%3A/Src/foo" URI (as stored in workspace.json) into a
-// native Windows path ("d:\Src\foo").
-static std::wstring FileUriToPath(const std::string& uri) {
-    const std::string prefix = "file:///";
-    if (uri.compare(0, prefix.size(), prefix) != 0) return L"";
-
-    std::string decoded = PercentDecode(uri.substr(prefix.size()));
-    std::replace(decoded.begin(), decoded.end(), '/', '\\');
-
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, decoded.c_str(), -1, nullptr, 0);
-    if (wlen <= 0) return L"";
-    std::wstring wpath(wlen - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, decoded.c_str(), -1, &wpath[0], wlen);
-    return wpath;
-}
-
 // Extracts the (single, first) string value of "folder": "..." from a
 // workspace.json file -- multi-root ("workspace": "...") entries are
 // skipped since they don't map to a single worktree checkout.

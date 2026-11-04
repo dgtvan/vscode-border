@@ -107,7 +107,8 @@ bool RunVSCodeCli(const std::wstring& cmdPath, const std::wstring& args, const s
     wchar_t system32[MAX_PATH] = {};
     GetSystemDirectoryW(system32, MAX_PATH);
     std::wstring cmdExe = std::wstring(system32) + L"\\cmd.exe";
-    std::wstring commandLine = L"cmd.exe /d /c \"\"" + cmdPath + L"\" " + args + ProfileExtensionArguments(profile) + L"\"";
+    std::wstring commandLine = L"cmd.exe /d /c \"\"" + cmdPath + L"\" " + args + ProfileWindowArguments(profile) +
+                               ProfileExtensionArguments(profile) + L"\"";
     std::wstring environment = ProfileEnvironment(profile);
     STARTUPINFOW si = {sizeof(si)};
     si.dwFlags = STARTF_USESHOWWINDOW;

@@ -14,3 +14,9 @@ std::wstring Utf8ToWide(const std::string& s);
 // text (folder/repo/branch names).
 std::string EscapeTextLine(const std::wstring& w);
 std::wstring UnescapeTextLine(const std::string& s);
+
+// Converts a "file:///d%3A/Src/foo" URI -- how VS Code records folders in
+// its own state (workspace.json, storage.json) -- into a native Windows
+// path ("d:\Src\foo"), percent-escapes decoded. Empty for anything that
+// isn't a local-file URI.
+std::wstring FileUriToPath(const std::string& uri);

@@ -59,6 +59,17 @@ KeyEntry FindKeyInObject(const std::string& content, size_t objStart, size_t obj
 // element of an array's content span [arrStart, arrEnd), in order.
 std::vector<Span> FindArrayElements(const std::string& content, size_t arrStart, size_t arrEnd);
 
+// Enumerates each `"key": <value>` member directly inside the object whose
+// content span is [objStart, objEnd), in order -- FindKeyInObject for
+// callers that don't know the keys in advance. `keyStart` is the key's
+// opening quote; KeyName below decodes it.
+std::vector<KeyEntry> FindObjectMembers(const std::string& content, size_t objStart, size_t objEnd);
+
+// The key text of a member (from FindObjectMembers/FindKeyInObject),
+// quotes removed and \" \\ \/ \n \t \r unescaped. Not a full JSON string
+// decoder: \uXXXX is left as written, since no caller needs it.
+std::string KeyName(const std::string& content, const KeyEntry& member);
+
 // Removes a `"key": <value>` entry (from FindKeyInObject) from its object,
 // plus whichever adjacent comma/whitespace keeps the object valid -- so the
 // result looks like the entry was never there, not like a blank line was

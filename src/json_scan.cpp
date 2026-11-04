@@ -160,6 +160,46 @@ std::vector<Span> FindArrayElements(const std::string& content, size_t arrStart,
     return elements;
 }
 
+std::vector<KeyEntry> FindObjectMembers(const std::string& content, size_t objStart, size_t objEnd) {
+    std::vector<KeyEntry> members;
+    size_t i = SkipWhitespaceAndComments(content, objStart);
+    while (i < objEnd && content[i] == '"') {
+        size_t keyStart = i;
+        i++;
+        while (i < objEnd) {
+            if (content[i] == '\\') { i += 2; continue; }
+            if (content[i] == '"') { i++; break; }
+            i++;
+        }
+        size_t colon = SkipWhitespaceAndComments(content, i);
+        if (colon >= objEnd || content[colon] != ':') break; // malformed -- stop rather than guess
+        size_t valueStart = SkipWhitespaceAndComments(content, colon + 1);
+        size_t valueEnd = FindValueEnd(content, valueStart);
+        if (valueEnd <= valueStart) break;
+        members.push_back({true, keyStart, valueStart, valueEnd});
+        i = SkipWhitespaceAndComments(content, valueEnd);
+        if (i >= objEnd || content[i] != ',') break;
+        i = SkipWhitespaceAndComments(content, i + 1);
+    }
+    return members;
+}
+
+std::string KeyName(const std::string& content, const KeyEntry& member) {
+    if (!member.found || member.keyStart >= content.size() || content[member.keyStart] != '"') return "";
+    std::string name;
+    for (size_t i = member.keyStart + 1; i < content.size(); i++) {
+        char c = content[i];
+        if (c == '"') break;
+        if (c != '\\' || i + 1 >= content.size()) {
+            name.push_back(c);
+            continue;
+        }
+        char esc = content[++i];
+        name.push_back(esc == 'n' ? '\n' : esc == 't' ? '\t' : esc == 'r' ? '\r' : esc);
+    }
+    return name;
+}
+
 // Shared by RemoveObjectKey/RemoveArrayElement: removes [spanStart, spanEnd)
 // plus whichever adjacent comma/whitespace keeps the container valid.
 static std::string RemoveSpanWithComma(const std::string& content, size_t spanStart, size_t spanEnd) {

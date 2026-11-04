@@ -12,6 +12,8 @@ enum class ProfileType { None, Claude, Codex };
 struct Profile {
     ProfileType type = ProfileType::None;
     std::wstring name, path, configDir, icon;
+    std::wstring vscodeProfile; // VS Code's own profile to open this account's windows with
+                                // (code --profile), empty for none -- see vscode_profiles.h
     bool hasColor = false;
     COLORREF color = RGB(0, 0, 0);
     bool ringBadge = true;

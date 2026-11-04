@@ -9,6 +9,7 @@
 #include "profile_icon.h"
 #include "profile_config.h"
 #include "codex_usage.h"
+#include "vscode_profiles.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -146,6 +147,37 @@ bool IsLockOwnerAlive(DWORD pid, ULONGLONG written) {
     CloseHandle(process);
     std::wstring name = LeafName(path);
     return alive && (_wcsicmp(name.c_str(), L"Code.exe") == 0 || _wcsicmp(name.c_str(), L"Code - Insiders.exe") == 0);
+}
+
+// The configured account whose windows open with VS Code profile `name`
+// (profile_<n>_vscode_profile), or null -- including for the default
+// profile and for a VS Code profile no account claims.
+const Profile* ProfileForVSCodeProfile(const std::wstring& name) {
+    if (name.empty()) return nullptr;
+    for (const Profile& p : g_config.profiles)
+        if (!p.vscodeProfile.empty() && _wcsicmp(p.vscodeProfile.c_str(), name.c_str()) == 0) return &p;
+    return nullptr;
+}
+
+// Says so once when a folder's VS Code profile names a different account
+// than the window is running: the window itself is right (this app set its
+// environment when it launched it), but the folder is pinned elsewhere, so
+// the next window VS Code opens for it by itself will run that other
+// account. Flipping it back is one "Reopen As".
+void WarnIfVSCodeProfileDisagrees(const std::wstring& folder, const std::wstring& running) {
+    static std::map<std::wstring, std::wstring> warned; // folder -> the pairing already reported
+    const Profile* associated = ProfileForVSCodeProfile(VSCodeProfileForFolder(folder));
+    if (folder.empty() || !associated) return;
+    std::wstring associatedId = ProfileId(*associated);
+    if (SameProfile(associatedId, running)) return;
+    std::wstring pairing = running + L"|" + associatedId;
+    auto it = warned.find(folder);
+    if (it != warned.end() && it->second == pairing) return;
+    warned[folder] = pairing;
+    LogWarn(L"claude_profile: [%ls] is open as profile [%ls], but VS Code has the folder on profile [%ls] -- a "
+            L"window VS Code opens for it by itself will run [%ls]; reopen it as [%ls] to pin it back",
+            folder.c_str(), ProfileName(running).c_str(), associated->vscodeProfile.c_str(),
+            ProfileName(associatedId).c_str(), ProfileName(running).c_str());
 }
 
 void RescanLocksIfDue() {
@@ -310,10 +342,23 @@ HBITMAP GetProfileMenuBitmap(const std::wstring& id) {
 }
 
 bool ProfileOfWindow(HWND target, const std::wstring& path, const std::wstring& folderName, std::wstring& profile) {
-    if (ResolveLaunchedWindowProfile(target, path, folderName, profile)) return true;
+    std::wstring folder = TrimTrailingSeparators(path);
+    if (ResolveLaunchedWindowProfile(target, path, folderName, profile)) {
+        WarnIfVSCodeProfileDisagrees(folder, profile);
+        return true;
+    }
+    // A window VS Code opened itself has no launch record here, and VS Code
+    // gives it the VS Code process's environment rather than the one this
+    // app passed for the window it was opened from -- so the folder's VS
+    // Code profile is what the window actually runs, and the only evidence
+    // of it. Before the IDE locks, which only Claude writes (and which a
+    // Codex window's Claude extension writes under the default account).
+    if (const Profile* associated = ProfileForVSCodeProfile(VSCodeProfileForFolder(folder))) {
+        profile = ProfileId(*associated);
+        return true;
+    }
     RescanLocksIfDue();
     profile.clear();
-    std::wstring folder = TrimTrailingSeparators(path);
     // By path; without one, by folder name. Either way the newest lock wins.
     const LiveLock* best = nullptr;
     for (const LiveLock& lock : g_liveLocks) {
@@ -362,6 +407,22 @@ std::wstring ProfileEnvironment(const std::wstring& id) {
     for (const auto& v : vars) out += v + L'\0';
     out += L'\0';
     return out;
+}
+
+std::wstring ProfileWindowArguments(const std::wstring& id) {
+    const Profile* p = FindProfile(id);
+    if (!p || p->vscodeProfile.empty()) return L"";
+    if (!VSCodeProfileExists(p->vscodeProfile)) {
+        static std::map<std::wstring, bool> warned; // one line per name, not per launch
+        if (!warned[p->vscodeProfile]) {
+            warned[p->vscodeProfile] = true;
+            LogWarn(L"claude_profile: VS Code has no profile called [%ls] (profile_%d_vscode_profile) -- opening "
+                    L"with it would create an empty one, so windows for [%ls] are opened without it",
+                    p->vscodeProfile.c_str(), p->slot, ProfileName(id).c_str());
+        }
+        return L"";
+    }
+    return L" --profile \"" + p->vscodeProfile + L"\"";
 }
 
 std::wstring ProfileExtensionArguments(const std::wstring& id) {
