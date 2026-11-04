@@ -1,11 +1,13 @@
 #include "ai_provider.h"
 #include "claude_provider.h"
+#include "codex_provider.h"
 
 #include <algorithm>
 
 std::vector<AiProvider*> GetAllAiProviders() {
     static ClaudeProvider claudeProvider;
-    static std::vector<AiProvider*> registry = {&claudeProvider};
+    static CodexProvider codexProvider;
+    static std::vector<AiProvider*> registry = {&claudeProvider, &codexProvider};
     return registry;
 }
 

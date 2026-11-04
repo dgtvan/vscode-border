@@ -5,6 +5,7 @@
 #include "vscode_cli.h"
 #include "codex_usage_client.h"
 #include "codex_usage_protocol.h"
+#include "codex_provider.h"
 #include "file_util.h"
 #include "profile_icon.h"
 #include "text_util.h"
@@ -387,6 +388,152 @@ void ClientTests(const std::wstring& dir, const std::wstring& exe) {
     RemoveDirectoryW(a.c_str());
     RemoveDirectoryW(b.c_str());
 }
+
+// --- Codex AI status indicator (src/codex_provider.*) ---
+
+void SetLastWriteMinutesAgo(const std::wstring& path, int minutes) {
+    HANDLE h = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER t;
+    t.LowPart = now.dwLowDateTime;
+    t.HighPart = now.dwHighDateTime;
+    t.QuadPart -= (ULONGLONG)minutes * 60ULL * 10000000ULL;
+    FILETIME then;
+    then.dwLowDateTime = t.LowPart;
+    then.dwHighDateTime = t.HighPart;
+    SetFileTime(h, nullptr, nullptr, &then);
+    CloseHandle(h);
+}
+
+// A session_meta line in the shape real rollouts use: a Windows cwd with
+// escaped backslashes, and the system prompt that makes the line long.
+std::string MetaLine(const std::string& id, const std::string& cwd, const std::string& source) {
+    return "{\"timestamp\":\"2026-11-04T01:13:32.221Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{"
+           "\"session_id\":\"" + id + "\",\"cwd\":\"" + cwd + "\",\"source\":" + source +
+           ",\"base_instructions\":{\"text\":\"a long system prompt\"}}}\n";
+}
+
+std::string EventLine(const std::string& type) {
+    return "{\"timestamp\":\"2026-11-04T01:14:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"" + type +
+           "\",\"turn_id\":\"01a1a41e-4d50-77e1-8772-98eebf9a6573\"}}\n";
+}
+
+void CodexStatusTests(const std::wstring& root) {
+    CodexRolloutMeta meta = ParseCodexRolloutMeta(MetaLine("abc", "D:\\\\Work\\\\example-service", "\"vscode\""));
+    Check(meta.found && meta.sessionId == L"abc" && meta.cwd == L"D:\\Work\\example-service" && !meta.subagent,
+          "rollout session_meta gives the session's id and folder");
+    Check(ParseCodexRolloutMeta(MetaLine("abc", "D:\\\\Work", "\"subagent\"")).subagent &&
+              ParseCodexRolloutMeta(MetaLine("abc", "D:\\\\Work", "{\"subagent\":{\"other\":\"guardian\"}}")).subagent,
+          "both subagent session shapes are recognized");
+    Check(!ParseCodexRolloutMeta("{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n").found &&
+              !ParseCodexRolloutMeta(MetaLine("abc", "D:\\\\Work", "\"vscode\"").substr(0, 40)).found,
+          "a rollout with no complete session_meta line reports nothing");
+
+    std::string response = "{\"type\":\"response_item\",\"payload\":{\"type\":\"task_started\"}}\n";
+    Check(ParseCodexRolloutStatus(EventLine("task_started"), false) == L"working" &&
+              ParseCodexRolloutStatus(EventLine("task_started") + EventLine("task_complete"), false) == L"waiting" &&
+              ParseCodexRolloutStatus(EventLine("task_started") + EventLine("turn_aborted"), false) == L"waiting" &&
+              ParseCodexRolloutStatus(EventLine("task_started") + EventLine("exec_approval_request"), false) ==
+                  L"attention",
+          "the newest turn boundary decides the status");
+    Check(ParseCodexRolloutStatus(EventLine("task_complete") + response, false) == L"waiting" &&
+              ParseCodexRolloutStatus(response, false).empty() && ParseCodexRolloutStatus("", false).empty(),
+          "lines that are not turn boundaries are skipped");
+    // A tail read starts mid-line, and that half line still holds whole
+    // nested objects -- which must not read as an event of their own.
+    std::string partial = "\"payload\":{\"type\":\"task_started\"}}\n";
+    Check(ParseCodexRolloutStatus(partial + EventLine("task_complete"), true) == L"waiting" &&
+              ParseCodexRolloutStatus(partial, true).empty() &&
+              ParseCodexRolloutStatus("\"payload\":{\"type\":\"task_started\"}}", true).empty(),
+          "a partial first line is never read as an event");
+
+    std::wstring home = root + L"\\codex-home";
+    std::wstring sessions = home + L"\\sessions";
+    std::wstring locks = home + L"\\thread-writer-locks";
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    wchar_t part[8];
+    std::wstring dir = sessions;
+    CreateDirectoryW(home.c_str(), nullptr);
+    CreateDirectoryW(locks.c_str(), nullptr);
+    CreateDirectoryW(sessions.c_str(), nullptr);
+    swprintf(part, 8, L"\\%04u", now.wYear);
+    dir += part;
+    CreateDirectoryW(dir.c_str(), nullptr);
+    swprintf(part, 8, L"\\%02u", now.wMonth);
+    dir += part;
+    CreateDirectoryW(dir.c_str(), nullptr);
+    swprintf(part, 8, L"\\%02u", now.wDay);
+    dir += part;
+    CreateDirectoryW(dir.c_str(), nullptr);
+
+    const std::string live = "01a1a41e-297a-79e3-8e5d-bd96629a822f";
+    const std::string closed = "01a1a440-0dae-7712-9a18-14c7c55bab0e";
+    const std::string subagent = "01a1a49c-6776-7c03-a255-5d18225e9600";
+    std::wstring livePath = dir + L"\\rollout-2026-11-04T08-13-22-" + Utf8ToWide(live) + L".jsonl";
+    std::wstring closedPath = dir + L"\\rollout-2026-11-04T08-50-24-" + Utf8ToWide(closed) + L".jsonl";
+    std::wstring subagentPath = dir + L"\\rollout-2026-11-04T10-31-16-" + Utf8ToWide(subagent) + L".jsonl";
+    std::wstring liveLock = locks + L"\\" + Utf8ToWide(live) + L".lock";
+    std::wstring subagentLock = locks + L"\\" + Utf8ToWide(subagent) + L".lock";
+    WriteFileBytes(livePath, MetaLine(live, "D:\\\\Work\\\\example-service", "\"vscode\"") +
+                                 EventLine("task_started") + EventLine("task_complete"));
+    WriteFileBytes(closedPath, MetaLine(closed, "D:\\\\Work\\\\other-service", "\"vscode\"") +
+                                   EventLine("task_started") + EventLine("task_complete"));
+    WriteFileBytes(subagentPath, MetaLine(subagent, "D:\\\\Work\\\\example-service",
+                                          "{\"subagent\":{\"other\":\"guardian\"}}") + EventLine("task_started"));
+    WriteFileBytes(liveLock, "");
+    WriteFileBytes(subagentLock, "");
+    WriteFileBytes(locks + L"\\.coordination.lock", "");
+
+    std::vector<Profile> saved = g_config.profiles;
+    Profile profile;
+    profile.type = ProfileType::Codex;
+    profile.name = L"Codex";
+    profile.configDir = home;
+    profile.slot = 1;
+    g_config.profiles = {profile};
+
+    CodexProvider provider;
+    std::vector<AiSessionStatus> statuses = provider.LoadStatuses();
+    Check(statuses.size() == 1 && statuses[0].status == L"waiting" &&
+              statuses[0].cwd == L"D:\\Work\\example-service",
+          "only live, non-subagent sessions are reported");
+
+    // Appending a new turn is picked up from the bytes added since the last
+    // scan, without re-reading the file from the start.
+    WriteFileBytes(livePath, ReadFileBytes(livePath) + EventLine("task_started"));
+    statuses = provider.LoadStatuses();
+    Check(statuses.size() == 1 && statuses[0].status == L"working", "a new turn in a live session reads as working");
+
+    SetLastWriteMinutesAgo(livePath, 30);
+    statuses = provider.LoadStatuses();
+    Check(statuses.size() == 1 && statuses[0].status == L"waiting",
+          "a turn that stopped being written to is no longer working");
+
+    DeleteFileW(liveLock.c_str());
+    Check(provider.LoadStatuses().empty(), "a closed thread's last status is not left on the window");
+
+    WriteFileBytes(liveLock, "");
+    g_config.profiles[0].type = ProfileType::Claude;
+    Check(provider.LoadStatuses().empty(), "a Claude profile folder is never scanned for Codex sessions");
+    g_config.profiles = saved;
+
+    DeleteFileW(livePath.c_str());
+    DeleteFileW(closedPath.c_str());
+    DeleteFileW(subagentPath.c_str());
+    DeleteFileW(liveLock.c_str());
+    DeleteFileW(subagentLock.c_str());
+    DeleteFileW((locks + L"\\.coordination.lock").c_str());
+    for (int depth = 0; depth < 3; depth++) {
+        RemoveDirectoryW(dir.c_str());
+        dir = dir.substr(0, dir.find_last_of(L'\\'));
+    }
+    RemoveDirectoryW(sessions.c_str());
+    RemoveDirectoryW(locks.c_str());
+    RemoveDirectoryW(home.c_str());
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -402,6 +549,7 @@ int wmain(int argc, wchar_t** argv) {
     MigrationTests(dir);
     WindowProfileTests(dir);
     ClientTests(dir, dir + L"\\codex_usage_tests.exe");
+    CodexStatusTests(dir);
     auto icon = RenderProfileIcon(L"Example", L"", kProfileIconSize);
     Check(icon.size() == kProfileIconSize * kProfileIconSize &&
           std::any_of(icon.begin(), icon.end(), [](UINT32 pixel) { return pixel != 0; }), "shared profile badge rendering");

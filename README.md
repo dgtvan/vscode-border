@@ -118,7 +118,7 @@ first build):
 | `label_text_color` | Label text color: a hex `RRGGBB` color, or `auto` to pick black/white based on contrast against the border color. Default `000000` (black). |
 | `label_alias_format` | Border label text for a window with an alias (see [aliases](#project-list-hud-aliases)), using the tokens `<Alias>` and `<Branch>`, e.g. `<Alias> - <Branch>` (default) or just `<Alias>`. Outside a git repo a format using `<Branch>` shows just the alias. The project list HUD always shows just the alias. |
 | `ai_indicator_enabled` | Show the AI status indicator on project list HUD items (`true`/`false` -- see below). Default `true`. |
-| `ai_indicator_provider` | Comma-separated AI services to source it from: `claude` (implemented) and/or `copilot` (reserved, not yet implemented). |
+| `ai_indicator_provider` | Comma-separated AI services to source it from: `claude` and `codex` (implemented), and/or `copilot` (reserved, not yet implemented). Default `claude,codex`. |
 | `ai_indicator_color_working` / `_attention` / `_waiting` | Hex `RRGGBB` colors for the 3 states -- see below. |
 | `ai_indicator_border_color` | Indicator border color: `auto` (black/white by contrast) or a fixed hex `RRGGBB`. Default `auto`. |
 | `usage_meter_enabled` | Show usage rings at the right end of the project list HUD (`true`/`false` -- see [Claude usage rings](#claude-usage-rings) and [Codex usage rings](#codex-usage-rings)). Default `true`; also the master switch for Codex rings. |
@@ -311,7 +311,9 @@ would show -- for a git checkout, the repo and the branch it's on now.
 ### AI status indicator
 
 Each HUD item can show a small status indicator in its top-right corner
-for an AI coding assistant running in that VS Code window's terminal(s):
+for the AI coding assistant running in that VS Code window -- Claude Code
+or Codex, whichever [assistant profile](#assistant-profiles) that window
+runs:
 
 ![Two HUD items each showing a small green "waiting" status square in their top-right corner](assets/ai-indicator.png)
 
@@ -324,6 +326,17 @@ for an AI coding assistant running in that VS Code window's terminal(s):
 - **Waiting** -- green, a single static square -- the turn has finished
   and no background work is left, ready for your next prompt.
 - No indicator at all if nothing's running there.
+
+A window whose account this app knows only ever shows that assistant's own
+sessions, and a window running no assistant shows nothing: both providers
+match sessions to windows by folder, so without that a Codex window would
+light up for the Claude session running on the same folder in another
+window. A window whose account couldn't be determined (one opened outside
+this app) still takes whichever provider reported its folder.
+
+The rest of this section is about Claude Code; for Codex, which needs
+nothing set up and reports fewer states, see [Codex status](#codex-status)
+below and [docs/CODEX-AI-STATUS.md](docs/CODEX-AI-STATUS.md).
 
 The indicator always follows what Claude Code itself tracks for the session
 -- see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#ai-status-follow-claude-code-background-work-included),
@@ -421,8 +434,8 @@ beats Working beats Waiting.
 Controlled by `config.ini`:
 
 ```ini
-ai_indicator_enabled=true      ; turn the whole feature on/off
-ai_indicator_provider=claude   ; comma-separated: "claude" today, "copilot" reserved for later
+ai_indicator_enabled=true           ; turn the whole feature on/off
+ai_indicator_provider=claude,codex  ; comma-separated; "copilot" reserved for later
 ai_indicator_color_working=FF9F0A
 ai_indicator_color_attention=DC2626
 ai_indicator_color_waiting=34C759
@@ -450,9 +463,11 @@ badge, and leaves the file untouched rather than risk overwriting it -- see
 This is Claude Code's implementation of a generic `AiProvider` interface
 (`src/ai_provider.h`) -- installing/removing whatever config it needs and
 reading back whatever it reported are the two things any AI assistant
-integration has to do, so a future Copilot integration would plug in the
-same way, behind the same interface, without changing anything else that
-uses it (`tracking.cpp`'s window-matching).
+integration has to do, so each one plugs in behind the same interface
+without changing anything else that uses it (`tracking.cpp`'s
+window-matching). Codex's implementation is the same interface with an
+empty install step (`src/codex_provider.*`), and a future Copilot one would
+be too.
 
 A hook here applies to every Claude Code session on the machine, in any
 project -- not just this repo. Changes to a profile's `settings.json` are
@@ -479,6 +494,36 @@ are listed in `bin\claude_hooks_installed.ini`). Hook entries this app wrote
 from anywhere else -- an older install location, or a profile folder copied
 from another Windows account -- are recognised by their script name and
 replaced.
+
+#### Codex status
+
+Codex needs nothing installed, configured or trusted: this app reads the
+files Codex already writes for itself under each Codex profile's folder
+(`CODEX_HOME`, `%USERPROFILE%\.codex` by default). Nothing in Codex's own
+configuration is ever written to.
+
+- A thread is **live** while its lock file exists in
+  `<CODEX_HOME>\thread-writer-locks\`; Codex removes that file when the
+  thread closes, so a window whose Codex panel is gone shows nothing.
+- Its state comes from the newest turn boundary in that thread's session
+  rollout (`<CODEX_HOME>\sessions\<year>\<month>\<day>\rollout-*.jsonl`):
+  `task_started` means **Working**, `task_complete` or `turn_aborted`
+  (an interrupted turn) means **Waiting**.
+- **Attention** is not reported. Codex does not record a prompt it is
+  blocked on in the rollout, so an approval prompt looks like a turn that
+  is still working. Codex's own hook engine would report it, but a hook has
+  to be trusted inside Codex by hand before it runs at all -- see
+  [docs/CODEX-AI-STATUS.md](docs/CODEX-AI-STATUS.md) for both, with the
+  evidence behind the rules above.
+- A turn whose rollout has been silent for over 10 minutes is reported as
+  Waiting: a running turn appends to its rollout constantly, and a real
+  local rollout ends mid-turn with its `task_started` never closed.
+- A subagent's own session is not reported separately -- it runs inside its
+  parent's turn, which already shows as Working.
+
+Rollouts are append-only, so after the first read of one only the bytes
+added since are scanned, rather than the tail of a multi-megabyte file on
+every hub sync (`src/codex_provider.*`).
 
 ### Assistant profiles
 
@@ -713,6 +758,14 @@ to pick up worktrees created after the app started.
   when VS Code hasn't recorded that folder's real path (e.g. multi-root
   workspaces aren't covered) -- two windows opened on different folders
   that happen to share the same name are indistinguishable in that case.
+- Codex windows never show **Attention**: Codex doesn't record a prompt it
+  is blocked on in the session rollout this reads, so an approval prompt
+  looks like a turn still working (see "Codex status" above). An
+  interrupted turn, which Claude Code's hooks can't report either, *is*
+  covered for Codex -- it writes `turn_aborted`.
+- A Codex thread left behind by a crashed process (its lock file never
+  removed) keeps showing Waiting until that file is gone. Closing the
+  thread, or Codex starting again, clears it.
 - Deleting/uninstalling this app while `ai_indicator_enabled=true` leaves
   the hook entries it added in each profile's `settings.json` in place -- same
   caveat as `window.title` above, no uninstall hook runs. Claude Code will
@@ -736,6 +789,9 @@ to pick up worktrees created after the app started.
   registrations in every Claude profile's `settings.json`, reads the per-session status files
   `claude_status_hook.ps1` writes, and auto-expires ones whose recorded pid is no longer a live
   `claude.exe` process (see "Known limitations" above).
+- `src/codex_provider.*` -- Codex's `AiProvider` implementation: installs nothing, and reads each
+  Codex profile's live thread locks and session rollouts (see "Codex status" above and
+  `docs/CODEX-AI-STATUS.md`).
 - `src/assistant_profile.*`, `src/window_profile.cpp` -- shared account names, icons, launch environments,
   extension selection, Claude IDE-lock inference and durable window assignments.
 - `src/profile_config.*` -- shared profile parsing, path normalization, IDs and backed-up legacy migration.

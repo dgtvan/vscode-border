@@ -42,11 +42,11 @@ struct Config {
 
     std::vector<Profile> profiles; // slot order; configured account folders only
 
-    // AI status indicator (see ai_provider.h) -- "claude" is the only
-    // currently-implemented provider; other tokens (e.g. a future "copilot")
-    // are accepted but produce no indicator until that integration exists.
+    // AI status indicator (see ai_provider.h) -- "claude" and "codex" are
+    // implemented; other tokens (e.g. a future "copilot") are accepted but
+    // produce no indicator until that integration exists.
     bool aiIndicatorEnabled = true;
-    std::vector<std::string> aiIndicatorProviders = {"claude"};
+    std::vector<std::string> aiIndicatorProviders = {"claude", "codex"};
     COLORREF aiIndicatorColorWorking = RGB(255, 159, 10);
     COLORREF aiIndicatorColorAttention = RGB(220, 38, 38);
     COLORREF aiIndicatorColorWaiting = RGB(52, 199, 89);

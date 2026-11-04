@@ -119,10 +119,10 @@ Config LoadConfig(const std::wstring& path) {
                 if (p.empty()) continue;
                 // "copilot" is a documented future value -- accepted without
                 // warning even though it does nothing yet (see README's
-                // "Claude Code status dots" section). Anything else is
+                // "AI status indicator" section). Anything else is
                 // probably a typo, so it's dropped with a warning rather
                 // than silently doing nothing.
-                if (p == "claude" || p == "copilot") {
+                if (p == "claude" || p == "codex" || p == "copilot") {
                     providers.push_back(p);
                 } else {
                     LogWarn(L"config: ai_indicator_provider has unrecognized value [%hs] -- ignoring it",

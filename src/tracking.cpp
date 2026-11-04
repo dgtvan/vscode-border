@@ -254,9 +254,18 @@ static std::wstring LastPathSegment(const std::wstring& path) {
 // that window's.
 static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<AiSessionStatus>& sessions) {
     if (sessions.empty()) return ClaudeStatus::None;
+    // A window whose assistant this app knows only ever shows that
+    // assistant's own sessions: both providers match sessions to windows by
+    // folder, so without this a Codex window would light up for the Claude
+    // session running in another window on the same folder (and vice
+    // versa). A window with no assistant has no indicator at all; one whose
+    // account couldn't be determined (an externally-opened window) takes
+    // whichever provider reported its folder, as it always has.
+    std::string wantProvider;
     if (tw.profileKnown) {
         const Profile* profile = FindProfile(tw.profile);
-        if (!profile || profile->type != ProfileType::Claude) return ClaudeStatus::None;
+        if (!profile || profile->type == ProfileType::None) return ClaudeStatus::None;
+        wantProvider = profile->type == ProfileType::Claude ? "claude" : "codex";
     }
 
     std::wstring folderPath;
@@ -266,11 +275,13 @@ static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<A
         folderPath = ResolveFolderPath(tw.folderName, tw.repoName);
     }
     while (!folderPath.empty() && (folderPath.back() == L'\\' || folderPath.back() == L'/')) folderPath.pop_back();
-    LogDiag(L"ai_status: matching window folderName=[%ls] resolvedFolderPath=[%ls]%ls against %zu session(s)",
-            tw.folderName.c_str(), folderPath.c_str(),
-            noFolderWindow ? L" (no folder: home dir)" : L"", sessions.size());
+    LogDiag(L"ai_status: matching window folderName=[%ls] resolvedFolderPath=[%ls]%ls provider=[%hs] against %zu "
+            L"session(s)",
+            tw.folderName.c_str(), folderPath.c_str(), noFolderWindow ? L" (no folder: home dir)" : L"",
+            wantProvider.empty() ? "any" : wantProvider.c_str(), sessions.size());
     bool anyAttention = false, anyWorking = false, anyWaiting = false;
     for (const AiSessionStatus& s : sessions) {
+        if (!wantProvider.empty() && s.provider != wantProvider) continue;
         bool matches;
         if (noFolderWindow) {
             std::wstring cwd = s.cwd, home = s.home;
@@ -281,8 +292,8 @@ static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<A
             matches = !folderPath.empty() ? PathIsWithinFolder(s.cwd, folderPath)
                                           : _wcsicmp(LastPathSegment(s.cwd).c_str(), tw.folderName.c_str()) == 0;
         }
-        LogDiag(L"ai_status:   session cwd=[%ls] status=[%ls] -> %ls", s.cwd.c_str(), s.status.c_str(),
-                matches ? L"MATCH" : L"no match");
+        LogDiag(L"ai_status:   session provider=[%hs] cwd=[%ls] status=[%ls] -> %ls", s.provider.c_str(),
+                s.cwd.c_str(), s.status.c_str(), matches ? L"MATCH" : L"no match");
         if (!matches) continue;
         if (s.status == L"attention") anyAttention = true;
         else if (s.status == L"working") anyWorking = true;
@@ -312,13 +323,16 @@ static void SyncProjectListHud() {
     // Skip every provider's status scan entirely when the feature is off,
     // not just visually suppress the result. Each configured provider id
     // that isn't implemented yet (e.g. "copilot" today) is silently
-    // skipped here -- GetAiProvider returns nullptr for it.
+    // skipped here -- GetAiProvider returns nullptr for it. Each session is
+    // stamped with the provider that reported it, which is what keeps a
+    // window's indicator to its own assistant (see ComputeAiStatus).
     std::vector<AiSessionStatus> aiSessions;
     if (g_config.aiIndicatorEnabled) {
         for (const std::string& id : g_config.aiIndicatorProviders) {
             AiProvider* provider = GetAiProvider(id);
             if (!provider) continue;
             std::vector<AiSessionStatus> s = provider->LoadStatuses();
+            for (AiSessionStatus& session : s) session.provider = id;
             aiSessions.insert(aiSessions.end(), s.begin(), s.end());
         }
     }

@@ -12,17 +12,20 @@ struct AiSessionStatus {
     std::wstring cwd;
     std::wstring home; // the home directory, where a session started in a window with no folder open
                        // runs (see tracking.cpp's ComputeAiStatus)
+    std::string provider; // which provider reported it, stamped by the caller (tracking.cpp) so a
+                          // window running one assistant never shows the other's status
 };
 
-// One AI coding assistant integration (Claude Code today, Copilot planned
-// -- see config.ini's ai_indicator_provider). Each provider owns both
-// sides of reporting its own status: installing/removing whatever
-// hook/config it needs in that tool's own settings, and reading back
-// whatever it reported. The *mechanism* for both is entirely up to the
-// provider (Claude Code uses hooks + per-session status files; a future
-// Copilot integration might need something else entirely), but every
-// caller (tracking.cpp, the tray menu) sees the same shape regardless of
-// which provider it's talking to.
+// One AI coding assistant integration (Claude Code and Codex today,
+// Copilot planned -- see config.ini's ai_indicator_provider). Each
+// provider owns both sides of reporting its own status:
+// installing/removing whatever hook/config it needs in that tool's own
+// settings, and reading back whatever it reported. The *mechanism* for
+// both is entirely up to the provider -- Claude Code uses hooks plus
+// per-session status files, Codex needs nothing installed at all and is
+// read from the session files it already writes (codex_provider.h) -- but
+// every caller (tracking.cpp, the tray menu) sees the same shape
+// regardless of which provider it is talking to.
 class AiProvider {
 public:
     virtual ~AiProvider() = default;
@@ -44,9 +47,9 @@ public:
     virtual std::vector<AiSessionStatus> LoadStatuses() = 0;
 };
 
-// Returns the provider for `id` (e.g. "claude"), or nullptr if `id` isn't
-// implemented yet (e.g. "copilot" today -- accepted in config but not
-// backed by a real provider until that integration exists).
+// Returns the provider for `id` (e.g. "claude", "codex"), or nullptr if
+// `id` isn't implemented yet (e.g. "copilot" today -- accepted in config
+// but not backed by a real provider until that integration exists).
 AiProvider* GetAiProvider(const std::string& id);
 
 // Every implemented provider, regardless of whether it's currently enabled
