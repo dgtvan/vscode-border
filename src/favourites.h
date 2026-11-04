@@ -5,7 +5,7 @@
 
 // One user-saved project/folder, offered from the project list HUD's "+"
 // new-window button's menu, which opens `path` in a brand-new VS Code window
-// (see vscode_cli.h's OpenNewVSCodeWindow) as whichever Claude profile is
+// (see vscode_cli.h's OpenNewVSCodeWindow) as whichever assistant profile is
 // picked there. A favourite is just the folder: it stores no profile, and
 // it's a favourite whatever profile its window runs.
 struct FavouriteProject {

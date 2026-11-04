@@ -1,8 +1,10 @@
 #include "tracking.h"
 
-#include "claude_profile.h"
+#include "assistant_profile.h"
 #include "ai_provider.h"
 #include "claude_usage.h"
+#include "codex_usage.h"
+#include "usage_rings.h"
 #include "config.h"
 #include "dpi_util.h"
 #include "focus_trace.h"
@@ -77,7 +79,7 @@ struct TrackedWindow {
     std::wstring repoName;   // the title's raw ${activeRepositoryName} (pre-worktree-substitution), empty
                               // outside a git repo -- ResolveFolderPath's hint for picking between several
                               // recorded folders that share folderName
-    std::wstring profile;    // Claude profile this window runs Claude Code as (see claude_profile.h), empty
+    std::wstring profile;    // Claude profile this window runs Claude Code as (see assistant_profile.h), empty
                               // for the default -- see UpdateWindowProfile
     bool profileKnown = false; // UpdateWindowProfile has run, so a change of profile is worth logging
     std::wstring lastIcon;     // profile icon last painted on the border's label chip: "+" and the profile
@@ -252,6 +254,10 @@ static std::wstring LastPathSegment(const std::wstring& path) {
 // that window's.
 static ClaudeStatus ComputeAiStatus(const TrackedWindow& tw, const std::vector<AiSessionStatus>& sessions) {
     if (sessions.empty()) return ClaudeStatus::None;
+    if (tw.profileKnown) {
+        const Profile* profile = FindProfile(tw.profile);
+        if (!profile || profile->type != ProfileType::Claude) return ClaudeStatus::None;
+    }
 
     std::wstring folderPath;
     bool noFolderWindow = !tw.hasFolderOrRepoInTitle;
@@ -355,7 +361,9 @@ static void SyncProjectListHud() {
         entry.color = g_config.palette[kv.second.colorIndex % g_config.palette.size()];
         entry.claudeStatus = ComputeAiStatus(kv.second, aiSessions);
         entry.profile = kv.second.profile;
-        entry.showProfileIcon = ShowsClaudeProfileIcon(kv.second.profile);
+        entry.profileKnown = kv.second.profileKnown;
+        entry.emptyWindow = !kv.second.hasFolderOrRepoInTitle;
+        entry.showProfileIcon = ShowsProfileIcon(kv.second.profile);
         entry.loading = IsWindowLoading(kv.second, kv.first);
         // Fixed placeholder text while loading -- entry.label/rawLabel
         // otherwise still churns underneath (see IsWindowLoading), and
@@ -381,24 +389,7 @@ static void SyncProjectListHud() {
     style.showNewWindowButton = true;
     style.newWindowButtonColor = g_config.palette[PeekNextColorIndex() % g_config.palette.size()];
 
-    std::vector<ClaudeUsageSnapshot> usage = GetClaudeUsageSnapshots();
-    for (size_t i = 0; i < usage.size(); i++) {
-        const ClaudeUsageSnapshot& u = usage[i];
-        ProjectListHudUsageRing ring;
-        ring.profile = u.profile;
-        ring.showProfileIcon = ShowsClaudeProfileIcon(u.profile);
-        if (const ClaudeProfile* p = FindClaudeProfile(u.profile)) {
-            ring.hasChipColor = p->hasColor;
-            ring.chipColor = p->color;
-            if (!p->ringBadge) ring.showProfileIcon = false;
-        }
-        ring.sessionPercent = CurrentUsagePercent(u.session);
-        ring.weeklyPercent = CurrentUsagePercent(u.weekly);
-        ring.stale = IsClaudeUsageStale(u);
-        ring.unavailable = IsClaudeUsageUnavailable(u);
-        ring.tooltip = DescribeClaudeUsage(u);
-        style.usageRings.push_back(ring);
-    }
+    style.usageRings = BuildProfileUsageRings();
     UpdateProjectListHud(g_projectListHud, entries, style);
 }
 
@@ -515,18 +506,18 @@ static int PeekNextColorIndex() {
 
 // Repositions/resizes/repaints/hides the overlay to match its target's
 // current state. Cheap when only position changed (no repaint needed).
-// Works out which Claude profile the window runs (see claude_profile.h's
-// ClaudeProfileOfWindow), logging when that changes. With nothing to go on -- a title still
+// Works out which Claude profile the window runs (see assistant_profile.h's
+// ProfileOfWindow), logging when that changes. With nothing to go on -- a title still
 // settling, say -- the profile already worked out stands, so the window's
 // icon and favourite don't flicker.
 static void UpdateWindowProfile(HWND target, TrackedWindow& tw) {
     std::wstring profile;
     std::wstring path = tw.folderName.empty() ? L"" : ResolveFolderPath(tw.folderName, tw.repoName);
-    if (!ClaudeProfileOfWindow(path, tw.folderName, profile) && tw.profileKnown) return;
+    if (!ProfileOfWindow(target, path, tw.folderName, profile)) return;
     if (tw.profileKnown && profile == tw.profile) return;
     if (tw.profileKnown || !profile.empty()) {
-        Log(L"hwnd=%p [%ls] runs as Claude profile [%ls]", target, tw.rawLabel.c_str(),
-            ClaudeProfileName(profile).c_str());
+        Log(L"hwnd=%p [%ls] runs as profile [%ls]", target, tw.rawLabel.c_str(),
+            ProfileName(profile).c_str());
     }
     tw.profile = profile;
     tw.profileKnown = true;
@@ -567,7 +558,7 @@ static void SyncOverlay(HWND target, TrackedWindow& tw) {
         return;
     }
 
-    std::wstring icon = ShowsClaudeProfileIcon(tw.profile) ? L"+" + tw.profile : L"";
+    std::wstring icon = ShowsProfileIcon(tw.profile) ? L"+" + tw.profile : L"";
     if (ow != tw.lastWidth || oh != tw.lastHeight || borderLabel != tw.lastLabel || icon != tw.lastIcon) {
         LogFastDiag(L"sync hwnd=%p REPAINT ow=%d oh=%d (was %dx%d) label=[%ls] (was [%ls])", target, ow, oh,
                     tw.lastWidth, tw.lastHeight, borderLabel.c_str(), tw.lastLabel.c_str());
@@ -706,6 +697,7 @@ static void TrackWindow(HWND hwnd) {
 static void UntrackWindow(HWND hwnd) {
     auto it = g_tracked.find(hwnd);
     if (it == g_tracked.end()) return;
+    ForgetWindowProfile(hwnd);
     FreeColorIndex(it->second.colorIndex);
     ForgetSessionAlias(SessionAliasKey(it->second.trackSeq));
     ReleasePidHooks(it->second.pid);
@@ -926,10 +918,11 @@ std::vector<ReopenWindow> GetReopenableWindows() {
         ReopenWindow w;
         w.target = kv.first;
         w.profile = tw.profile;
+        if (!tw.profileKnown || (!tw.profile.empty() && !FindProfile(tw.profile))) w.reopen = false;
         w.label = tw.label;
         if (tw.hasFolderOrRepoInTitle) {
             w.folder = tw.folderName.empty() ? L"" : ResolveFolderPath(tw.folderName, tw.repoName);
-            w.reopen = !w.folder.empty();
+            w.reopen = w.reopen && !w.folder.empty();
         }
         result.push_back(w);
     }

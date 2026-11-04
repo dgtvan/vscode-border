@@ -2,6 +2,7 @@
 #include "file_util.h"
 #include "logger.h"
 #include "text_util.h"
+#include "profile_config.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -47,35 +48,13 @@ static COLORREF ParseHexColor(const std::string& hex) {
     return RGB(r, g, b);
 }
 
-// An optional RRGGBB value: false when empty, and when it isn't one (warned
-// about, naming `key`).
-static bool ParseOptionalHexColor(const std::string& key, const std::string& val, COLORREF& out) {
-    if (val.empty()) return false;
-    if (val.size() != 6 || val.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
-        LogWarn(L"config: %hs=[%hs] isn't a hex RRGGBB color -- ignoring it", key.c_str(), val.c_str());
-        return false;
-    }
-    out = ParseHexColor(val);
-    return true;
-}
-
-// A folder path from config.ini with its environment variables (%USERPROFILE%)
-// expanded and no trailing separator.
-static std::wstring ExpandConfigPath(const std::wstring& path) {
-    wchar_t buf[MAX_PATH] = {};
-    DWORD n = ExpandEnvironmentStringsW(path.c_str(), buf, MAX_PATH);
-    std::wstring out = n > 0 && n <= MAX_PATH ? buf : path;
-    while (out.size() > 3 && (out.back() == L'\\' || out.back() == L'/')) out.pop_back();
-    return out;
-}
-
 Config LoadConfig(const std::wstring& path) {
     Config cfg;
     cfg.palette = DefaultPalette();
-    ClaudeProfile slots[kMaxClaudeProfiles];
 
     std::string content = ReadFileBytes(path);
-    // Not returned early: the default Claude profile is added below either way.
+    content = MigrateProfileConfigFile(path, content);
+    ReadProfileConfig(content, cfg);
     if (content.empty()) Log(L"config: not found at %ls, using defaults", path.c_str());
 
     for (const std::string& rawLine : SplitChar(content, '\n')) {
@@ -123,35 +102,6 @@ Config LoadConfig(const std::wstring& path) {
             // Empty would paint an empty chip (i.e. no label at all) -- that's
             // what show_label=false is for, so keep the default instead.
             if (!val.empty()) cfg.labelAliasFormat = Utf8ToWide(val);
-        } else if (key.rfind("claude_profile_", 0) == 0) {
-            // claude_profile_<N>_name / _profile_path / _icon / _color / _ring_badge
-            const char* rest = key.c_str() + strlen("claude_profile_");
-            char* end = nullptr;
-            long slot = strtol(rest, &end, 10);
-            std::string field = (end && *end == '_') ? std::string(end + 1) : std::string();
-            if (end == rest || slot < 1 || slot > kMaxClaudeProfiles ||
-                (field != "name" && field != "profile_path" && field != "icon" && field != "color" &&
-                 field != "ring_badge")) {
-                LogWarn(L"config: unknown key [%hs] -- Claude profiles are "
-                        L"claude_profile_<1-%d>_name/_profile_path/_icon/_color/_ring_badge",
-                        key.c_str(), kMaxClaudeProfiles);
-            } else if (field == "color") {
-                ClaudeProfile& p = slots[slot - 1];
-                p.hasColor = ParseOptionalHexColor(key, val, p.color);
-            } else if (field == "ring_badge") {
-                // Empty keeps the default (shown).
-                slots[slot - 1].ringBadge = !(val == "0" || _stricmp(val.c_str(), "false") == 0);
-            } else {
-                ClaudeProfile& p = slots[slot - 1];
-                (field == "name" ? p.name : field == "icon" ? p.icon : p.path) = Utf8ToWide(val);
-            }
-        } else if (key.rfind("user_profile_", 0) == 0) {
-            // Gone: profiles are Claude Code config folders now, not Windows
-            // accounts. Only a set value is worth a word.
-            if (!val.empty() && val[0] != '<') {
-                LogWarn(L"config: %hs is no longer used -- profiles are claude_profile_<N>_* now; remove the line",
-                        key.c_str());
-            }
         } else if (key == "colors") {
             std::vector<COLORREF> palette;
             for (const std::string& item : SplitChar(val, ',')) {
@@ -198,45 +148,6 @@ Config LoadConfig(const std::wstring& path) {
                 cfg.aiIndicatorBorderColor = ParseHexColor(val);
             }
         }
-    }
-
-    // Slot 1 is the default profile, with or without a _profile_path. Any
-    // other slot without one is unused, whatever else it has.
-    for (int i = 0; i < kMaxClaudeProfiles; i++) {
-        ClaudeProfile p = slots[i];
-        p.slot = i + 1;
-        p.isDefault = i == 0;
-        if (p.path.empty() && !p.isDefault) continue;
-        if (!p.path.empty()) {
-            p.configDir = ExpandConfigPath(p.path);
-            if (p.configDir.size() < 3 || p.configDir[1] != L':' || (p.configDir[2] != L'\\' && p.configDir[2] != L'/')) {
-                LogWarn(L"config: claude_profile_%d_profile_path [%ls] isn't an absolute path (like "
-                        L"C:\\Users\\me\\.claude-work) -- ignoring the profile",
-                        p.slot, p.path.c_str());
-                if (!p.isDefault) continue;
-                p.path.clear();
-            }
-        }
-        if (p.path.empty()) p.configDir = ExpandConfigPath(L"%USERPROFILE%\\.claude");
-        bool duplicate = false;
-        for (const ClaudeProfile& q : cfg.claudeProfiles) {
-            duplicate = duplicate || CompareStringOrdinal(q.configDir.c_str(), -1, p.configDir.c_str(), -1, TRUE) ==
-                                         CSTR_EQUAL;
-        }
-        if (duplicate) {
-            LogWarn(L"config: claude_profile_%d_profile_path [%ls] is an earlier profile's folder -- ignoring it",
-                    p.slot, p.configDir.c_str());
-            continue;
-        }
-        // The icon can be a whole base64 image -- logged by size only.
-        wchar_t color[8] = L"";
-        if (p.hasColor) swprintf(color, 8, L"%02X%02X%02X", GetRValue(p.color), GetGValue(p.color), GetBValue(p.color));
-        Log(L"config: Claude profile %d: name=[%ls] folder=[%ls]%ls icon=[%ls] color=[%ls] ring_badge=%d", p.slot,
-            p.name.c_str(), p.configDir.c_str(),
-            GetFileAttributesW(p.configDir.c_str()) == INVALID_FILE_ATTRIBUTES ? L" (doesn't exist yet)" : L"",
-            p.icon.size() > 260 ? (std::to_wstring(p.icon.size()) + L" chars").c_str() : p.icon.c_str(), color,
-            p.ringBadge);
-        cfg.claudeProfiles.push_back(p);
     }
 
     std::string providersJoined;

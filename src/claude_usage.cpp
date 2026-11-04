@@ -1,6 +1,8 @@
 #include "claude_usage.h"
+#include "usage_format.h"
 
-#include "claude_profile.h"
+#include "assistant_profile.h"
+#include "profile_config.h"
 #include "config.h"
 #include "file_util.h"
 #include "json_scan.h"
@@ -25,37 +27,6 @@ long long UnixNow() {
     t.LowPart = ft.dwLowDateTime;
     t.HighPart = ft.dwHighDateTime;
     return (long long)((t.QuadPart - 116444736000000000ULL) / 10000000ULL);
-}
-
-SYSTEMTIME UnixToLocalTime(long long unix) {
-    ULARGE_INTEGER t;
-    t.QuadPart = (ULONGLONG)unix * 10000000ULL + 116444736000000000ULL;
-    FILETIME utc = {t.LowPart, t.HighPart};
-    SYSTEMTIME st = {}, local = {};
-    FileTimeToSystemTime(&utc, &st);
-    SystemTimeToTzSpecificLocalTime(nullptr, &st, &local);
-    return local;
-}
-
-// "21:20", with the weekday in front ("Sat 07:00") unless it's today.
-std::wstring FormatLocalTime(long long unix) {
-    static const wchar_t* const kDays[] = {L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat"};
-    SYSTEMTIME t = UnixToLocalTime(unix), today = UnixToLocalTime(UnixNow());
-    bool sameDay = t.wYear == today.wYear && t.wMonth == today.wMonth && t.wDay == today.wDay;
-    wchar_t buf[32];
-    if (sameDay) swprintf(buf, 32, L"%02u:%02u", t.wHour, t.wMinute);
-    else swprintf(buf, 32, L"%ls %02u:%02u", kDays[t.wDayOfWeek % 7], t.wHour, t.wMinute);
-    return buf;
-}
-
-// "4h 51m", "4d 14h", "12m".
-std::wstring FormatDuration(long long seconds) {
-    long long minutes = std::max(0LL, seconds) / 60;
-    wchar_t buf[32];
-    if (minutes >= 24 * 60) swprintf(buf, 32, L"%lldd %lldh", minutes / (24 * 60), minutes / 60 % 24);
-    else if (minutes >= 60) swprintf(buf, 32, L"%lldh %lldm", minutes / 60, minutes % 60);
-    else swprintf(buf, 32, L"%lldm", minutes);
-    return buf;
 }
 
 // "2026-10-20T21:19:59.593933+00:00" (or with "Z") as Unix seconds; 0 if it
@@ -333,7 +304,7 @@ std::wstring FindClaudeExe() {
 const DWORD kRenewTimeoutMs = 60000;
 
 // Has Claude Code renew a profile's expired login -- run with `environment`
-// (the profile's, see claude_profile.h's ClaudeProfileEnvironment), so with
+// (the profile's, see assistant_profile.h's ProfileEnvironment), so with
 // its CLAUDE_CONFIG_DIR: `claude -p` with
 // nothing on stdin renews the token as it starts, then stops with "Input
 // must be provided" before calling the model -- so it costs no usage. (Seen
@@ -475,7 +446,7 @@ FetchResult FetchClaudeUsage(HANDLE stop, const std::wstring& dir, const std::ws
         return r;
     }
     FetchResult renewed = FetchClaudeUsageOnce(stop, dir);
-    renewed.note = L"renewed the expired login (it had expired at " + FormatLocalTime(expiredAt / 1000) +
+    renewed.note = L"renewed the expired login (it had expired at " + FormatUsageLocalTime(expiredAt / 1000) +
                    L") by running Claude Code: " + exe;
     return renewed;
 }
@@ -508,7 +479,7 @@ FetchResult FetchClaudeUsageOnce(HANDLE stop, const std::wstring& dir) {
     long long expiresAtMs = _atoi64(RawValue(content, oauth.start, oauth.end, "expiresAt").c_str());
     SecureZeroMemory(&content[0], content.size());
     if (expiresAtMs > 0 && expiresAtMs / 1000 <= UnixNow()) {
-        r.error = FormatError(L"the login token expired at %ls", FormatLocalTime(expiresAtMs / 1000).c_str());
+        r.error = FormatError(L"the login token expired at %ls", FormatUsageLocalTime(expiresAtMs / 1000).c_str());
         SecureZeroMemory(&token[0], token.size());
         return r;
     }
@@ -537,9 +508,9 @@ FetchResult FetchClaudeUsageOnce(HANDLE stop, const std::wstring& dir) {
 // One monitored profile. Shared between its worker thread and the main
 // thread, under g_lock, except where marked.
 struct Worker {
-    std::wstring profile;     // its id (see claude_profile.h)
+    std::wstring profile;     // its id (see assistant_profile.h)
     std::wstring configDir;   // fixed at start, like environment: g_config can be reloaded under the thread
-    std::wstring environment; // see ClaudeProfileEnvironment
+    std::wstring environment; // see ProfileEnvironment
     int intervalMinutes = 5;
     HWND notifyWnd = nullptr;
     UINT notifyMsg = 0;
@@ -598,7 +569,7 @@ DWORD WINAPI WorkerThread(LPVOID param) {
 }
 
 std::wstring ProfileForLog(const std::wstring& profile) {
-    return L"[" + ClaudeProfileName(profile) + L"]";
+    return L"[" + ProfileName(profile) + L"]";
 }
 
 void StopWorkers() {
@@ -621,13 +592,13 @@ void StopWorkers() {
 void SyncClaudeUsageMonitor(HWND notifyWnd, UINT notifyMsg) {
     std::vector<std::wstring> profiles;
     if (g_config.usageMeterEnabled) {
-        profiles.push_back(L"");
-        for (const std::wstring& profile : OtherClaudeProfiles()) profiles.push_back(profile);
+        for (const Profile& p : g_config.profiles)
+            if (p.type == ProfileType::Claude && p.usageEnabled) profiles.push_back(ProfileId(p));
     }
     bool same = profiles.size() == g_workers.size() && g_config.usageMeterRefreshMinutes == g_intervalMinutes;
     for (size_t i = 0; same && i < profiles.size(); i++) {
-        same = profiles[i] == g_workers[i]->profile && ClaudeProfileConfigDir(profiles[i]) == g_workers[i]->configDir &&
-               ClaudeProfileEnvironment(profiles[i]) == g_workers[i]->environment;
+        same = profiles[i] == g_workers[i]->profile && ProfileConfigDir(profiles[i]) == g_workers[i]->configDir &&
+               ProfileEnvironment(profiles[i]) == g_workers[i]->environment;
     }
     if (same) return;
 
@@ -640,8 +611,8 @@ void SyncClaudeUsageMonitor(HWND notifyWnd, UINT notifyMsg) {
     for (const std::wstring& profile : profiles) {
         auto w = std::make_shared<Worker>();
         w->profile = profile;
-        w->configDir = ClaudeProfileConfigDir(profile);
-        w->environment = ClaudeProfileEnvironment(profile);
+        w->configDir = ProfileConfigDir(profile);
+        w->environment = ProfileEnvironment(profile);
         w->intervalMinutes = g_intervalMinutes;
         w->notifyWnd = notifyWnd;
         w->notifyMsg = notifyMsg;
@@ -709,8 +680,8 @@ void ProcessClaudeUsageResults() {
         bool first = !w->loggedOk;
         (first ? Log : LogDiag)(L"claude_usage: %ls%ls: session %.0f%% (resets %ls), weekly %.0f%% (resets %ls)",
                                 who.c_str(), w->loggedError.empty() ? L"" : L" readable again", s.session.percent,
-                                s.session.resetsAt ? FormatLocalTime(s.session.resetsAt).c_str() : L"?",
-                                s.weekly.percent, s.weekly.resetsAt ? FormatLocalTime(s.weekly.resetsAt).c_str() : L"?");
+                                s.session.resetsAt ? FormatUsageLocalTime(s.session.resetsAt).c_str() : L"?",
+                                s.weekly.percent, s.weekly.resetsAt ? FormatUsageLocalTime(s.weekly.resetsAt).c_str() : L"?");
         w->loggedError.clear();
         w->loggedOk = true;
     }
@@ -740,7 +711,7 @@ double CurrentUsagePercent(const ClaudeUsageLimit& limit) {
 }
 
 std::wstring DescribeClaudeUsage(const ClaudeUsageSnapshot& s) {
-    std::wstring text = L"Claude usage - " + ClaudeProfileName(s.profile);
+    std::wstring text = L"Claude usage - " + ProfileName(s.profile);
     long long now = UnixNow();
     auto describeLimit = [&](const wchar_t* name, const ClaudeUsageLimit& limit) {
         wchar_t line[200];
@@ -748,10 +719,10 @@ std::wstring DescribeClaudeUsage(const ClaudeUsageSnapshot& s) {
         if (pct < 0) {
             swprintf(line, 200, L"\n%ls: not reported", name);
         } else if (limit.resetsAt > 0 && limit.resetsAt <= now) {
-            swprintf(line, 200, L"\n%ls: 0%% - reset at %ls", name, FormatLocalTime(limit.resetsAt).c_str());
+            swprintf(line, 200, L"\n%ls: 0%% - reset at %ls", name, FormatUsageLocalTime(limit.resetsAt).c_str());
         } else if (limit.resetsAt > 0) {
             swprintf(line, 200, L"\n%ls: %.0f%% - resets %ls (in %ls)", name, pct,
-                     FormatLocalTime(limit.resetsAt).c_str(), FormatDuration(limit.resetsAt - now).c_str());
+                     FormatUsageLocalTime(limit.resetsAt).c_str(), FormatUsageDuration(limit.resetsAt - now).c_str());
         } else {
             swprintf(line, 200, L"\n%ls: %.0f%%", name, pct);
         }
@@ -760,12 +731,12 @@ std::wstring DescribeClaudeUsage(const ClaudeUsageSnapshot& s) {
     if (s.haveData) {
         describeLimit(L"Session", s.session);
         describeLimit(L"Weekly", s.weekly);
-        text += L"\nUpdated " + FormatLocalTime(s.fetchedAt);
+        text += L"\nUpdated " + FormatUsageLocalTime(s.fetchedAt);
     } else if (s.error.empty()) {
         text += L"\nNot read yet";
     }
     if (!s.error.empty()) {
-        text += L"\n\nLast update failed at " + FormatLocalTime(s.errorAt) + L":\n" + s.error;
+        text += L"\n\nLast update failed at " + FormatUsageLocalTime(s.errorAt) + L":\n" + s.error;
     }
     return text;
 }

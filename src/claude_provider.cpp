@@ -1,6 +1,7 @@
 #include "claude_provider.h"
 
-#include "claude_profile.h"
+#include "assistant_profile.h"
+#include "profile_config.h"
 #include "config.h"
 #include "file_util.h"
 #include "json_scan.h"
@@ -179,7 +180,7 @@ bool IsOlderThanMinutes(const FILETIME& ft, DWORD minutes) {
 // The transcripts folder of the Claude profile a session ran as: its status
 // file's config_dir (the hook's CLAUDE_CONFIG_DIR), else the default one.
 std::wstring GetProjectsDir(const std::wstring& configDir) {
-    return (configDir.empty() ? ClaudeProfileConfigDir(L"") : configDir) + L"\\projects";
+    return (configDir.empty() ? DefaultProviderPath(ProfileType::Claude) : configDir) + L"\\projects";
 }
 
 // Claude Code names each project's transcript directory after that
@@ -759,7 +760,8 @@ void ClaudeProvider::SyncInstallation(bool enabled) {
     // Every profile's settings file while enabled; when disabled, or for a
     // profile since dropped from config.ini, the hooks come out again.
     std::vector<std::wstring> wanted;
-    for (const ClaudeProfile& p : g_config.claudeProfiles) {
+    for (const Profile& p : g_config.profiles) {
+        if (p.type != ProfileType::Claude) continue;
         DWORD attrs = GetFileAttributesW(p.configDir.c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
             Log(L"claude_provider: Claude profile folder %ls doesn't exist (yet) -- no hooks to sync there",

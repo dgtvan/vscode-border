@@ -33,8 +33,9 @@
 //   tracking.*          - tracked-window bookkeeping, WinEvent hooks, sync
 //   vscode_cli.*        - VS Code CLI shim lookup, opening/closing VS Code windows
 //   favourites.*        - persisted favourite projects, open-all
-//   claude_profile.*    - Claude profiles (Claude Code config folders): which a window runs, opening as one
-//   claude_usage.*      - Claude session/weekly usage per Claude profile, for the hub's usage rings
+//   claude_profile.*    - assistant profiles (Claude Code config folders): which a window runs, opening as one
+//   claude_usage.*      - Claude session/weekly usage per assistant profile, for the hub's usage rings
+//   codex_usage.*       - Codex account usage rings, queried through a short-lived app-server
 //   vscode_installs.*   - VS Code's install, as last seen, for opening windows once none is open
 
 #include <windows.h>
@@ -45,9 +46,10 @@
 #include "resource.h"
 
 #include "ai_provider.h"
-#include "claude_profile.h"
+#include "assistant_profile.h"
 #include "claude_provider.h"
 #include "claude_usage.h"
+#include "codex_usage.h"
 #include "config.h"
 #include "diagnostic_snapshot.h"
 #include "focus_trace.h"
@@ -73,6 +75,7 @@ static HINSTANCE g_hInstance = nullptr;
 
 static const UINT WM_APP_TRAYICON = WM_APP + 1;
 static const UINT WM_APP_CLAUDE_USAGE = WM_APP + 2; // a usage worker has a new result (see claude_usage.h)
+static const UINT WM_APP_CODEX_USAGE = WM_APP + 3;
 static const UINT ID_TRAY_RELOAD = 1;
 static const UINT ID_TRAY_OPEN_CONFIG = 2;
 static const UINT ID_TRAY_OPEN_LOG_FOLDER = 3;
@@ -182,7 +185,7 @@ static void ShowTrayMenu(HWND hwnd) {
 }
 
 // Tray > Restart All Windows: closes every VS Code window and, once VS Code
-// has exited, opens each folder again as the Claude profile it ran (see
+// has exited, opens each folder again as the assistant profile it ran (see
 // vscode_cli.h's CloseAndReopenVSCodeWindows) -- after an OK/Cancel
 // confirmation, which also names any window that won't come back.
 static void RestartAllVSCodeWindows(HWND owner) {
@@ -190,12 +193,12 @@ static void RestartAllVSCodeWindows(HWND owner) {
     if (windows.empty()) return;
     std::wstring prompt = L"Restart all " + std::to_wstring(windows.size()) +
                           L" VS Code window(s)?\n\nEach is closed and, once VS Code has exited, opened again with "
-                          L"the same folder and Claude profile.";
+                          L"the same folder and assistant profile.";
     std::wstring lost;
     for (const ReopenWindow& w : windows) {
         if (!w.reopen) lost += L"\n    " + w.label;
     }
-    if (!lost.empty()) prompt += L"\n\nThese won't be reopened (their folder isn't known):" + lost;
+    if (!lost.empty()) prompt += L"\n\nThese won't be reopened (their folder or assistant profile isn't known):" + lost;
     int choice = MessageBoxW(owner, prompt.c_str(), L"VS Code Border",
                              MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND);
     if (choice != IDOK) {
@@ -211,6 +214,7 @@ static void ReloadConfig() {
     CheckClaudeProfileFolders();
     SyncAllAiProviders(g_config);
     SyncClaudeUsageMonitor(g_nid.hWnd, WM_APP_CLAUDE_USAGE);
+    SyncCodexUsageMonitor(g_nid.hWnd, WM_APP_CODEX_USAGE);
     RefreshWorktreeCache();
     ReloadAliases();
     RefreshAllLabels();
@@ -274,6 +278,7 @@ static void CaptureSnapshotAndNotify() {
 }
 
 static void CleanupAndQuit(HWND hwnd) {
+    StopCodexUsageMonitor();
     StopClaudeUsageMonitor();
     CleanupAllTracked();
 
@@ -298,6 +303,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             } else if (lParam == NIN_BALLOONTIMEOUT || lParam == NIN_BALLOONHIDE) {
                 g_snapshotBalloonDir.clear();
             }
+            return 0;
+        case WM_APP_CODEX_USAGE:
+            ProcessCodexUsageResults();
+            RefreshProjectListHud();
+            UpdateTrayIconWarningState();
             return 0;
         case WM_APP_CLAUDE_USAGE:
             ProcessClaudeUsageResults();
@@ -429,6 +439,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
 
     TrackingInit(hInstance, hwnd);
     SyncClaudeUsageMonitor(hwnd, WM_APP_CLAUDE_USAGE);
+    SyncCodexUsageMonitor(hwnd, WM_APP_CODEX_USAGE);
 
     Log(L"=== startup ===");
     AddTrayIcon(hwnd);

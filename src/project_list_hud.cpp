@@ -1,6 +1,7 @@
 #include "project_list_hud.h"
 
-#include "claude_profile.h"
+#include "assistant_profile.h"
+#include "codex_usage.h"
 #include "favourites.h"
 #include "focus_trace.h"
 #include "label_alias.h"
@@ -836,13 +837,13 @@ static void OpenPathInExplorer(const std::wstring& path) {
     }
 }
 
-// Appends Claude profile `profile` (empty for the default) to `m` as item
-// `id`, with its icon (see ShowsClaudeProfileIcon).
+// Appends a configured assistant profile to `m` as item
+// `id`, with its icon (see ShowsProfileIcon).
 static void AppendProfileMenuItem(HMENU m, UINT id, const std::wstring& profile) {
-    AppendMenuW(m, MF_STRING, id, ClaudeProfileMenuText(profile).c_str());
+    AppendMenuW(m, MF_STRING, id, ProfileMenuText(profile).c_str());
     MENUITEMINFOW mii = {sizeof(mii)};
     mii.fMask = MIIM_BITMAP;
-    mii.hbmpItem = GetClaudeProfileMenuBitmap(profile);
+    mii.hbmpItem = GetProfileMenuBitmap(profile);
     if (mii.hbmpItem) SetMenuItemInfoW(m, GetMenuItemCount(m) - 1, TRUE, &mii);
 }
 
@@ -865,7 +866,7 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     // in, show every possible item, all disabled, so it's unambiguous:
     // nothing here is usable yet.
     // "Reopen As" closes this window and opens its folder again as another
-    // Claude profile (any configured one but the window's own) -- see
+    // assistant profile (any configured one but the window's own) -- see
     // vscode_cli.h's CloseAndReopenVSCodeWindows. Left off with no path, or
     // when there's no other profile.
     bool loading =index >= 0 && index < (int)state->entries.size() && state->entries[index].loading;
@@ -876,18 +877,17 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 
     HMENU menu = CreatePopupMenu();
     UINT itemFlags = MF_STRING | (loading ? MF_GRAYED : 0);
-    // Reopen As ids: kReopenAsBase + profile slot (0 for the default, 1 + i
-    // for profiles[i]).
+    // Reopen As ids: kReopenAsBase + the configured profile's index.
     const UINT kReopenAsBase = 0x100;
-    const std::vector<std::wstring> profiles = OtherClaudeProfiles();
+    const std::vector<std::wstring> profiles = ConfiguredProfileIds();
     if (loading && !profiles.empty()) {
         AppendMenuW(menu, itemFlags, 0, L"Reopen As");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    } else if (hasPath) {
+    } else if (hasPath || state->entries[index].emptyWindow) {
         HMENU reopenMenu = CreatePopupMenu();
-        for (size_t slot = 0; slot <= profiles.size(); slot++) {
-            std::wstring profile = slot == 0 ? std::wstring() : profiles[slot - 1];
-            if (SameClaudeProfile(profile, state->entries[index].profile)) continue;
+        for (size_t slot = 0; slot < profiles.size(); slot++) {
+            const std::wstring& profile = profiles[slot];
+            if (state->entries[index].profileKnown && SameProfile(profile, state->entries[index].profile)) continue;
             AppendProfileMenuItem(reopenMenu, kReopenAsBase + (UINT)slot, profile);
         }
         if (GetMenuItemCount(reopenMenu) > 0) {
@@ -929,10 +929,10 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     DestroyMenu(menu); // recursively destroys the Reopen As submenu too
     if (cmd >= (int)kReopenAsBase) {
         size_t slot = (size_t)(cmd - (int)kReopenAsBase);
-        if (index < 0 || index >= (int)state->entries.size() || slot > profiles.size()) return;
+        if (index < 0 || index >= (int)state->entries.size() || slot >= profiles.size()) return;
         const ProjectListHudEntry& entry = state->entries[index];
-        std::wstring profile = slot == 0 ? std::wstring() : profiles[slot - 1];
-        Log(L"hud item menu: [%ls] -> Reopen As [%ls]", entry.label.c_str(), ClaudeProfileName(profile).c_str());
+        const std::wstring& profile = profiles[slot];
+        Log(L"hud item menu: [%ls] -> Reopen As [%ls]", entry.label.c_str(), ProfileName(profile).c_str());
         ReopenWindow w;
         w.target = entry.target;
         w.folder = entry.path;
@@ -974,11 +974,10 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 }
 
 // Click on the fixed "+" new-window button. First "Start VS Code": with
-// Claude profiles configured besides the default (see claude_profile.h) a
-// submenu of which profile to open the new window as -- the default (bolded,
-// with its icon if claude_profile_1_icon is set), then the others in slot
-// order, each with its icon; without any it's a plain item opening the
-// window as the default. Then, after a separator, a "Recent" submenu
+// configured assistant accounts (see assistant_profile.h), a submenu lists
+// their names and icons in slot order, with the first account bolded.
+// Without any accounts, a plain item opens a window without an assistant.
+// Then, after a separator, a "Recent" submenu
 // holding the last kRecentFolderCount folders VS Code opened that still
 // exist (see worktree_resolver.h's RecentFolders), most recent first -- open
 // or not, favourite or not -- and, after another separator, a "Favourites"
@@ -1000,7 +999,7 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
 static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT screenPt) {
     const size_t kRecentFolderCount = 10;
     std::vector<FavouriteProject> favourites = LoadFavourites();
-    const std::vector<std::wstring> profiles = OtherClaudeProfiles();
+    const std::vector<std::wstring> profiles = ConfiguredProfileIds();
 
     // Show each favourite by its live alias, so one set from here (or from
     // label_aliases.ini) shows without waiting for the folder to be opened.
@@ -1047,19 +1046,18 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     // kCopyPathBase + i, open in Explorer = kExplorerBase + i, open as profile
     // slot j = kOpenAsBase + i*kOpenAsStride + j; start as profile slot j =
     // kStartAsBase + j, well above any project's -- decoded back on return
-    // below. A profile slot is 0 for the default, 1 + i for profiles[i].
+    // below. Profile slots index only the configured accounts.
     const UINT kSetAliasBase = 0x400, kClearAliasBase = 0x800;
     const UINT kCopyPathBase = 0xC00, kExplorerBase = 0x1000;
-    const UINT kOpenAsBase = 0x2000, kOpenAsStride = 8; // stride > the 5 profile slots
+    const UINT kOpenAsBase = 0x2000, kOpenAsStride = 16; // ten configured accounts
     const UINT kStartAsBase = 0x8000;
-    auto slotProfile = [&](size_t slot) { return slot == 0 ? std::wstring() : profiles[slot - 1]; };
     HMENU menu = CreatePopupMenu();
     if (profiles.empty()) {
         AppendMenuW(menu, MF_STRING, kStartAsBase, L"Start VS Code");
     } else {
         HMENU startMenu = CreatePopupMenu();
-        for (size_t slot = 0; slot <= profiles.size(); slot++) {
-            AppendProfileMenuItem(startMenu, kStartAsBase + (UINT)slot, slotProfile(slot));
+        for (size_t slot = 0; slot < profiles.size(); slot++) {
+            AppendProfileMenuItem(startMenu, kStartAsBase + (UINT)slot, profiles[slot]);
         }
         SetMenuDefaultItem(startMenu, kStartAsBase, FALSE);
         AppendMenuW(menu, MF_POPUP, (UINT_PTR)startMenu, L"Start VS Code");
@@ -1072,11 +1070,15 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
         for (size_t i = first; i < last; i++) {
             const FavouriteProject& p = projects[i];
             HMENU sub = CreatePopupMenu();
-            HMENU asMenu = CreatePopupMenu();
-            for (size_t slot = 0; slot <= profiles.size(); slot++) {
-                AppendProfileMenuItem(asMenu, kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, slotProfile(slot));
+            if (profiles.empty()) {
+                AppendMenuW(sub, MF_STRING, kOpenAsBase + (UINT)i * kOpenAsStride, L"Open in New Window");
+            } else {
+                HMENU asMenu = CreatePopupMenu();
+                for (size_t slot = 0; slot < profiles.size(); slot++) {
+                    AppendProfileMenuItem(asMenu, kOpenAsBase + (UINT)i * kOpenAsStride + (UINT)slot, profiles[slot]);
+                }
+                AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
             }
-            AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(sub, MF_STRING, kCopyPathBase + (UINT)i, L"Copy Directory Path");
             AppendMenuW(sub, MF_STRING, kExplorerBase + (UINT)i, L"Open Directory in File Explorer");
@@ -1103,15 +1105,19 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     if (cmd <= 0) return;
     if (cmd >= (int)kStartAsBase) {
         size_t slot = (size_t)(cmd - (int)kStartAsBase);
-        if (slot <= profiles.size()) OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button", slotProfile(slot));
+        if (profiles.empty() && slot == 0)
+            OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button");
+        else if (slot < profiles.size())
+            OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button", profiles[slot]);
         return;
     }
     if (cmd >= (int)kOpenAsBase) {
         size_t i = (size_t)(cmd - (int)kOpenAsBase) / kOpenAsStride;
         size_t slot = (size_t)(cmd - (int)kOpenAsBase) % kOpenAsStride;
-        if (i >= projects.size() || slot > profiles.size()) return;
+        if (i >= projects.size() || (profiles.empty() ? slot != 0 : slot >= profiles.size())) return;
         OpenNewVSCodeWindow(AnyTrackedWindow(state), projects[i].path,
-                            i < favouriteCount ? L"hud-favourite-open-as" : L"hud-recent-open-as", slotProfile(slot));
+                            i < favouriteCount ? L"hud-favourite-open-as" : L"hud-recent-open-as",
+                            profiles.empty() ? std::wstring() : profiles[slot]);
         return;
     }
     if (cmd >= (int)kCopyPathBase) {
@@ -1881,7 +1887,7 @@ static void DrawHudItem(HDC screenDC, UINT32* pixels, int width, int height, int
     // same reasoning as the Claude status indicator's placement.
     if (showFavouriteMarker) DrawFavouriteMarker(pixels, width, height, item, color);
     if (entry.showProfileIcon) {
-        BlendClaudeProfileIcon(entry.profile, pixels, width, height, (int)item.left + leftTextPad,
+        BlendProfileIcon(entry.profile, pixels, width, height, (int)item.left + leftTextPad,
                                (int)item.top + (rowHeight - kProfileIconSize) / 2, item);
         leftTextPad += kProfileIconSize + kProfileIconGap;
     }
@@ -2085,8 +2091,8 @@ static void DrawUsageRings(UINT32* pixels, int width, int height, int rowHeight,
 
     int left = (int)item.left + kUsageRingPad;
     if (ring.showProfileIcon) {
-        BlendClaudeProfileIcon(ring.profile, pixels, width, height, left, (int)item.top + (rowHeight - kProfileIconSize) / 2,
-                         item);
+        BlendProfileIcon(ring.profile, pixels, width, height, left,
+                         (int)item.top + (rowHeight - kProfileIconSize) / 2, item);
         left += kProfileIconSize + kUsageRingBadgeGap;
     }
 

@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-// Claude usage limits per Claude profile (see claude_profile.h) -- the
+// Claude usage limits per Claude profile (see assistant_profile.h) -- the
 // session (5-hour) and weekly percentages Claude Code's /usage screen shows
 // -- for the hub's usage rings (see project_list_hud.h's
 // ProjectListHudUsageRing).
@@ -29,7 +29,7 @@ struct ClaudeUsageLimit {
 };
 
 struct ClaudeUsageSnapshot {
-    std::wstring profile; // its id (see claude_profile.h), empty for the default
+    std::wstring profile; // shared provider + normalized folder ID (see assistant_profile.h)
     bool haveData = false; // a fetch has succeeded at least once
     ClaudeUsageLimit session, weekly; // from the last successful fetch
     long long fetchedAt = 0;          // Unix seconds of that fetch
@@ -52,8 +52,7 @@ void StopClaudeUsageMonitor();
 // momentary blip fixes itself by the next one.
 void ProcessClaudeUsageResults();
 
-// One snapshot per monitored Claude profile: the default first, then the
-// others in slot order. Empty while the monitor is off.
+// One snapshot per monitored Claude account, in slot order. Empty while off.
 std::vector<ClaudeUsageSnapshot> GetClaudeUsageSnapshots();
 
 // Whether the snapshot's numbers can't be trusted as current: the latest

@@ -33,7 +33,7 @@ void UpdateOverlayLabelHover(HWND overlay);
 // Label text color is either fixed (`labelTextColor`, used when
 // `labelTextColorAuto` is false) or auto-picked for contrast against `color`
 // (when `labelTextColorAuto` is true). A non-null `profileIcon` puts the
-// icon of that Claude profile (see claude_profile.h) in front of the label
+// icon of that Claude profile (see assistant_profile.h) in front of the label
 // text. Also records where the chip is, for UpdateOverlayLabelHover.
 void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thickness, int opacity,
                    const std::wstring& label, bool showLabel, int labelHeight, int labelFontSize,

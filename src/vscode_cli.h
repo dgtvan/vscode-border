@@ -32,15 +32,15 @@ bool FindInstalledVSCodeCli(std::wstring& outCmdPath);
 
 // Runs the shim with `args` (e.g. `-n "D:\path"`), hidden -- the shim's own
 // cmd.exe console would otherwise flash on screen, though it only forwards
-// the request and exits almost immediately -- as Claude profile `profile`
-// (see claude_profile.h): VS Code gives the window it opens the CLI's
-// environment, CLAUDE_CONFIG_DIR included. Logs on failure.
+// the request and exits almost immediately. Applies the selected assistant's
+// account environment and per-window extension disabling. Empty ID is None.
+// A removed/invalid account ID refuses to launch. Logs on failure.
 bool RunVSCodeCli(const std::wstring& cmdPath, const std::wstring& args, const std::wstring& profile);
 
 // Opens a brand-new VS Code window -- empty if `folder` is empty, else with
 // `folder` open (note `code -n` on a folder VS Code already has open just
-// re-activates that window). The window runs Claude Code as profile
-// `profile` (see claude_profile.h; empty: the default). `reason` tags the
+// re-activates that window). The window uses assistant profile
+// `profile` (see assistant_profile.h; empty: None). `reason` tags the
 // focus-trace launch record. Returns whether the launch was handed off
 // (false, logged, if no CLI shim was found or it couldn't be run).
 bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const wchar_t* reason,
@@ -60,8 +60,8 @@ void FitVSCodeWindowToScreen(HWND target);
 struct ReopenWindow {
     HWND target = nullptr;
     std::wstring folder;  // what to open again: its folder, or empty for an empty window
-    bool reopen = true;   // false: closed but not opened again (its folder isn't known)
-    std::wstring profile; // the Claude profile to open it as (see claude_profile.h)
+    bool reopen = true;   // false: its folder or assistant selection cannot be recovered
+    std::wstring profile; // shared profile ID, empty for None (see assistant_profile.h)
     std::wstring label;   // for log lines
 };
 

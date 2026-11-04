@@ -30,9 +30,10 @@ struct ProjectListHudEntry {
                             // "Copy Directory Path" and "Open Directory in File Explorer".
     COLORREF color = RGB(0, 0, 0);
     ClaudeStatus claudeStatus = ClaudeStatus::None;
-    std::wstring profile;   // Claude profile the window runs Claude Code as (see claude_profile.h), empty for
-                            // the default
-    bool showProfileIcon = false; // the profile's icon in front of the label (see ShowsClaudeProfileIcon)
+    bool profileKnown = false;
+    bool emptyWindow = false;
+    std::wstring profile;   // shared assistant account ID; empty is None when profileKnown
+    bool showProfileIcon = false; // the profile's icon in front of the label (see ShowsProfileIcon)
     // True while rawLabel might still change (VS Code's title/worktree
     // mapping still settling -- see tracking.cpp's IsWindowLoading). Drawn
     // greyed out with a spinner instead of its real color/AI status, and
@@ -41,12 +42,12 @@ struct ProjectListHudEntry {
     bool loading = false;
 };
 
-// One Claude profile's usage (see claude_usage.h), drawn in a strip of its own
-// at the right end of the hub's band as twin rings -- outer weekly, inner session -- with the profile's
-// icon in front by the same rule as the items (see ShowsClaudeProfileIcon), unless its _ring_badge is
+// One assistant profile's usage, drawn in a strip of its own
+// at the right end of the hub's band as twin rings -- outer weekly/secondary, inner session/primary -- with the profile's
+// icon in front by the same rule as the items (see ShowsProfileIcon), unless its _ring_badge is
 // off. Hovering shows `tooltip`.
 struct ProjectListHudUsageRing {
-    std::wstring profile;         // its id (see claude_profile.h)
+    std::wstring profile;         // Claude id, or Codex home folder, scoped by provider
     bool showProfileIcon = false; // its icon in front
     double sessionPercent = -1; // -1 when unknown
     double weeklyPercent = -1;

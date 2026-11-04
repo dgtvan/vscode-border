@@ -1,4 +1,4 @@
-#include "claude_profile.h"
+#include "assistant_profile.h"
 
 #include "config.h"
 #include "file_util.h"
@@ -6,9 +6,9 @@
 #include "layered_rendering.h"
 #include "logger.h"
 #include "text_util.h"
-
-#include <gdiplus.h>
-#include <shlwapi.h>
+#include "profile_icon.h"
+#include "profile_config.h"
+#include "codex_usage.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -69,166 +69,20 @@ std::wstring DecodeJsonString(const std::string& raw) {
     return out;
 }
 
-// The default profile: slot 1, which LoadConfig always fills in.
-const ClaudeProfile* DefaultProfile() {
-    for (const ClaudeProfile& p : g_config.claudeProfiles) {
-        if (p.isDefault) return &p;
-    }
-    return nullptr;
-}
-
 // ---- Who's signed in ----
 
 // Where Claude Code keeps profile `id`'s global state (.claude.json, with
 // the signed-in account) when CLAUDE_CONFIG_DIR names its folder -- as it
 // always does for a window this app opens: inside that folder.
 std::wstring GlobalStatePath(const std::wstring& id) {
-    return ClaudeProfileConfigDir(id) + L"\\.claude.json";
+    return ProfileConfigDir(id) + L"\\.claude.json";
 }
 
 // ---- Icons ----
 
-// A config.ini path, made absolute (relative to config.ini's folder).
-std::wstring ConfigRelativePath(const std::wstring& p) {
-    if (p.empty()) return p;
-    bool absolute = p.size() > 1 && (p[1] == L':' || (p[0] == L'\\' && p[1] == L'\\'));
-    return absolute ? p : GetExeDir() + L"\\" + p;
-}
-
-// Whether an icon value is the image itself rather than a path to one: a
-// data URI ("data:image/png;base64,..."), or bare base64 -- which never has
-// a '.', '\\' or ':', while a path to an image file always has one of them.
-bool IsBase64Icon(const std::wstring& icon) {
-    if (_wcsnicmp(icon.c_str(), L"data:", 5) == 0) return true;
-    return icon.find_first_of(L".\\:") == std::wstring::npos;
-}
-
-// Profile `id`'s _icon as config.ini has it: an absolute image path, the
-// base64 image as is, or empty.
 std::wstring ConfiguredIconSource(const std::wstring& id) {
-    const ClaudeProfile* p = FindClaudeProfile(id);
-    if (!p || p->icon.empty()) return L"";
-    return IsBase64Icon(p->icon) ? p->icon : ConfigRelativePath(p->icon);
-}
-
-// For log lines: a base64 icon by its size, not its contents.
-std::wstring DescribeIconSource(const std::wstring& source) {
-    if (source.empty()) return L"the letter badge";
-    if (IsBase64Icon(source)) return L"a base64 image (" + std::to_wstring(source.size()) + L" chars)";
-    return source;
-}
-
-// Decodes base64 (a data URI's payload, or bare), skipping whitespace; false
-// on anything else outside the base64 alphabet.
-bool DecodeBase64(const std::wstring& text, std::vector<BYTE>& out) {
-    size_t start = 0;
-    if (_wcsnicmp(text.c_str(), L"data:", 5) == 0) {
-        start = text.find(L',');
-        if (start == std::wstring::npos) return false;
-        start++;
-    }
-    out.clear();
-    UINT32 acc = 0;
-    int bits = 0;
-    for (size_t i = start; i < text.size(); i++) {
-        wchar_t c = text[i];
-        int v;
-        if (c >= L'A' && c <= L'Z') v = c - L'A';
-        else if (c >= L'a' && c <= L'z') v = c - L'a' + 26;
-        else if (c >= L'0' && c <= L'9') v = c - L'0' + 52;
-        else if (c == L'+' || c == L'-') v = 62;
-        else if (c == L'/' || c == L'_') v = 63;
-        else if (c == L'=') break;
-        else if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n') continue;
-        else return false;
-        acc = (acc << 6) | (UINT32)v;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out.push_back((BYTE)(acc >> bits));
-        }
-    }
-    return !out.empty();
-}
-
-// Loads an icon source (see ConfiguredIconSource) as a GDI+ bitmap, or null.
-Gdiplus::Bitmap* LoadIconImage(const std::wstring& source) {
-    if (!IsBase64Icon(source)) return new Gdiplus::Bitmap(source.c_str());
-    std::vector<BYTE> bytes;
-    if (!DecodeBase64(source, bytes)) return nullptr;
-    IStream* stream = SHCreateMemStream(bytes.data(), (UINT)bytes.size());
-    if (!stream) return nullptr;
-    // The bitmap reads from the stream for as long as it lives, and holds
-    // its own reference to it.
-    Gdiplus::Bitmap* image = new Gdiplus::Bitmap(stream);
-    stream->Release();
-    return image;
-}
-
-// A profile's icon rendered to premultiplied ARGB (S^2 pixels) from
-// `iconSource` (see ConfiguredIconSource), or the badge with `name`'s first
-// letter if that's empty or can't be read.
-std::vector<UINT32> RenderProfileIcon(const std::wstring& name, const std::wstring& iconSource, int S) {
-    std::vector<UINT32> out;
-    Gdiplus::GdiplusStartupInput input;
-    ULONG_PTR gdiplusToken = 0;
-    if (Gdiplus::GdiplusStartup(&gdiplusToken, &input, nullptr) != Gdiplus::Ok) {
-        LogWarn(L"claude_profile: GDI+ didn't start -- no profile icon");
-        return out;
-    }
-    {
-        Gdiplus::Bitmap target(S, S, PixelFormat32bppPARGB);
-        Gdiplus::Graphics g(&target);
-        g.Clear(Gdiplus::Color(0, 0, 0, 0));
-        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
-        g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
-
-        bool drawn = false;
-        if (!iconSource.empty()) {
-            Gdiplus::Bitmap* image = LoadIconImage(iconSource);
-            if (image && image->GetLastStatus() == Gdiplus::Ok && image->GetWidth() > 0 && image->GetHeight() > 0) {
-                // Without tile-flip wrapping, bicubic downscaling blends the
-                // image's edge with transparent black, leaving a dark rim.
-                Gdiplus::ImageAttributes attrs;
-                attrs.SetWrapMode(Gdiplus::WrapModeTileFlipXY);
-                g.DrawImage(image, Gdiplus::Rect(0, 0, S, S), 0, 0, (INT)image->GetWidth(), (INT)image->GetHeight(),
-                            Gdiplus::UnitPixel, &attrs);
-                drawn = true;
-            } else {
-                LogWarn(L"claude_profile: can't read the icon for [%ls] from %ls -- using the letter badge",
-                        name.c_str(), DescribeIconSource(iconSource).c_str());
-            }
-            delete image;
-        }
-        if (!drawn) {
-            Gdiplus::SolidBrush circle(Gdiplus::Color(255, 0x3B, 0x42, 0x52));
-            g.FillEllipse(&circle, 0.0f, 0.0f, (Gdiplus::REAL)S, (Gdiplus::REAL)S);
-            // A folder name like ".claude-work" starts with its first letter.
-            size_t first = name.find_first_not_of(L".");
-            wchar_t letter[2] = {first == std::wstring::npos ? L'?' : (wchar_t)towupper(name[first]), 0};
-            Gdiplus::Font font(L"Segoe UI", S * 0.62f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-            Gdiplus::StringFormat fmt;
-            fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
-            fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-            Gdiplus::SolidBrush white(Gdiplus::Color(255, 255, 255, 255));
-            g.DrawString(letter, 1, &font, Gdiplus::RectF(0, 0.5f, (Gdiplus::REAL)S, (Gdiplus::REAL)S), &fmt, &white);
-        }
-
-        Gdiplus::Rect rect(0, 0, S, S);
-        Gdiplus::BitmapData data;
-        if (target.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB, &data) == Gdiplus::Ok) {
-            out.resize(S * S);
-            for (int y = 0; y < S; y++) {
-                const UINT32* row = (const UINT32*)((const BYTE*)data.Scan0 + y * data.Stride);
-                std::copy(row, row + S, out.begin() + y * S);
-            }
-            target.UnlockBits(&data);
-        }
-    }
-    Gdiplus::GdiplusShutdown(gdiplusToken);
-    return out;
+    const Profile* p = FindProfile(id);
+    return p ? ResolveProfileIconSource(p->icon) : L"";
 }
 
 // ---- Which profile a window runs ----
@@ -255,14 +109,6 @@ struct LiveLock {
 std::vector<LiveLock> g_liveLocks;
 ULONGLONG g_lockScanTick = 0;
 std::wstring g_lockScanDirs; // the config folders the last scan covered, to rescan right after a reload
-
-// Folders this app opened, lowercased without a trailing separator -> the
-// profile it opened them as, and when.
-struct Launch {
-    std::wstring profile;
-    ULONGLONG at = 0; // a FILETIME, comparable with a lock's write time
-};
-std::map<std::wstring, Launch> g_launches;
 
 const ULONGLONG kLockRescanMs = 2000;
 
@@ -304,7 +150,7 @@ bool IsLockOwnerAlive(DWORD pid, ULONGLONG written) {
 
 void RescanLocksIfDue() {
     std::wstring dirs;
-    for (const ClaudeProfile& p : g_config.claudeProfiles) dirs += p.configDir + L"|";
+    for (const Profile& p : g_config.profiles) if (p.type == ProfileType::Claude) dirs += p.configDir + L"|";
     ULONGLONG now = GetTickCount64();
     if (dirs == g_lockScanDirs && now - g_lockScanTick < kLockRescanMs) return;
     g_lockScanDirs = dirs;
@@ -312,7 +158,8 @@ void RescanLocksIfDue() {
 
     g_liveLocks.clear();
     std::map<std::wstring, IdeLock> seen;
-    for (const ClaudeProfile& p : g_config.claudeProfiles) {
+    for (const Profile& p : g_config.profiles) {
+        if (p.type != ProfileType::Claude) continue;
         std::wstring ideDir = p.configDir + L"\\ide\\";
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW((ideDir + L"*.lock").c_str(), &fd);
@@ -325,7 +172,7 @@ void RescanLocksIfDue() {
                                                                                     : ParseLockFile(path, written);
             seen[path] = lock;
             if (lock.pid == 0 || !IsLockOwnerAlive(lock.pid, written)) continue;
-            g_liveLocks.push_back({p.isDefault ? L"" : p.configDir, written, lock.folders});
+            g_liveLocks.push_back({ProfileId(p), written, lock.folders});
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
@@ -334,33 +181,34 @@ void RescanLocksIfDue() {
 
 } // namespace
 
-std::vector<std::wstring> OtherClaudeProfiles() {
+std::vector<std::wstring> ConfiguredProfileIds() {
     std::vector<std::wstring> out;
-    for (const ClaudeProfile& p : g_config.claudeProfiles) {
-        if (!p.isDefault) out.push_back(p.configDir);
+    for (const Profile& p : g_config.profiles) {
+        out.push_back(ProfileId(p));
     }
     return out;
 }
 
-const ClaudeProfile* FindClaudeProfile(const std::wstring& id) {
-    if (id.empty()) return DefaultProfile();
-    for (const ClaudeProfile& p : g_config.claudeProfiles) {
-        if (!p.isDefault && SamePathText(p.configDir, id)) return &p;
-    }
+const Profile* FindProfile(const std::wstring& id) {
+    if (id.empty()) return nullptr;
+    for (const Profile& p : g_config.profiles) if (SameProfile(ProfileId(p), id)) return &p;
     return nullptr;
 }
 
-bool SameClaudeProfile(const std::wstring& a, const std::wstring& b) {
-    return SamePathText(a, b);
+bool SameProfile(const std::wstring& a, const std::wstring& b) { return SamePathText(a, b); }
+
+std::wstring ProfileConfigDir(const std::wstring& id) {
+    const Profile* p = FindProfile(id);
+    return p ? p->configDir : L"";
 }
 
-std::wstring ClaudeProfileConfigDir(const std::wstring& id) {
-    const ClaudeProfile* p = FindClaudeProfile(id);
-    if (p) return p->configDir;
-    return id.empty() ? EnvVar(L"USERPROFILE") + L"\\.claude" : id;
-}
-
-std::wstring ClaudeProfileEmail(const std::wstring& id) {
+std::wstring ProfileEmail(const std::wstring& id) {
+    const Profile* profile = FindProfile(id);
+    if (!profile) return L"";
+    if (profile->type == ProfileType::Codex) {
+        for (const auto& s : GetCodexUsageSnapshots()) if (SameProfile(s.profile, id)) return s.email;
+        return L"";
+    }
     // Per file, with the write time it was read at: .claude.json is large
     // and rewritten often, but its email only changes on a new sign-in.
     struct Cached {
@@ -387,30 +235,30 @@ std::wstring ClaudeProfileEmail(const std::wstring& id) {
     return c.email;
 }
 
-std::wstring ClaudeProfileName(const std::wstring& id) {
-    const ClaudeProfile* p = FindClaudeProfile(id);
-    if (!p) return id.empty() ? L"default" : id;
+std::wstring ProfileName(const std::wstring& id) {
+    const Profile* p = FindProfile(id);
+    if (!p) return id.empty() ? L"None" : L"Unavailable profile";
     if (!p->name.empty()) return p->name;
-    std::wstring email = ClaudeProfileEmail(id);
+    std::wstring email = ProfileEmail(id);
     if (!email.empty()) return email;
     return LeafName(p->configDir);
 }
 
-std::wstring ClaudeProfileMenuText(const std::wstring& id) {
+std::wstring ProfileMenuText(const std::wstring& id) {
     std::wstring out;
-    for (wchar_t c : ClaudeProfileName(id)) {
+    for (wchar_t c : ProfileName(id)) {
         if (c == L'&') out += L'&';
         out += c;
     }
     return out;
 }
 
-bool ShowsClaudeProfileIcon(const std::wstring& id) {
-    const ClaudeProfile* p = FindClaudeProfile(id);
-    return !p || !p->isDefault || !p->icon.empty();
+bool ShowsProfileIcon(const std::wstring& id) {
+    const Profile* p = FindProfile(id);
+    return p && (!p->isDefault || !p->icon.empty());
 }
 
-void BlendClaudeProfileIcon(const std::wstring& id, UINT32* pixels, int surfaceWidth, int surfaceHeight, int left,
+void BlendProfileIcon(const std::wstring& id, UINT32* pixels, int surfaceWidth, int surfaceHeight, int left,
                             int top, const RECT& clip) {
     // Per profile, with the icon source and name it was rendered from, so a
     // changed _icon or _name takes effect on Reload Config.
@@ -419,10 +267,10 @@ void BlendClaudeProfileIcon(const std::wstring& id, UINT32* pixels, int surfaceW
         std::vector<UINT32> pixels;
     };
     static std::map<std::wstring, CachedIcon> cache;
-    std::wstring source = ConfiguredIconSource(id), name = ClaudeProfileName(id);
+    std::wstring source = ConfiguredIconSource(id), name = ProfileName(id);
     auto it = cache.find(id);
     if (it == cache.end() || it->second.source != source || it->second.name != name) {
-        Log(L"claude_profile: icon for [%ls] from %ls", name.c_str(), DescribeIconSource(source).c_str());
+        Log(L"claude_profile: icon for [%ls] from %ls", name.c_str(), DescribeProfileIconSource(source).c_str());
         it = cache.insert_or_assign(id, CachedIcon{source, name, RenderProfileIcon(name, source, kProfileIconSize)})
                  .first;
     }
@@ -431,13 +279,13 @@ void BlendClaudeProfileIcon(const std::wstring& id, UINT32* pixels, int surfaceW
                            clip);
 }
 
-HBITMAP GetClaudeProfileMenuBitmap(const std::wstring& id) {
-    if (!ShowsClaudeProfileIcon(id)) return nullptr;
-    // Keyed like BlendClaudeProfileIcon's cache; a bitmap replaced by a
+HBITMAP GetProfileMenuBitmap(const std::wstring& id) {
+    if (!ShowsProfileIcon(id)) return nullptr;
+    // Keyed like BlendProfileIcon's cache; a bitmap replaced by a
     // changed icon is kept rather than freed, since a menu may still be
     // showing it.
     static std::map<std::wstring, HBITMAP> cache;
-    std::wstring source = ConfiguredIconSource(id), name = ClaudeProfileName(id);
+    std::wstring source = ConfiguredIconSource(id), name = ProfileName(id);
     std::wstring key = id + L"|" + name + L"|" + source;
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
@@ -461,7 +309,8 @@ HBITMAP GetClaudeProfileMenuBitmap(const std::wstring& id) {
     return bmp;
 }
 
-bool ClaudeProfileOfWindow(const std::wstring& path, const std::wstring& folderName, std::wstring& profile) {
+bool ProfileOfWindow(HWND target, const std::wstring& path, const std::wstring& folderName, std::wstring& profile) {
+    if (ResolveLaunchedWindowProfile(target, path, folderName, profile)) return true;
     RescanLocksIfDue();
     profile.clear();
     std::wstring folder = TrimTrailingSeparators(path);
@@ -473,17 +322,6 @@ bool ClaudeProfileOfWindow(const std::wstring& path, const std::wstring& folderN
                                          : !folderName.empty() && _wcsicmp(LeafName(f).c_str(), folderName.c_str()) == 0;
             if (match && (!best || lock.written > best->written)) best = &lock;
         }
-    }
-    // The app's own launch of the folder, when newer than every lock for it:
-    // the new window's lock isn't written until Claude Code's extension has
-    // started, and until then an older lock may be one left by a window of
-    // that folder closed since.
-    std::wstring key = folder;
-    std::transform(key.begin(), key.end(), key.begin(), ::towlower);
-    auto launch = folder.empty() ? g_launches.end() : g_launches.find(key);
-    if (launch != g_launches.end() && (!best || launch->second.at > best->written)) {
-        profile = launch->second.profile;
-        return true;
     }
     if (best) {
         profile = best->profile;
@@ -505,40 +343,39 @@ bool ClaudeProfileOfWindow(const std::wstring& path, const std::wstring& folderN
     return false;
 }
 
-void NoteClaudeProfileLaunch(const std::wstring& folder, const std::wstring& id) {
-    std::wstring key = TrimTrailingSeparators(folder);
-    if (key.empty()) return;
-    std::transform(key.begin(), key.end(), key.begin(), ::towlower);
-    FILETIME now;
-    GetSystemTimeAsFileTime(&now);
-    g_launches[key] = {id, FileTimeValue(now)};
-}
-
-std::wstring ClaudeProfileEnvironment(const std::wstring& id) {
+std::wstring ProfileEnvironment(const std::wstring& id) {
+    const Profile* profile = FindProfile(id);
     std::vector<std::wstring> vars;
     if (wchar_t* block = GetEnvironmentStringsW()) {
         for (const wchar_t* p = block; *p; p += wcslen(p) + 1) {
-            if (_wcsnicmp(p, L"CLAUDE_CONFIG_DIR=", 18) != 0) vars.push_back(p);
+            if (_wcsnicmp(p, L"CLAUDE_CONFIG_DIR=", 18) != 0 && _wcsnicmp(p, L"CODEX_HOME=", 11) != 0) vars.push_back(p);
         }
         FreeEnvironmentStringsW(block);
     }
-    // Set even for the default profile: VS Code lays a window's CLI
-    // environment over the one VS Code itself was started with, so leaving
-    // the variable out would let the window inherit another profile's.
-    vars.push_back(L"CLAUDE_CONFIG_DIR=" + ClaudeProfileConfigDir(id));
-    // Windows wants the block sorted by name, case-insensitively.
+    // Explicit empty values also override VS Code's initial process env.
+    vars.push_back(L"CLAUDE_CONFIG_DIR=" + (profile && profile->type == ProfileType::Claude ? profile->configDir : L""));
+    vars.push_back(L"CODEX_HOME=" + (profile && profile->type == ProfileType::Codex ? profile->configDir : L""));
     std::sort(vars.begin(), vars.end(), [](const std::wstring& a, const std::wstring& b) {
-        std::wstring na = a.substr(0, a.find(L'=', 1)), nb = b.substr(0, b.find(L'=', 1));
-        return CompareStringOrdinal(na.c_str(), -1, nb.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+        return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
     });
     std::wstring out;
-    for (const std::wstring& v : vars) out += v + L'\0';
+    for (const auto& v : vars) out += v + L'\0';
     out += L'\0';
     return out;
 }
 
+std::wstring ProfileExtensionArguments(const std::wstring& id) {
+    const Profile* p = FindProfile(id);
+    std::wstring args;
+    if (!p || p->type != ProfileType::Claude) args += L" --disable-extension anthropic.claude-code";
+    if (!p || p->type != ProfileType::Codex) args += L" --disable-extension openai.chatgpt";
+    return args;
+}
+
 void CheckClaudeProfileFolders() {
-    const ClaudeProfile* p = DefaultProfile();
+    const Profile* p = nullptr;
+    for (const auto& candidate : g_config.profiles)
+        if (candidate.type == ProfileType::Claude && candidate.isDefault) p = &candidate;
     std::wstring home = EnvVar(L"USERPROFILE");
     if (!p || !SamePathText(p->configDir, home + L"\\.claude")) return;
     std::wstring inside = p->configDir + L"\\.claude.json", outside = home + L"\\.claude.json";

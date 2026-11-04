@@ -1,4 +1,8 @@
-# Builds vscode_border.exe using the WinLibs MinGW-w64 g++ toolchain.
+# Builds the app; OutputName permits a staged build while the app is running.
+param(
+    [ValidatePattern('^[A-Za-z0-9_.-]+\.exe$')]
+    [string]$OutputName = 'vscode_border.exe'
+)
 $ErrorActionPreference = "Stop"
 
 $gxx = (Get-Command g++.exe -ErrorAction SilentlyContinue).Source
@@ -21,7 +25,7 @@ $sources = Get-ChildItem -Path $srcDir -Filter "*.cpp" | ForEach-Object { $_.Ful
 $rc = Join-Path $srcDir "resource.rc"
 $outDir = Join-Path $root "bin"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-$outExe = Join-Path $outDir "vscode_border.exe"
+$outExe = Join-Path $outDir $OutputName
 $resObj = Join-Path $outDir "resource.res.o"
 
 & $windres $rc -O coff -o $resObj

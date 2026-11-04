@@ -1,6 +1,6 @@
 #include "overlay.h"
 
-#include "claude_profile.h"
+#include "assistant_profile.h"
 #include "focus_trace.h"
 #include "layered_rendering.h"
 #include "logger.h"
@@ -217,7 +217,7 @@ void PaintOverlay(HWND overlay, int width, int height, COLORREF color, int thick
                     for (int x = lx; x < lx + lw; x++) pixels[y * stride + x] = lpx;
                 labelRect = {lx, ly, lx + lw, ly + lh};
                 if (profileIcon) {
-                    BlendClaudeProfileIcon(*profileIcon, pixels, width, height, lx + paddingX,
+                    BlendProfileIcon(*profileIcon, pixels, width, height, lx + paddingX,
                                            ly + (lh - kProfileIconSize) / 2, labelRect);
                 }
 

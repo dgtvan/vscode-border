@@ -37,7 +37,8 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 Produces `bin\vscode_border.exe` (statically linked -- no MinGW runtime DLLs
 needed) and copies the default `config.ini` into `bin\` if one isn't already
-there.
+there. Use `build.ps1 -OutputName vscode_border.unified.exe` to stage a build
+while the current executable is running.
 
 ## Run
 
@@ -51,7 +52,7 @@ Config** / **Open Config** / **Open Log Folder** / **Capture Diagnostic
 Snapshot** / **Exit**). **Close All Windows** asks for confirmation, then
 closes every VS Code window (VS Code still prompts about unsaved changes).
 **Restart All Windows** asks the same, then closes every window and, once VS
-Code has exited, opens each folder again as the [Claude
+Code has exited, opens each folder again as the [assistant
 profile](#claude-profiles) it was running -- a full VS Code restart, e.g. to
 pick up a changed environment. A window that's still open a minute later
 (its close was cancelled at the unsaved-changes prompt) is left as it is;
@@ -120,9 +121,11 @@ first build):
 | `ai_indicator_provider` | Comma-separated AI services to source it from: `claude` (implemented) and/or `copilot` (reserved, not yet implemented). |
 | `ai_indicator_color_working` / `_attention` / `_waiting` | Hex `RRGGBB` colors for the 3 states -- see below. |
 | `ai_indicator_border_color` | Indicator border color: `auto` (black/white by contrast) or a fixed hex `RRGGBB`. Default `auto`. |
-| `usage_meter_enabled` | Show Claude usage rings at the right end of the project list HUD (`true`/`false` -- see [Claude usage rings](#claude-usage-rings)). Default `true`. |
-| `usage_meter_refresh_minutes` | How often to re-read Claude usage, in minutes (1-60). Default `5`. |
-| `claude_profile_<N>_name` / `_profile_path` / `_icon` / `_color` / `_ring_badge` | Claude profiles (see [Claude profiles](#claude-profiles) and `config.ini`): profile 1 is the default (`%USERPROFILE%\.claude` unless `_profile_path` says otherwise), 2-5 further Claude Code config folders, unused while `_profile_path` is empty. `_name` empty (default) shows the email the profile is signed in with. `_color` is the background of that profile's usage rings, hex `RRGGBB`; empty (default) leaves it transparent. `_ring_badge=false` hides the profile's icon in front of its usage rings (default shown). |
+| `usage_meter_enabled` | Show usage rings at the right end of the project list HUD (`true`/`false` -- see [Claude usage rings](#claude-usage-rings) and [Codex usage rings](#codex-usage-rings)). Default `true`; also the master switch for Codex rings. |
+| `usage_meter_refresh_minutes` | How often to re-read Claude and enabled Codex usage, in minutes (1-60). Default `5`. |
+| `profile_<N>_type` / `_profile_path` | Ten shared assistant account slots: `Claude`, `Codex`, or `None`. Empty type or path means no assistant. Paths are explicit absolute folders; no implicit default account. See [Assistant profiles](#assistant-profiles). |
+| `profile_<N>_name` / `_icon` / `_color` / `_ring_badge` | Shared names, image/base64 icons, ring background colors and badge visibility. |
+| `profile_<N>_usage_enabled` | Show this account's usage rings (`true`/`false`, empty defaults to `true`). `usage_meter_enabled` is the master switch. |
 
 After editing, use the tray icon's **Reload Config** to apply changes
 without restarting -- except for `colors`, which only takes effect on the
@@ -203,14 +206,14 @@ favourites, close.
 
 ![Context menu on a HUD item, showing the directory, alias and favourites groups](assets/item-menu.png)
 
-- **Reopen As** is a submenu of the other [Claude profiles](#claude-profiles)
+- **Reopen As** is a submenu of the other [assistant profiles](#assistant-profiles)
   (every configured one but the window's own): picking one closes the
   window (VS Code still asks about unsaved changes) and, once it's gone,
   opens its folder again in a new window as that profile -- not before,
   since VS Code keeps one window per folder and would just bring the old
   one forward. If the window is still open a minute later (the close was
-  cancelled), nothing is reopened. Not shown with no other profile
-  configured.
+  cancelled), nothing is reopened. The submenu is omitted when there is no
+  other configured account.
 - **Copy Directory Path** puts the window's open folder on the clipboard as
   plain text.
 - **Open Directory in File Explorer** opens that folder in a new Explorer
@@ -268,12 +271,12 @@ window switches it over to the folder's own alias, if any.
 
 Clicking the fixed "+" square at the end of the project list HUD opens a
 menu. **Start VS Code** opens a brand-new, empty VS Code window -- with
-[Claude profiles](#claude-profiles) configured besides the default it's a
+[assistant profiles](#assistant-profiles) configured it's a
 submenu of which profile to open it as. Below it, past a divider, is
 **Recent** (see below), then past another divider a
 **Favourites** submenu: your saved favourite projects/folders
 sorted by name, one submenu per favourite -- hover a favourite's name to expand it to
-**Open in New Window As** (a submenu of the Claude profiles to open it as;
+**Open in New Window As** (a submenu of the assistant profiles to open it as;
 on an open folder it just brings its window forward, whatever profile that
 runs), **Copy Directory Path** / **Open Directory in File Explorer** (as
 on a HUD item), **Set Alias...** / **Clear Alias** (the same
@@ -289,7 +292,7 @@ Once that folder is a favourite, the same item's menu offers **Remove from
 Favourites** in its place. That only reaches a favourite while its window is
 open, though -- the "+" button's own menu is the way to remove one that
 isn't. A favourite is the folder, matched by its path (not label text),
-whatever [Claude profile](#claude-profiles) its window runs: the star shows
+whatever [assistant profile](#assistant-profiles) its window runs: the star shows
 for it in any profile, and it stores no profile -- **Open in New Window As**
 picks one each time. A favourite's alias is keyed by the label its window
 showed when last seen open (for a git repo that includes the branch), so it
@@ -431,7 +434,7 @@ this works via Claude Code's **hooks**: `claude_status_hook.ps1` (repo
 root, copied to `bin\` on every build) runs on several of Claude Code's
 lifecycle events and writes a small status file per session under
 `bin\claude_status\`. This app manages the hook registrations in every
-[Claude profile](#claude-profiles)'s `settings.json` (the default one is
+[assistant profile](#assistant-profiles)'s `settings.json` (the default one is
 `%USERPROFILE%\.claude\settings.json`) for you -- automatically, on
 startup and every **Reload Config** -- adding them when
 `ai_indicator_enabled=true` and `claude` is in `ai_indicator_provider`,
@@ -465,7 +468,7 @@ they all show the same status, because nothing in a session says which of them
 it runs in. Stale/abandoned status files are cleaned
 up automatically -- see "Known limitations" below for exactly how.
 
-Every [Claude profile](#claude-profiles) gets the hooks, in its own
+Every [assistant profile](#assistant-profiles) gets the hooks, in its own
 `settings.json`, all running the one script in `bin\`, so every profile's
 sessions report to the same `claude_status\` folder (each status file notes
 its profile's folder as `config_dir=`). Sessions match windows by folder
@@ -477,114 +480,135 @@ from anywhere else -- an older install location, or a profile folder copied
 from another Windows account -- are recognised by their script name and
 replaced.
 
-### Claude profiles
+### Assistant profiles
 
-Claude Code keeps its login, settings, hooks and sessions in a config
-folder: `%USERPROFILE%\.claude`, or whatever `CLAUDE_CONFIG_DIR` names. Each
-such folder is a *Claude profile*, and VS Code windows can run different
-ones side by side -- for example a personal and a work Claude login, from
-the one Windows account. List them in `config.ini`'s `claude_profile_<N>_*`
-settings: profile 1 is the default (the folder Claude Code uses with no
-`CLAUDE_CONFIG_DIR`, unless its `_profile_path` names another), 2-5 are
-further folders:
+A profile is one Claude or Codex account folder. Configure up to ten in
+`bin\config.ini`; both launch menus and usage rings follow slot order.
+The **Start VS Code**, **Open in New Window As**, and **Reopen As** menus
+show only configured accounts, using their profile names without added
+provider prefixes. Reopen As works for empty windows too. With no accounts
+configured, ordinary start/open actions launch a window without an assistant.
 
 ```ini
-claude_profile_2_profile_path=%USERPROFILE%\.claude-work
+profile_1_type=Claude
+profile_1_name=Claude Personal
+profile_1_profile_path=%USERPROFILE%\.claude
+profile_1_icon=
+profile_1_color=
+profile_1_ring_badge=true
+profile_1_usage_enabled=true
+
+profile_2_type=Codex
+profile_2_name=Codex Personal
+profile_2_profile_path=%USERPROFILE%\.codex
+profile_2_icon=
+profile_2_color=172B36
+profile_2_ring_badge=true
+profile_2_usage_enabled=true
 ```
 
-- **Name:** `_name`, or when that's empty the email the profile is signed
-  in to Claude with (`oauthAccount.emailAddress` in its `.claude.json`),
-  else its folder's name.
-- **Opening a window as a profile** -- the "+" button's **Start VS Code**,
-  a favourite's **Open in New Window As**, an item's **Reopen As** -- runs
-  the VS Code CLI with `CLAUDE_CONFIG_DIR` set to the profile's folder --
-  the default profile's too -- the same as
-  `$env:CLAUDE_CONFIG_DIR = "..."; code -n <folder>` in a terminal. VS Code
-  hands the CLI's environment to the window it opens, and Claude Code in
-  that window uses the profile.
-- **Which profile a window runs** is read from the lock files Claude Code's
-  VS Code extension writes into each profile folder's `ide\` when it starts
-  in a window (VS Code's pid and the window's folders; the newest lock for a
-  folder counts, while that VS Code runs), whoever opened the window -- the
-  app, or `code` from a terminal. A window the app opened counts as the
-  profile it was opened as until a newer lock says otherwise.
-  A window with no folder open is told apart only when every such window
-  runs the same profile.
-- **Icon:** every window shows its profile's icon in front of its label,
-  on the border's label chip and its hub item -- `_icon`, or a round badge
-  with the name's first letter. The default profile's windows show one only
-  when `claude_profile_1_icon` is set.
-- **AI status and usage:** every profile gets the [AI status
-  indicator](#ai-status-indicator) hooks and its own [usage
-  rings](#claude-usage-rings).
+- **Type and path:** type is case-insensitive. `None`, an empty type, or an
+  empty path means no assistant. An unknown type or invalid path warns and
+  cannot select another account. Standard accounts require explicit paths
+  such as `%USERPROFILE%\.claude` and `%USERPROFILE%\.codex`. Paths accept
+  environment expansion and UNC folders. Duplicate accounts are matched by
+  provider and normalized path; slot/name changes do not change identity.
+- **Launching:** Claude sets `CLAUDE_CONFIG_DIR` and disables the Codex
+  extension (`openai.chatgpt`) in the new window. Codex sets `CODEX_HOME`
+  and disables Claude (`anthropic.claude-code`). None disables both. Both
+  environment variables are explicitly set, clearing the unselected one
+  so an inherited account cannot choose the window's assistant. Other
+  extensions stay enabled. The selected assistant must be installed and
+  enabled in the VS Code profile. Terminal CLI commands remain available.
+- **Changing windows:** Reopen As closes the old window normally, then opens
+  its folder under the selected profile. VS Code still prompts for unsaved
+  changes; cancelling the close cancels reopening. Opening an already-open
+  project from Recent/Favourites activates it without changing its account.
+- **Names and icons:** `_name` defaults to the account email, then its folder
+  name. `_icon` accepts an image path relative to `config.ini` or an absolute
+  path, bare base64, or a data URI. Nonstandard account folders fall back to
+  a letter badge; standard provider folders show an icon only when one is
+  supplied. `_ring_badge=false` hides only the icon beside the usage rings.
+  `_color` is an optional RRGGBB background for that account's rings.
+- **Usage:** `_usage_enabled=false` hides an account's rings while keeping it
+  available for launching. `usage_meter_enabled` and
+  `usage_meter_refresh_minutes` apply to both providers. None has no rings.
+- **Window identity:** app-managed selections, including None and empty
+  windows, are saved in `window_profiles.ini` with window/process identity
+  and restored when vscode-border restarts. A closed window is forgotten.
+  Without an app launch record, Claude IDE lock files provide best-effort
+  folder matching. External Codex windows cannot reliably be assigned an
+  account; the app does not assume the first configured profile. Restart All
+  warns about windows whose folder or selected account cannot be recovered.
 
-Why the default profile gets `CLAUDE_CONFIG_DIR` too: VS Code lays each
-window's CLI environment over the environment VS Code itself was started
-with, so a variable that's simply left out can't undo an inherited one. If
-VS Code was first started as another profile, a window opened "without" the
-variable would still run that profile.
+**Existing configurations migrate automatically.** When only old
+`claude_profile_<N>_*` / `codex_profile_<N>_*` keys are present, the app
+backs up the original config as `config.ini.pre-unified-profiles.*.bak`
+and writes shared slots with explicit account paths. Names, icons, colors,
+badge visibility and Codex usage enablement are retained, with Claude
+accounts first and Codex accounts next. Unrelated settings and comments are
+kept. A file containing new `profile_<N>_*` keys uses the new rules and never
+reactivates an old default account. Credentials and favourites are not moved.
 
-That has one consequence for the default profile. Without `CLAUDE_CONFIG_DIR`,
-Claude Code keeps its state (`.claude.json`: projects, settings, the
-signed-in account) in `%USERPROFILE%\.claude.json`; with it set -- even to
-`%USERPROFILE%\.claude` -- it uses `.claude.json` inside the folder and
-starts afresh if there's none. So once, before using the app this way:
-
-1. Copy `%USERPROFILE%\.claude.json` to `%USERPROFILE%\.claude\.claude.json`.
-2. Set `CLAUDE_CONFIG_DIR=%USERPROFILE%\.claude` as a user environment
-   variable, so Claude Code run from a terminal, or a VS Code window opened
-   from the Start menu, uses the same file.
-
-The app warns (and badges its tray icon) while the default profile still
-has only the `%USERPROFILE%` file.
+Claude Code keeps `.claude.json` inside the selected folder whenever
+`CLAUDE_CONFIG_DIR` is set. If the default account's state exists only at
+`%USERPROFILE%\.claude.json`, copy it to
+`%USERPROFILE%\.claude\.claude.json` before opening windows as that account.
+The app warns if this setup is incomplete.
 
 ### Claude usage rings
 
-At the right end of the hub's band, above the system tray, each
-[Claude profile](#claude-profiles) gets a pair of rings showing its Claude
-usage limits, the same numbers as Claude Code's `/usage`: the outer ring is
-the weekly limit, the inner ring the session (5-hour) limit. The default
-profile (profile 1) comes first, then the others in slot order, each with
-its icon in front -- the same icon its windows' items carry, so the default
-profile's rings have one only when `claude_profile_1_icon` is set.
-`claude_profile_<N>_ring_badge=false` hides it on the rings alone.
+Each configured Claude account with usage enabled gets an outer weekly ring
+and an inner session (5-hour) ring. They use the account's Claude Code login
+and refresh every `usage_meter_refresh_minutes`. Colors are green, amber
+from 70%, and red from 90%. Hover for exact usage, reset times, last update,
+and any failure. Unavailable usage replaces the numbers with a pulsing
+amber `!`; a network failure warns only after it survives another refresh.
 
-![The default profile's rings reading normally, next to another profile's ring showing the pulsing amber "!" of unavailable usage](assets/usage-rings.png)
+![Usage rings with normal and unavailable readings](assets/usage-rings.png)
 
-- **Colors:** green, amber from 70%, red from 90%. Grey while the first
-  read is still on its way.
-- **Unavailable:** whenever a profile's usage can't be read -- any
-  failure: its login expired or is missing, the network or the API failed,
-  the answer was unexpected -- its rings are replaced by a grey ring around
-  a pulsing amber "!", so an empty ring is never mistaken for 0%. Hover to
-  see why.
-- **Background:** a profile's rings can sit on a chip of its own color, so
-  the profiles are easy to tell apart: its `claude_profile_<N>_color` (hex
-  `RRGGBB`). Without one there's no chip; the rings sit straight on the
-  band.
-- **Hover** for the profile's name, the exact percentages, when each limit
-  resets, when the numbers were read, and why the last update failed, if it
-  did.
-
-The numbers come from `https://api.anthropic.com/api/oauth/usage`, called
-with the profile's own Claude Code login token (`.credentials.json` in its
-config folder), every `usage_meter_refresh_minutes`. That endpoint isn't a
-documented API, so its format can change; when it does, the rings go grey
-and the log says why. The app never refreshes the token itself: that would
-rotate the refresh token Claude Code holds and sign Claude Code out. When it
-has expired (no Claude Code session has run as that profile for about 8
-hours), the app has Claude Code renew it: it runs Claude Code as that
-profile (`CLAUDE_CONFIG_DIR` set to its folder) as `claude -p` with no
-input, which renews the login and stops before calling the model, so it
-costs no usage. It tries once per expired token and logs the result; if it
-can't (no Claude Code found), the rings show the "!" until Claude Code next
-runs as that profile, and the app reads usage again within seconds of that.
-
-Every failure is logged as a `[WARN]` (once per distinct error, so the
-same failure every few minutes doesn't flood the log), which also badges
-the tray icon. A recovery is logged too. The design decisions behind all
-this, and the options that were tried and dropped, are in
+The reader calls `https://api.anthropic.com/api/oauth/usage` with the
+account's own `.credentials.json`. That endpoint is undocumented. The app
+never rotates Claude's refresh token itself. An expired login is renewed
+by running Claude Code briefly under the selected account with no model
+input. The implementation and earlier design decisions are described in
 [docs/USAGE-RINGS.md](docs/USAGE-RINGS.md).
+
+### Codex usage rings
+
+A configured `profile_<N>_type=Codex` account with a nonempty path and usage
+enabled gets the same twin-ring presentation. The inner ring is Codex's
+primary limit; the outer is its secondary limit, usually session and weekly.
+The tooltip matches Claude's Session/Weekly labels, local times and readable
+countdowns such as `3h 37m` or `6d 22h`. Unusual window durations reported
+by Codex are shown explicitly. Missing windows remain unknown.
+Unavailable/error states match Claude's rings.
+
+Sign into each folder with **ChatGPT**, using Codex's normal login flow.
+For a second account, create its folder, set `CODEX_HOME` to that folder
+in a separate terminal, then run `codex login`. API-key logins do not expose
+ChatGPT usage limits. These folders are separate from Codex's configuration
+presets, which do not select separate account logins.
+
+The app finds native `codex.exe` on PATH, in standard standalone install
+locations, or in the stable/Insiders Codex VS Code extension. Each refresh
+runs a short-lived hidden `codex app-server` with the selected home folder,
+calls `account/read` and `account/rateLimits/read`, then closes it. No model
+turn is started. Codex manages its login and token renewal; this app never
+reads its tokens or logs raw account responses. A changed `auth.json`
+prompts an early retry after a failed read.
+
+No companion extension is needed for usage rings. References:
+[Codex account API](https://learn.chatgpt.com/docs/app-server#auth-endpoints),
+[CODEX_HOME](https://learn.chatgpt.com/docs/config-file/environment-variables).
+
+Config, migration, profile environments, window assignments, usage parsing,
+worker lifecycle and ring ordering are checked by
+`powershell -ExecutionPolicy Bypass -File tests/run.ps1` without a login or
+network. The runner creates a temporary build directory and removes it on
+completion, including after a failed check. The one-time desktop probe
+scripts were removed after verification. See
+[the refactoring contract and verification record](docs/UNIFIED-PROFILES.md).
 
 ### Project list HUD position/size memory
 
@@ -712,10 +736,15 @@ to pick up worktrees created after the app started.
   registrations in every Claude profile's `settings.json`, reads the per-session status files
   `claude_status_hook.ps1` writes, and auto-expires ones whose recorded pid is no longer a live
   `claude.exe` process (see "Known limitations" above).
-- `src/claude_profile.*` -- Claude profiles (Claude Code config folders): names, icons, the environment a
-  window is opened with, and which profile a window runs (see "Claude profiles" above).
+- `src/assistant_profile.*`, `src/window_profile.cpp` -- shared account names, icons, launch environments,
+  extension selection, Claude IDE-lock inference and durable window assignments.
+- `src/profile_config.*` -- shared profile parsing, path normalization, IDs and backed-up legacy migration.
+- `src/usage_rings.*` -- builds the ring display in profile slot order across providers.
 - `src/claude_usage.*` -- Claude session/weekly usage per Claude profile for the hub's usage rings: fetching,
   renewing an expired login, and the tooltip text (see "Claude usage rings" above).
+- `src/codex_usage.*`, `src/codex_usage_client.*`, `src/codex_usage_protocol.*` -- Codex profile usage rings,
+  cancellable app-server queries, account-limit parsing and tooltips (see "Codex usage rings" above).
+- `src/profile_icon.*` -- shared Claude/Codex profile image and letter-badge rendering.
 - `src/json_scan.*` -- minimal JSONC span-scanner (find/insert/remove one key or array element without
   parsing/reserializing the rest of the file), generalized from `vscode_settings.cpp`'s scanner.
 - `src/logger.*` -- file logging.

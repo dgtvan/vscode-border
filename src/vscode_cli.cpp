@@ -1,6 +1,6 @@
 #include "vscode_cli.h"
 
-#include "claude_profile.h"
+#include "assistant_profile.h"
 #include "dpi_util.h"
 #include "focus_trace.h"
 #include "logger.h"
@@ -100,19 +100,23 @@ bool ResolveVSCodeCliShim(HWND runningWindow, std::wstring& outCmdPath) {
 }
 
 bool RunVSCodeCli(const std::wstring& cmdPath, const std::wstring& args, const std::wstring& profile) {
+    if (!profile.empty() && !FindProfile(profile)) {
+        LogWarn(L"VS Code launch refused: selected profile is no longer configured");
+        return false;
+    }
     wchar_t system32[MAX_PATH] = {};
     GetSystemDirectoryW(system32, MAX_PATH);
     std::wstring cmdExe = std::wstring(system32) + L"\\cmd.exe";
-    std::wstring commandLine = L"cmd.exe /d /c \"\"" + cmdPath + L"\" " + args + L"\"";
-    std::wstring environment = ClaudeProfileEnvironment(profile);
+    std::wstring commandLine = L"cmd.exe /d /c \"\"" + cmdPath + L"\" " + args + ProfileExtensionArguments(profile) + L"\"";
+    std::wstring environment = ProfileEnvironment(profile);
     STARTUPINFOW si = {sizeof(si)};
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION pi = {};
     if (!CreateProcessW(cmdExe.c_str(), &commandLine[0], nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, &environment[0], nullptr, &si, &pi)) {
-        LogWarn(L"couldn't run the VS Code CLI (%ls %ls) as Claude profile [%ls], lastError=%lu", cmdPath.c_str(),
-                args.c_str(), ClaudeProfileName(profile).c_str(), GetLastError());
+        LogWarn(L"couldn't run the VS Code CLI (%ls %ls) as profile [%ls], lastError=%lu", cmdPath.c_str(),
+                args.c_str(), ProfileName(profile).c_str(), GetLastError());
         return false;
     }
     CloseHandle(pi.hThread);
@@ -126,10 +130,10 @@ bool OpenNewVSCodeWindow(HWND runningWindow, const std::wstring& folder, const w
     if (!ResolveVSCodeCliShim(runningWindow, cmdPath)) return false;
     std::wstring args = folder.empty() ? L"-n" : L"-n \"" + folder + L"\"";
     NoteWindowLaunchRequest(reason, 1);
-    if (!RunVSCodeCli(cmdPath, args, profile)) return false;
-    NoteClaudeProfileLaunch(folder, profile);
-    Log(L"opened a new VS Code window%ls%ls as Claude profile [%ls] (%ls)", folder.empty() ? L"" : L" for ",
-        folder.c_str(), ClaudeProfileName(profile).c_str(), reason);
+    ULONGLONG request = NoteProfileLaunch(folder, profile);
+    if (!RunVSCodeCli(cmdPath, args, profile)) { CancelProfileLaunch(request); return false; }
+    Log(L"opened a new VS Code window%ls%ls as profile [%ls] (%ls)", folder.empty() ? L"" : L" for ",
+        folder.c_str(), ProfileName(profile).c_str(), reason);
     return true;
 }
 
@@ -273,9 +277,9 @@ void CloseAndReopenVSCodeWindows(const std::vector<ReopenWindow>& windows, bool 
             std::find(batch.vscodePids.begin(), batch.vscodePids.end(), pid) == batch.vscodePids.end()) {
             batch.vscodePids.push_back(pid);
         }
-        Log(L"%ls: closing [%ls] to reopen %ls as Claude profile [%ls]", reason, w.label.c_str(),
+        Log(L"%ls: closing [%ls] to reopen %ls as profile [%ls]", reason, w.label.c_str(),
             !w.reopen ? L"(not: folder unknown)" : w.folder.empty() ? L"an empty window" : w.folder.c_str(),
-            ClaudeProfileName(w.profile).c_str());
+            ProfileName(w.profile).c_str());
     }
     if (batch.windows.empty()) return;
     for (const ReopenWindow& w : batch.windows) CloseVSCodeWindow(w.target);
