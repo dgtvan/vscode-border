@@ -142,7 +142,17 @@ menu (**Reopen As**, **Copy Directory Path** / **Open Directory in File
 Explorer** for the window's folder, **Fit to Screen**, **Set Alias**, **Add to Favourites** and **Close Window**
 -- see below).
 
-![Project list HUD showing three open windows and a "+" button to open a new one](assets/hub.png)
+![The hub band above the taskbar: project chips on the left, usage rings on the right](assets/hub-bar.png)
+
+The whole band, end to end. On the left, one chip per open VS Code window
+in the window's own border color, each with its assistant-profile badge, its
+alias or repo/branch label, and its AI status square; after the last chip
+comes the `+` button for opening another window. At the right edge, next to
+the clock, sit the [usage rings](#claude-usage-rings) -- one twin ring per
+configured Claude or Codex account. Everything between them is empty band,
+painted to match the taskbar; that middle stretch is cut out of this
+screenshot (the `...`), which is why the two ends look closer together than
+they are on screen.
 
 ### Project list HUD position
 
