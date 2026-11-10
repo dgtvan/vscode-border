@@ -424,12 +424,15 @@ static bool ApplyScenarioForCurrentMonitors(ProjectListHudState* state) {
 // strip (see HudRightLimit): y is pinned to the band's bottom (the HUD can
 // only slide sideways), the width is capped at what's left of the band, and
 // x is either the remembered one clamped into it or, if never placed by
-// hand, right-aligned against the rings.
+// hand, the band's left edge. Placements are per monitor scenario, so
+// plugging in a monitor lands on a scenario that has never been placed;
+// starting from the left keeps the hub where the taskbar's own items begin
+// rather than throwing it across the screen.
 static void FitIntoDock(ProjectListHudState* state) {
     const RECT& d = state->dockRect;
     int right = HudRightLimit(state);
     state->width = std::max(1, std::min(state->width, right - (int)d.left));
-    state->x = state->manualPosition ? ClampInt(state->x, d.left, right - state->width) : right - state->width;
+    state->x = state->manualPosition ? ClampInt(state->x, d.left, right - state->width) : (int)d.left;
     state->y = d.bottom - state->height; // on the taskbar side, clear of the backdrop's border row
 }
 
