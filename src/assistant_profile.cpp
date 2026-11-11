@@ -388,6 +388,18 @@ bool ProfileOfWindow(HWND target, const std::wstring& path, const std::wstring& 
     return false;
 }
 
+const wchar_t* ProviderEnvVar(ProfileType type) {
+    return type == ProfileType::Claude ? L"CLAUDE_CONFIG_DIR" : type == ProfileType::Codex ? L"CODEX_HOME" : L"";
+}
+
+std::wstring ProfileEnvironmentAssignment(const std::wstring& id) {
+    const Profile* profile = FindProfile(id);
+    if (!profile) return L"";
+    const wchar_t* var = ProviderEnvVar(profile->type);
+    if (!*var) return L"";
+    return std::wstring(var) + L"=" + profile->configDir;
+}
+
 std::wstring ProfileEnvironment(const std::wstring& id) {
     const Profile* profile = FindProfile(id);
     std::vector<std::wstring> vars;
@@ -398,8 +410,10 @@ std::wstring ProfileEnvironment(const std::wstring& id) {
         FreeEnvironmentStringsW(block);
     }
     // Explicit empty values also override VS Code's initial process env.
-    vars.push_back(L"CLAUDE_CONFIG_DIR=" + (profile && profile->type == ProfileType::Claude ? profile->configDir : L""));
-    vars.push_back(L"CODEX_HOME=" + (profile && profile->type == ProfileType::Codex ? profile->configDir : L""));
+    vars.push_back(std::wstring(ProviderEnvVar(ProfileType::Claude)) + L"=" +
+                   (profile && profile->type == ProfileType::Claude ? profile->configDir : L""));
+    vars.push_back(std::wstring(ProviderEnvVar(ProfileType::Codex)) + L"=" +
+                   (profile && profile->type == ProfileType::Codex ? profile->configDir : L""));
     std::sort(vars.begin(), vars.end(), [](const std::wstring& a, const std::wstring& b) {
         return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
     });

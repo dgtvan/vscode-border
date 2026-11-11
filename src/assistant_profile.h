@@ -18,6 +18,15 @@ HBITMAP GetProfileMenuBitmap(const std::wstring& id);
 // External Codex windows with an unknown account remain unknown.
 bool ProfileOfWindow(HWND target, const std::wstring& path, const std::wstring& folderName, std::wstring& profile);
 std::wstring ProfileEnvironment(const std::wstring& id);
+
+// `<VAR>=<account folder>` for the one environment variable that points this
+// account's provider at its account folder (CLAUDE_CONFIG_DIR for Claude,
+// CODEX_HOME for Codex) -- the same variable ProfileEnvironment sets, for
+// callers that have to pass it through a command line rather than a process
+// environment block (see ai_cli.cpp). Empty for None, for an account that is
+// no longer configured, and for a provider with no such variable.
+std::wstring ProfileEnvironmentAssignment(const std::wstring& id);
+
 std::wstring ProfileExtensionArguments(const std::wstring& id);
 
 // ` --profile "<name>"` for the VS Code profile this account's windows are

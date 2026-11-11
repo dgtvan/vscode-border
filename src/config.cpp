@@ -130,6 +130,17 @@ Config LoadConfig(const std::wstring& path) {
                 }
             }
             cfg.aiIndicatorProviders = providers;
+        } else if (key == "ai_cli_terminal") {
+            if (_stricmp(val.c_str(), "auto") == 0 || val.empty()) {
+                cfg.aiCliTerminal = AiCliTerminal::Auto;
+            } else if (_stricmp(val.c_str(), "windows-terminal") == 0) {
+                cfg.aiCliTerminal = AiCliTerminal::WindowsTerminal;
+            } else if (_stricmp(val.c_str(), "cmd") == 0) {
+                cfg.aiCliTerminal = AiCliTerminal::Cmd;
+            } else {
+                LogWarn(L"config: ai_cli_terminal has unrecognized value [%hs] -- using auto", val.c_str());
+                cfg.aiCliTerminal = AiCliTerminal::Auto;
+            }
         } else if (key == "usage_meter_enabled") {
             cfg.usageMeterEnabled = (val == "1" || _stricmp(val.c_str(), "true") == 0);
         } else if (key == "usage_meter_refresh_minutes") {
@@ -156,13 +167,15 @@ Config LoadConfig(const std::wstring& path) {
         providersJoined += p;
     }
 
-    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_fixed_match_taskbar=%d project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X label_alias_format=[%ls] verbose_logging=%d colors=%zu ai_indicator_enabled=%d ai_indicator_provider=%hs usage_meter_enabled=%d usage_meter_refresh_minutes=%d",
+    Log(L"config: loaded thickness=%d opacity=%d rescan_ms=%d show_label=%d show_project_list=%d project_list_fixed_match_taskbar=%d project_list_opacity_normal=%d project_list_opacity_hover=%d project_list_activate_on_hover=%d label_height=%d label_font_size=%d label_text_color_auto=%d label_text_color=%06X label_alias_format=[%ls] verbose_logging=%d colors=%zu ai_indicator_enabled=%d ai_indicator_provider=%hs usage_meter_enabled=%d usage_meter_refresh_minutes=%d ai_cli_terminal=%ls",
         cfg.thickness, cfg.opacity, cfg.rescanIntervalMs, cfg.showLabel, cfg.showProjectList,
         cfg.projectListFixedMatchTaskbar,
         cfg.projectListOpacityNormal, cfg.projectListOpacityHover, cfg.projectListActivateOnHover,
         cfg.labelHeight, cfg.labelFontSize,
         cfg.labelTextColorAuto, (unsigned)((GetRValue(cfg.labelTextColor) << 16) | (GetGValue(cfg.labelTextColor) << 8) | GetBValue(cfg.labelTextColor)),
         cfg.labelAliasFormat.c_str(), cfg.verboseLogging, cfg.palette.size(), cfg.aiIndicatorEnabled, providersJoined.c_str(),
-        cfg.usageMeterEnabled, cfg.usageMeterRefreshMinutes);
+        cfg.usageMeterEnabled, cfg.usageMeterRefreshMinutes,
+        cfg.aiCliTerminal == AiCliTerminal::WindowsTerminal ? L"windows-terminal"
+            : cfg.aiCliTerminal == AiCliTerminal::Cmd ? L"cmd" : L"auto");
     return cfg;
 }

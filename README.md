@@ -121,6 +121,7 @@ first build):
 | `ai_indicator_provider` | Comma-separated AI services to source it from: `claude` and `codex` (implemented), and/or `copilot` (reserved, not yet implemented). Default `claude,codex`. |
 | `ai_indicator_color_working` / `_attention` / `_waiting` | Hex `RRGGBB` colors for the 3 states -- see below. |
 | `ai_indicator_border_color` | Indicator border color: `auto` (black/white by contrast) or a fixed hex `RRGGBB`. Default `auto`. |
+| `ai_cli_terminal` | Which terminal an [AI CLI launch](#ai-cli-launches) opens in: `auto` (Windows Terminal when installed, else a console window), `windows-terminal`, or `cmd`. Default `auto`. |
 | `usage_meter_enabled` | Show usage rings at the right end of the project list HUD (`true`/`false` -- see [Claude usage rings](#claude-usage-rings) and [Codex usage rings](#codex-usage-rings)). Default `true`; also the master switch for Codex rings. |
 | `usage_meter_refresh_minutes` | How often to re-read Claude and enabled Codex usage, in minutes (1-60). Default `5`. |
 | `profile_<N>_type` / `_profile_path` | Ten shared assistant account slots: `Claude`, `Codex`, or `None`. Empty type or path means no assistant. Paths are explicit absolute folders; no implicit default account. See [Assistant profiles](#assistant-profiles). |
@@ -211,7 +212,7 @@ apply to.
 
 Right-clicking a HUD item (or its border label chip -- both act on the same
 window) opens a menu of everything you can do with that window's project,
-grouped top to bottom: reopen, directory actions, alias actions,
+grouped top to bottom: reopen, AI CLI, directory actions, alias actions,
 favourites, close.
 
 ![Context menu on a HUD item, showing the directory, alias and favourites groups](assets/item-menu.png)
@@ -224,6 +225,12 @@ favourites, close.
   one forward. If the window is still open a minute later (the close was
   cancelled), nothing is reopened. The submenu is omitted when there is no
   other configured account.
+- **Open in AI CLI** starts a terminal CLI session in this window's folder
+  -- see [AI CLI launches](#ai-cli-launches). It's a submenu of the accounts
+  whose CLI is installed, this window's own included: unlike **Reopen As**
+  this doesn't touch the window, it just opens a terminal beside it. The
+  submenu is omitted when no CLI is installed, and for a window whose folder
+  isn't known.
 - **Copy Directory Path** puts the window's open folder on the clipboard as
   plain text.
 - **Open Directory in File Explorer** opens that folder in a new Explorer
@@ -282,13 +289,16 @@ window switches it over to the folder's own alias, if any.
 Clicking the fixed "+" square at the end of the project list HUD opens a
 menu. **Start VS Code** opens a brand-new, empty VS Code window -- with
 [assistant profiles](#assistant-profiles) configured it's a
-submenu of which profile to open it as. Below it, past a divider, is
+submenu of which profile to open it as. **Start AI CLI** sits beside it and
+does the same for a terminal CLI session, started in your user profile
+folder -- see [AI CLI launches](#ai-cli-launches). Below them, past a divider, is
 **Recent** (see below), then past another divider a
 **Favourites** submenu: your saved favourite projects/folders
 sorted by name, one submenu per favourite -- hover a favourite's name to expand it to
 **Open in New Window As** (a submenu of the assistant profiles to open it as;
 on an open folder it just brings its window forward, whatever profile that
-runs), **Copy Directory Path** / **Open Directory in File Explorer** (as
+runs), **Open in AI CLI** (a terminal CLI session in that folder -- see
+[AI CLI launches](#ai-cli-launches)), **Copy Directory Path** / **Open Directory in File Explorer** (as
 on a HUD item), **Set Alias...** / **Clear Alias** (the same
 [aliases](#project-list-hud-aliases) as on a HUD item, so a favourite can be
 renamed without opening it -- the edit box appears just above the "+"
@@ -317,6 +327,60 @@ covers folders opened before the app was running. Each one has the same
 submenu as a favourite, with **Add to Favourites** when it isn't one yet.
 Its name and alias follow the same label a window with that folder open
 would show -- for a git checkout, the repo and the branch it's on now.
+
+### AI CLI launches
+
+Besides opening VS Code windows, the hub can start an AI coding assistant as
+a **terminal CLI session**, on the same [assistant
+profiles](#assistant-profiles) the window launches use:
+
+- **Start AI CLI**, in the "+" button's menu next to **Start VS Code**,
+  starts a session with no project, in your user profile folder.
+- **Open in AI CLI**, on a HUD item's right-click menu and on each
+  favourite/recent project in the "+" button's menu, starts one in that
+  project's folder.
+
+Both are submenus of which account to run as, in profile slot order, with
+the same names and icons as the window launches. The account is what picks
+the CLI: a Claude account runs Claude Code's `claude`, pointed at that
+account's folder via `CLAUDE_CONFIG_DIR`, so two accounts' sessions stay
+signed in as different accounts in the same way two VS Code windows do.
+
+Only Claude Code's CLI is supported right now. Codex's is wired in as a
+switched-off entry (`AiClis()` in `src/ai_cli.cpp`) so onboarding it is that
+one entry plus confirming where its installer puts `codex.exe`; everything
+else -- the menus, the account handling, the terminal hosting -- is already
+provider-neutral, and `CODEX_HOME` is already the variable
+`ProfileEnvironmentAssignment` hands out for a Codex account. Until then, a
+Codex account simply doesn't appear in these two menus, and neither does any
+account whose CLI isn't installed. An installed CLI is looked for on `PATH`
+first, then where its own installer puts it (`%USERPROFILE%\.local\bin\claude.exe`, `%APPDATA%\npm\claude.cmd`). If
+no CLI is installed at all, the menus are left out entirely.
+
+With no accounts configured, both entries appear as plain items that run the
+one installed CLI without pointing it at any account folder, i.e. signed in
+as whatever your own environment already selects -- the counterpart to
+**Start VS Code** opening a window without an assistant.
+
+The session runs in Windows Terminal when it's installed, otherwise in a
+plain console window; `ai_cli_terminal` forces one or the other. The window
+is hosted by `cmd` with `/k`, so it stays after the CLI exits and its last
+output (an error, say) is still on screen.
+
+The account variable is set *inside* the command line (`set
+CLAUDE_CONFIG_DIR=...`) rather than passed as a process environment, because
+`wt.exe` is only a stub: when a Windows Terminal is already running it hands
+the request over and *that* process spawns the shell, with its own
+environment. An environment block would therefore have reached the session
+only when no Windows Terminal happened to be running -- the account would
+have been silently wrong about half the time. One consequence: a folder or
+account path containing a `;` can't go through `wt.exe` at all (it reads `;`
+as a tab separator, with no escape that survives the handoff), so those
+launches fall back to a console window, with a log line saying so.
+
+A CLI session is a launch and nothing more: the terminal window gets no
+border, no hub item, no AI status dot and no usage ring of its own. Those
+all remain VS Code-only.
 
 ### AI status indicator
 
@@ -543,6 +607,9 @@ The **Start VS Code**, **Open in New Window As**, and **Reopen As** menus
 show only configured accounts, using their profile names without added
 provider prefixes. Reopen As works for empty windows too. With no accounts
 configured, ordinary start/open actions launch a window without an assistant.
+The same accounts drive **Start AI CLI** / **Open in AI CLI**, which list
+only those whose terminal CLI is installed -- see
+[AI CLI launches](#ai-cli-launches).
 
 ```ini
 profile_1_type=Claude
@@ -881,6 +948,9 @@ to pick up worktrees created after the app started.
 - `src/layered_rendering.*` -- shared alpha-blended text helpers for layered windows.
 - `src/tray_icon.*` -- tray icon warning-badge compositing.
 - `src/diagnostic_snapshot.*` -- tray menu's Capture Diagnostic Snapshot (screenshot + monitor/DPI/geometry report).
+- `src/ai_cli.*` -- starts an assistant's terminal CLI on a given account and folder (see "AI CLI launches"
+  above): the per-provider CLI table, locating the executable, choosing the terminal host, and carrying the
+  account variable through the command line.
 - `src/vscode_cli.*` -- locates VS Code's `code`/`code-insiders` CLI shim; opens new VS Code windows and closes all of them (shared by the hub and the tray menu).
 - `src/vscode_installs.*` -- remembers VS Code's install from its windows (`vscode_installs.ini`), so a new
   window can be opened once none is open, without configuration.

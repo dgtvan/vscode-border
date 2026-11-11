@@ -1,5 +1,6 @@
 #include "project_list_hud.h"
 
+#include "ai_cli.h"
 #include "assistant_profile.h"
 #include "codex_usage.h"
 #include "favourites.h"
@@ -850,8 +851,39 @@ static void AppendProfileMenuItem(HMENU m, UINT id, const std::wstring& profile)
     if (mii.hbmpItem) SetMenuItemInfoW(m, GetMenuItemCount(m) - 1, TRUE, &mii);
 }
 
+// Appends the AI CLI launch entry, named `text` (e.g. L"Start AI CLI",
+// L"Open in AI CLI"), to `menu`: a submenu of the configured accounts whose
+// provider CLI is installed (`cliProfiles` -- see AiCliProfileIds), or, when
+// no accounts are configured at all but a CLI is installed, a single plain
+// item that runs it on whatever account its environment selects -- the same
+// shape "Start VS Code" takes with no accounts. Nothing is appended when
+// there is no CLI to run, so a machine without one never sees the entry.
+// Command ids are `base + the account's index in cliProfiles`, and plain
+// `base` for the account-less item. `separatorAfter` adds a trailing
+// separator (for an entry that is its own group), `boldFirst` marks the
+// first account as the submenu's default item.
+static void AppendCliMenu(HMENU menu, UINT base, const std::vector<std::wstring>& cliProfiles, const wchar_t* text,
+                          bool grayed, bool separatorAfter, bool boldFirst) {
+    if (cliProfiles.empty() && !AnyAiCliInstalled()) return;
+    if (cliProfiles.empty()) {
+        AppendMenuW(menu, MF_STRING | (grayed ? MF_GRAYED : 0), base, text);
+    } else if (grayed) {
+        // Same as the other items while an entry is still loading: shown, so
+        // the menu's shape doesn't shift as that data arrives, but unusable.
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, text);
+    } else {
+        HMENU cliMenu = CreatePopupMenu();
+        for (size_t slot = 0; slot < cliProfiles.size(); slot++) {
+            AppendProfileMenuItem(cliMenu, base + (UINT)slot, cliProfiles[slot]);
+        }
+        if (boldFirst) SetMenuDefaultItem(cliMenu, base, FALSE);
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)cliMenu, text);
+    }
+    if (separatorAfter) AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+}
+
 static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index, POINT screenPt) {
-    // Groups top to bottom: reopen, directory, window, alias, favourites, close. No path means VS
+    // Groups top to bottom: reopen, AI CLI, directory, window, alias, favourites, close. No path means VS
     // Code hasn't recorded this window's folder in its own workspaceStorage
     // (e.g. a multi-root workspace) -- nothing to copy/open in Explorer or
     // for a favourite to reopen later, so the directory and favourites
@@ -881,8 +913,10 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     HMENU menu = CreatePopupMenu();
     UINT itemFlags = MF_STRING | (loading ? MF_GRAYED : 0);
     // Reopen As ids: kReopenAsBase + the configured profile's index.
-    const UINT kReopenAsBase = 0x100;
+    // Open in AI CLI ids: kOpenCliBase + the CLI-capable profile's index.
+    const UINT kReopenAsBase = 0x100, kOpenCliBase = 0x200;
     const std::vector<std::wstring> profiles = ConfiguredProfileIds();
+    const std::vector<std::wstring> cliProfiles = AiCliProfileIds();
     if (loading && !profiles.empty()) {
         AppendMenuW(menu, itemFlags, 0, L"Reopen As");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -900,7 +934,14 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
             DestroyMenu(reopenMenu);
         }
     }
+    // "Open in AI CLI" starts a terminal CLI session for this item's folder
+    // (see ai_cli.h) -- a launch alongside the window, not a replacement for
+    // it, so unlike "Reopen As" it doesn't touch the window and the item's
+    // own account is listed too. Left off with no path: a CLI session with
+    // nowhere to run is just a shell in the user's home folder, which the
+    // "+" button's "Start AI CLI" already offers.
     if (hasPath || loading) {
+        AppendCliMenu(menu, kOpenCliBase, cliProfiles, L"Open in AI CLI", loading, true, false);
         AppendMenuW(menu, itemFlags, 5, L"Copy Directory Path");
         AppendMenuW(menu, itemFlags, 6, L"Open Directory in File Explorer");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -929,7 +970,17 @@ static void ShowItemContextMenu(HWND hud, ProjectListHudState* state, int index,
     state->contextMenuOpen = true; // see UpdateProjectListHud's guard
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
     state->contextMenuOpen = false;
-    DestroyMenu(menu); // recursively destroys the Reopen As submenu too
+    DestroyMenu(menu); // recursively destroys the Reopen As and Open in AI CLI submenus too
+    if (cmd >= (int)kOpenCliBase) {
+        size_t slot = (size_t)(cmd - (int)kOpenCliBase);
+        if (index < 0 || index >= (int)state->entries.size()) return;
+        if (!cliProfiles.empty() && slot >= cliProfiles.size()) return;
+        const ProjectListHudEntry& entry = state->entries[index];
+        std::wstring profile = cliProfiles.empty() ? std::wstring() : cliProfiles[slot];
+        Log(L"hud item menu: [%ls] -> Open in AI CLI as [%ls]", entry.label.c_str(), ProfileName(profile).c_str());
+        OpenAiCliSession(entry.path, L"hud-item-open-in-ai-cli", profile);
+        return;
+    }
     if (cmd >= (int)kReopenAsBase) {
         size_t slot = (size_t)(cmd - (int)kReopenAsBase);
         if (index < 0 || index >= (int)state->entries.size() || slot >= profiles.size()) return;
@@ -1003,6 +1054,7 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     const size_t kRecentFolderCount = 10;
     std::vector<FavouriteProject> favourites = LoadFavourites();
     const std::vector<std::wstring> profiles = ConfiguredProfileIds();
+    const std::vector<std::wstring> cliProfiles = AiCliProfileIds();
 
     // Show each favourite by its live alias, so one set from here (or from
     // label_aliases.ini) shows without waiting for the folder to be opened.
@@ -1047,13 +1099,20 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     // Command ids: per project i, toggle favourite = 1 + i, set alias =
     // kSetAliasBase + i, clear alias = kClearAliasBase + i, copy path =
     // kCopyPathBase + i, open in Explorer = kExplorerBase + i, open as profile
-    // slot j = kOpenAsBase + i*kOpenAsStride + j; start as profile slot j =
-    // kStartAsBase + j, well above any project's -- decoded back on return
-    // below. Profile slots index only the configured accounts.
+    // slot j = kOpenAsBase + i*kOpenAsStride + j, open in the AI CLI as
+    // profile slot j = kOpenCliBase + i*kOpenAsStride + j; start as profile
+    // slot j = kStartAsBase + j and start the AI CLI as profile slot j =
+    // kStartCliBase + j, both well above any project's -- decoded back on
+    // return below, highest base first. Profile slots index only the
+    // configured accounts, and the AI CLI's only those of them whose
+    // provider CLI is installed (see AiCliProfileIds), so a project's
+    // kOpenAsBase slot j and its kOpenCliBase slot j need not be the same
+    // account.
     const UINT kSetAliasBase = 0x400, kClearAliasBase = 0x800;
     const UINT kCopyPathBase = 0xC00, kExplorerBase = 0x1000;
     const UINT kOpenAsBase = 0x2000, kOpenAsStride = 16; // ten configured accounts
-    const UINT kStartAsBase = 0x8000;
+    const UINT kOpenCliBase = 0x4000; // same stride as kOpenAsBase
+    const UINT kStartAsBase = 0x8000, kStartCliBase = 0x9000;
     HMENU menu = CreatePopupMenu();
     if (profiles.empty()) {
         AppendMenuW(menu, MF_STRING, kStartAsBase, L"Start VS Code");
@@ -1065,6 +1124,9 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
         SetMenuDefaultItem(startMenu, kStartAsBase, FALSE);
         AppendMenuW(menu, MF_POPUP, (UINT_PTR)startMenu, L"Start VS Code");
     }
+    // Same group as "Start VS Code": both start a fresh session with no
+    // project, one as a window and one as a terminal CLI.
+    AppendCliMenu(menu, kStartCliBase, cliProfiles, L"Start AI CLI", false, false, true);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     auto appendProjects = [&](size_t first, size_t last, const wchar_t* title, const wchar_t* emptyText) {
@@ -1082,6 +1144,8 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
                 }
                 AppendMenuW(sub, MF_POPUP, (UINT_PTR)asMenu, L"Open in New Window As");
             }
+            AppendCliMenu(sub, kOpenCliBase + (UINT)i * kOpenAsStride, cliProfiles, L"Open in AI CLI", false, false,
+                          false);
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(sub, MF_STRING, kCopyPathBase + (UINT)i, L"Copy Directory Path");
             AppendMenuW(sub, MF_STRING, kExplorerBase + (UINT)i, L"Open Directory in File Explorer");
@@ -1103,15 +1167,32 @@ static void ShowNewWindowButtonMenu(HWND hud, ProjectListHudState* state, POINT 
     state->contextMenuOpen = true; // see UpdateProjectListHud's guard
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, screenPt.x, screenPt.y, 0, hud, nullptr);
     state->contextMenuOpen = false;
-    DestroyMenu(menu); // recursively destroys the Start VS Code, Favourites, Recent, per-project and open-as submenus too
+    DestroyMenu(menu); // recursively destroys the Start VS Code, Start AI CLI, Favourites, Recent, per-project,
+                       // open-as and open-in-AI-CLI submenus too
 
     if (cmd <= 0) return;
+    if (cmd >= (int)kStartCliBase) {
+        size_t slot = (size_t)(cmd - (int)kStartCliBase);
+        if (!cliProfiles.empty() && slot >= cliProfiles.size()) return;
+        OpenAiCliSession(L"", L"hud-new-window-button-ai-cli",
+                         cliProfiles.empty() ? std::wstring() : cliProfiles[slot]);
+        return;
+    }
     if (cmd >= (int)kStartAsBase) {
         size_t slot = (size_t)(cmd - (int)kStartAsBase);
         if (profiles.empty() && slot == 0)
             OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button");
         else if (slot < profiles.size())
             OpenNewVSCodeWindow(AnyTrackedWindow(state), L"", L"hud-new-window-button", profiles[slot]);
+        return;
+    }
+    if (cmd >= (int)kOpenCliBase) {
+        size_t i = (size_t)(cmd - (int)kOpenCliBase) / kOpenAsStride;
+        size_t slot = (size_t)(cmd - (int)kOpenCliBase) % kOpenAsStride;
+        if (i >= projects.size() || (!cliProfiles.empty() && slot >= cliProfiles.size())) return;
+        OpenAiCliSession(projects[i].path,
+                         i < favouriteCount ? L"hud-favourite-open-in-ai-cli" : L"hud-recent-open-in-ai-cli",
+                         cliProfiles.empty() ? std::wstring() : cliProfiles[slot]);
         return;
     }
     if (cmd >= (int)kOpenAsBase) {

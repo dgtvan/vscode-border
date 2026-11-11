@@ -8,6 +8,10 @@
 
 enum class ProfileType { None, Claude, Codex };
 
+// Which terminal an AI CLI launch opens in (see ai_cli.h). Auto prefers
+// Windows Terminal and falls back to a plain console window.
+enum class AiCliTerminal { Auto, WindowsTerminal, Cmd };
+
 // One account folder. Empty type/path is never an implicit account.
 struct Profile {
     ProfileType type = ProfileType::None;
@@ -54,6 +58,9 @@ struct Config {
     COLORREF aiIndicatorColorWaiting = RGB(52, 199, 89);
     bool aiIndicatorBorderColorAuto = true; // true = auto black/white contrast against the item's own color
     COLORREF aiIndicatorBorderColor = RGB(255, 255, 255); // used when aiIndicatorBorderColorAuto is false
+
+    // Terminal an AI CLI launch opens in -- see ai_cli.h.
+    AiCliTerminal aiCliTerminal = AiCliTerminal::Auto;
 
     // Usage rings on the hub, one pair per enabled assistant profile.
     bool usageMeterEnabled = true;
