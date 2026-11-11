@@ -853,18 +853,17 @@ static void AppendProfileMenuItem(HMENU m, UINT id, const std::wstring& profile)
 
 // Appends the AI CLI launch entry, named `text` (e.g. L"Start AI CLI",
 // L"Open in AI CLI"), to `menu`: a submenu of the configured accounts whose
-// provider CLI is installed (`cliProfiles` -- see AiCliProfileIds), or, when
-// no accounts are configured at all but a CLI is installed, a single plain
-// item that runs it on whatever account its environment selects -- the same
-// shape "Start VS Code" takes with no accounts. Nothing is appended when
-// there is no CLI to run, so a machine without one never sees the entry.
-// Command ids are `base + the account's index in cliProfiles`, and plain
-// `base` for the account-less item. `separatorAfter` adds a trailing
-// separator (for an entry that is its own group), `boldFirst` marks the
-// first account as the submenu's default item.
+// provider has a CLI (`cliProfiles` -- see AiCliProfileIds), or, when there
+// is no such account, a single plain item that runs the first provider's CLI
+// on whatever account the environment selects -- the same shape "Start VS
+// Code" takes with no accounts. Whether the CLI is installed is not checked
+// here: an account is listed either way and a missing CLI reports itself in
+// the terminal (see ai_cli.h). Command ids are `base + the account's index
+// in cliProfiles`, and plain `base` for the account-less item.
+// `separatorAfter` adds a trailing separator (for an entry that is its own
+// group), `boldFirst` marks the first account as the submenu's default item.
 static void AppendCliMenu(HMENU menu, UINT base, const std::vector<std::wstring>& cliProfiles, const wchar_t* text,
                           bool grayed, bool separatorAfter, bool boldFirst) {
-    if (cliProfiles.empty() && !AnyAiCliInstalled()) return;
     if (cliProfiles.empty()) {
         AppendMenuW(menu, MF_STRING | (grayed ? MF_GRAYED : 0), base, text);
     } else if (grayed) {

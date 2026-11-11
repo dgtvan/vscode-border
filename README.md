@@ -226,11 +226,10 @@ favourites, close.
   cancelled), nothing is reopened. The submenu is omitted when there is no
   other configured account.
 - **Open in AI CLI** starts a terminal CLI session in this window's folder
-  -- see [AI CLI launches](#ai-cli-launches). It's a submenu of the accounts
-  whose CLI is installed, this window's own included: unlike **Reopen As**
-  this doesn't touch the window, it just opens a terminal beside it. The
-  submenu is omitted when no CLI is installed, and for a window whose folder
-  isn't known.
+  -- see [AI CLI launches](#ai-cli-launches). It's a submenu of the
+  assistant accounts, this window's own included: unlike **Reopen As** this
+  doesn't touch the window, it just opens a terminal beside it. Left off for
+  a window whose folder isn't known.
 - **Copy Directory Path** puts the window's open folder on the clipboard as
   plain text.
 - **Open Directory in File Explorer** opens that folder in a new Explorer
@@ -342,25 +341,36 @@ profiles](#assistant-profiles) the window launches use:
 
 Both are submenus of which account to run as, in profile slot order, with
 the same names and icons as the window launches. The account is what picks
-the CLI: a Claude account runs Claude Code's `claude`, pointed at that
-account's folder via `CLAUDE_CONFIG_DIR`, so two accounts' sessions stay
+the CLI: a Claude account runs Claude Code's `claude` pointed at that
+account's folder via `CLAUDE_CONFIG_DIR`, a Codex account runs `codex`
+pointed at its folder via `CODEX_HOME`. So two accounts' sessions stay
 signed in as different accounts in the same way two VS Code windows do.
 
-Only Claude Code's CLI is supported right now. Codex's is wired in as a
-switched-off entry (`AiClis()` in `src/ai_cli.cpp`) so onboarding it is that
-one entry plus confirming where its installer puts `codex.exe`; everything
-else -- the menus, the account handling, the terminal hosting -- is already
-provider-neutral, and `CODEX_HOME` is already the variable
-`ProfileEnvironmentAssignment` hands out for a Codex account. Until then, a
-Codex account simply doesn't appear in these two menus, and neither does any
-account whose CLI isn't installed. An installed CLI is looked for on `PATH`
-first, then where its own installer puts it (`%USERPROFILE%\.local\bin\claude.exe`, `%APPDATA%\npm\claude.cmd`). If
-no CLI is installed at all, the menus are left out entirely.
+**Whether the CLI is actually installed isn't this app's business.** Every
+configured Claude or Codex account is listed, and a CLI that can't be found
+is run by its bare command name, so the terminal answers for itself:
 
-With no accounts configured, both entries appear as plain items that run the
-one installed CLI without pointing it at any account folder, i.e. signed in
-as whatever your own environment already selects -- the counterpart to
-**Start VS Code** opening a window without an assistant.
+```
+'codex' is not recognized as an internal or external command,
+operable program or batch file.
+```
+
+The window stays open on that message (`cmd /k`), which is the same thing
+you'd see typing the command yourself -- better than an account quietly
+missing from a menu with no way to tell why. The executable is looked for on
+`PATH` first, then where its own installer puts it (`%USERPROFILE%\.local\bin\`,
+`%APPDATA%\npm\`); a log line records when it fell back to the bare name.
+
+With no Claude or Codex account configured, both entries appear as plain
+items that run the first provider's CLI without pointing it at any account
+folder, i.e. signed in as whatever your own environment already selects --
+the counterpart to **Start VS Code** opening a window without an assistant.
+
+Adding another provider later (Copilot, say) is one row in `AiClis()` in
+`src/ai_cli.cpp` -- command name, executable names, installer paths. The
+menus, the account handling and the terminal hosting are provider-neutral,
+and `ProfileEnvironmentAssignment` already supplies whichever variable
+points that provider at an account folder.
 
 The session runs in Windows Terminal when it's installed, otherwise in a
 plain console window; `ai_cli_terminal` forces one or the other. The window
@@ -608,7 +618,7 @@ show only configured accounts, using their profile names without added
 provider prefixes. Reopen As works for empty windows too. With no accounts
 configured, ordinary start/open actions launch a window without an assistant.
 The same accounts drive **Start AI CLI** / **Open in AI CLI**, which list
-only those whose terminal CLI is installed -- see
+every Claude and Codex account whether or not its CLI is installed -- see
 [AI CLI launches](#ai-cli-launches).
 
 ```ini

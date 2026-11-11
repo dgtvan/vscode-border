@@ -43,19 +43,15 @@ struct AiCliTool {
 
 // The only provider-specific knowledge in this file. Everything else --
 // which accounts are offered, which terminal hosts the session, how the
-// account environment is applied -- is shared.
+// account environment is applied -- is shared. A row being here and
+// `supported` is what offers that provider; whether its CLI is installed is
+// not checked before launching (see ai_cli.h).
 const std::vector<AiCliTool>& AiClis() {
     static const std::vector<AiCliTool> tools = {
         {ProfileType::Claude, L"claude", true,
          {L"claude.exe", L"claude.cmd"},
          {L"%USERPROFILE%\\.local\\bin\\claude.exe", L"%APPDATA%\\npm\\claude.cmd"}},
-        // Ready, not offered: Codex's CLI hasn't been tried against this
-        // app's per-account environment (CODEX_HOME -- see
-        // ProfileEnvironmentAssignment), so launching it would be a guess.
-        // Setting `supported` here is what onboards it; the paths below are
-        // the ones its installers are expected to use, to be confirmed at
-        // that point.
-        {ProfileType::Codex, L"codex", false,
+        {ProfileType::Codex, L"codex", true,
          {L"codex.exe", L"codex.cmd"},
          {L"%USERPROFILE%\\.local\\bin\\codex.exe", L"%APPDATA%\\npm\\codex.cmd"}},
     };
@@ -113,11 +109,15 @@ std::wstring CmdExe() {
 // the value, spaces included, and a space before `&` would end up inside the
 // value. /k rather than /c so the window stays after the CLI exits, which is
 // where its last output (including an error) is.
-std::wstring CmdCommand(const std::wstring& exePath, const std::wstring& profile) {
+//
+// `cli` is already quoted if it needs to be -- a resolved path is, a bare
+// command name is not, so a CLI that isn't installed is reported by cmd as
+// `'codex' is not recognized` rather than `'"codex"' is not recognized`.
+std::wstring CmdCommand(const std::wstring& cli, const std::wstring& profile) {
     std::wstring assignment = ProfileEnvironmentAssignment(profile);
     std::wstring command = L"/d /k ";
     if (!assignment.empty()) command += L"set " + assignment + L"&";
-    return command + L"\"" + exePath + L"\"";
+    return command + cli;
 }
 
 // Launches `commandLine` with `workingDir` as the working directory. The
@@ -172,18 +172,9 @@ bool FindAiCli(ProfileType type, std::wstring& outExePath) {
 std::vector<std::wstring> AiCliProfileIds() {
     std::vector<std::wstring> ids;
     for (const std::wstring& id : ConfiguredProfileIds()) {
-        std::wstring exePath;
-        if (FindAiCli(TypeOfProfile(id), exePath)) ids.push_back(id);
+        if (AiCliSupported(TypeOfProfile(id))) ids.push_back(id);
     }
     return ids;
-}
-
-bool AnyAiCliInstalled() {
-    for (const AiCliTool& tool : AiClis()) {
-        std::wstring exePath;
-        if (tool.supported && FindAiCli(tool.type, exePath)) return true;
-    }
-    return false;
 }
 
 bool OpenAiCliSession(const std::wstring& folder, const wchar_t* reason, const std::wstring& profile) {
@@ -195,27 +186,35 @@ bool OpenAiCliSession(const std::wstring& folder, const wchar_t* reason, const s
         return false;
     }
     // With no account the launch is account-less (ProfileType::None has no
-    // CLI of its own): run the one supported CLI that is installed, leaving
-    // the environment to say which account it signs in as.
+    // CLI of its own): run the first supported provider's CLI, leaving the
+    // environment to say which account it signs in as.
     ProfileType type = profile.empty() ? ProfileType::None : TypeOfProfile(profile);
-    std::wstring exePath;
-    if (!FindAiCli(type, exePath)) {
-        if (!profile.empty()) {
-            LogWarn(L"AI CLI launch refused: no %ls CLI found on PATH or in the usual install locations, for "
-                    L"profile [%ls]",
-                    FindTool(type) ? FindTool(type)->command : L"AI", ProfileName(profile).c_str());
-            return false;
-        }
+    if (!AiCliSupported(type)) {
         for (const AiCliTool& tool : AiClis()) {
-            if (tool.supported && FindAiCli(tool.type, exePath)) {
+            if (tool.supported) {
                 type = tool.type;
                 break;
             }
         }
-        if (exePath.empty()) {
-            LogWarn(L"AI CLI launch refused: no supported CLI found on PATH or in the usual install locations");
-            return false;
-        }
+    }
+    const AiCliTool* tool = FindTool(type);
+    if (!tool || !tool->supported) {
+        LogWarn(L"AI CLI launch refused: no supported CLI to run for profile [%ls]", ProfileName(profile).c_str());
+        return false;
+    }
+    // Not finding it is not a refusal: the bare command name goes to cmd,
+    // which reports it is not recognized, in a window that stays open. That
+    // is a clearer answer than a silent no-op, and installing the CLI is not
+    // this app's job (see ai_cli.h).
+    std::wstring exePath;
+    std::wstring cli;
+    if (FindAiCli(type, exePath)) {
+        cli = L"\"" + exePath + L"\"";
+    } else {
+        cli = tool->command;
+        Log(L"AI CLI: no %ls executable on PATH or in the usual install locations -- running it by name, so the "
+            L"terminal reports whether it exists",
+            tool->command);
     }
 
     std::wstring workingDir = folder;
@@ -227,7 +226,7 @@ bool OpenAiCliSession(const std::wstring& folder, const wchar_t* reason, const s
         workingDir = EnvVar(L"USERPROFILE");
     }
 
-    std::wstring cmdCommand = CmdCommand(exePath, profile);
+    std::wstring cmdCommand = CmdCommand(cli, profile);
     std::wstring windowsTerminal;
     bool wantWindowsTerminal = g_config.aiCliTerminal != AiCliTerminal::Cmd;
     bool haveWindowsTerminal = wantWindowsTerminal && FindWindowsTerminal(windowsTerminal);
